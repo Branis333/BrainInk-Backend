@@ -1,0 +1,18 @@
+fastapi
+#for pandatic
+pydantic[email]
+uvicorn[standing]
+#fo authentication
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]
+#end or auth
+#for db
+sqlalchemy
+psycopg2-binary
+#end db
+#env file
+python-dotenv
+requests
+pycryptodome
+google-auth
