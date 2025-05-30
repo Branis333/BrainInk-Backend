@@ -38,6 +38,14 @@ class UserResponse(BaseModel):
 class GoogleAuthRequest(BaseModel):
     token: str
 
+class UpdateUserRequest(BaseModel):
+    fname: Optional[str] = None
+    lname: Optional[str] = None
+    email: Optional[str] = None
+    username: Optional[str] = None
+    current_password: Optional[str] = None
+    new_password: Optional[str] = None
+
 # Authentication function
 def authenticate_user(username: str, password: str, db):
     user = (
@@ -306,4 +314,143 @@ async def google_login(db: db_dependency, google_request: GoogleAuthRequest):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Login error: {str(e)}"
+        )
+
+@router.put("/update-profile", response_model=UserResponse)
+async def update_user_profile(
+    db: db_dependency, 
+    current_user: user_dependency, 
+    update_request: UpdateUserRequest
+):
+    """
+    Update current user's profile information
+    """
+    try:
+        # Get current user from database
+        user = db.query(User).filter(User.id == current_user["user_id"]).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # If updating password, verify current password
+        if update_request.new_password:
+            if not update_request.current_password:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Current password is required to set new password"
+                )
+            
+            if not bcrypt_context.verify(update_request.current_password, user.password_hash):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Current password is incorrect"
+                )
+            
+            user.password_hash = bcrypt_context.hash(update_request.new_password)
+        
+        # Check if new username is already taken (if provided)
+        if update_request.username and update_request.username != user.username:
+            existing_username = db.query(User).filter(
+                User.username == update_request.username,
+                User.id != user.id
+            ).first()
+            
+            if existing_username:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Username already taken"
+                )
+            
+            user.username = update_request.username
+        
+        # Check if new email is already taken (if provided)
+        if update_request.email and update_request.email != user.email:
+            existing_email = db.query(User).filter(
+                User.email == update_request.email,
+                User.id != user.id
+            ).first()
+            
+            if existing_email:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Email already taken"
+                )
+            
+            user.email = update_request.email
+        
+        # Update other fields if provided
+        if update_request.fname is not None:
+            user.fname = update_request.fname
+        
+        if update_request.lname is not None:
+            user.lname = update_request.lname
+        
+        # Save changes
+        db.commit()
+        db.refresh(user)
+        
+        # Create new token (in case username changed)
+        token = create_access_token(user.username, user.id)
+        
+        # Get updated user info
+        user_info = ReturnUser.from_orm(user).dict()
+        
+        # Encrypt data
+        data = encrypt_any_data({"UserInfo": user_info})
+        
+        return {"access_token": token, "token_type": "bearer", "encrypted_data": data}
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Update error: {str(e)}"
+        )
+
+@router.delete("/delete-account")
+async def delete_user_account(
+    db: db_dependency,
+    current_user: user_dependency,
+    password: str
+):
+    """
+    Delete current user's account (requires password confirmation)
+    """
+    try:
+        # Get current user from database
+        user = db.query(User).filter(User.id == current_user["user_id"]).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Verify password for security
+        if not bcrypt_context.verify(password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid password"
+            )
+        
+        # Delete user from database
+        db.delete(user)
+        db.commit()
+        
+        return {"message": "Account successfully deleted"}
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Deletion error: {str(e)}"
         )
