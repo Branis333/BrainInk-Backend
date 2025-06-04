@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import os
 
 from db.connection import db_dependency
-from models.users_models import User, OTP  # Import User class directly
+from models.users_models import User# Import User class directly
 from schemas.schemas import CreateUserRequest, UserLogin, Token
 from schemas.return_schemas import ReturnUser
 from functions.encrypt import encrypt_any_data

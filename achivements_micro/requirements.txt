@@ -16,3 +16,6 @@ python-dotenv
 requests
 pycryptodome
 google-auth
+python-dotenv 
+psycopg2
+dotenv
