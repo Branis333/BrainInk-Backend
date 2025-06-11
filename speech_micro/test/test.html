@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Speech Transcription Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        .controls { margin-bottom: 20px; }
+        .status { padding: 10px; margin: 10px 0; border-radius: 5px; }
+        .status.connected { background-color: #d4edda; color: #155724; }
+        .status.error { background-color: #f8d7da; color: #721c24; }
+        .transcription { border: 1px solid #ddd; padding: 15px; height: 300px; overflow-y: auto; background: #f8f9fa; }
+        button { padding: 10px 20px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; }
+        .start-btn { background-color: #28a745; color: white; }
+        .stop-btn { background-color: #dc3545; color: white; }
+        select { padding: 8px; margin: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Live Speech Transcription Test</h1>
+        
+        <div class="controls">
+            <select id="languageSelect">
+                <option value="english">English</option>
+                <option value="spanish">Spanish</option>
+                <option value="french">French</option>
+                <option value="german">German</option>
+            </select>
+            <button id="startBtn" class="start-btn">Start Recording</button>
+            <button id="stopBtn" class="stop-btn" disabled>Stop Recording</button>
+        </div>
+        
+        <div id="statusDiv" class="status">Ready to start recording</div>
+        <div id="transcriptionDiv" class="transcription"></div>
+    </div>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const statusDiv = document.getElementById('statusDiv');
+        const transcriptionDiv = document.getElementById('transcriptionDiv');
+        const languageSelect = document.getElementById('languageSelect');
+        
+        let socket = null;
+        let mediaRecorder = null;
+        let isRecording = false;
+        let audioChunks = [];
+        
+        startBtn.addEventListener('click', startRecording);
+        stopBtn.addEventListener('click', stopRecording);
+        
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
+                
+                // Connect to WebSocket
+                const language = languageSelect.value;
+                const wsUrl = `ws://localhost:8000/speech/live-transcribe${language ? `?language=${language}` : ''}`;
+                socket = new WebSocket(wsUrl);
+                
+                socket.onopen = () => {
+                    statusDiv.textContent = 'Connected. Starting recording...';
+                    statusDiv.className = 'status connected';
+                };
+                
+                socket.onmessage = (event) => {
+                    const message = JSON.parse(event.data);
+                    
+                    if (message.type === 'transcription' || message.type === 'final_transcription') {
+                        const p = document.createElement('p');
+                        p.textContent = `[${message.timestamp}] ${message.text}`;
+                        if (message.is_final) {
+                            p.style.fontWeight = 'bold';
+                            p.style.color = 'green';
+                        }
+                        transcriptionDiv.appendChild(p);
+                        transcriptionDiv.scrollTop = transcriptionDiv.scrollHeight;
+                    } else if (message.type === 'error') {
+                        statusDiv.textContent = `Error: ${message.error}`;
+                        statusDiv.className = 'status error';
+                    }
+                };
+                
+                socket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    statusDiv.textContent = 'WebSocket connection error';
+                    statusDiv.className = 'status error';
+                };
+                
+                socket.onclose = () => {
+                    statusDiv.textContent = 'Connection closed';
+                    statusDiv.className = 'status';
+                };
+                
+                // Set up MediaRecorder with better settings
+                const options = {
+                    mimeType: 'audio/webm;codecs=opus',
+                    audioBitsPerSecond: 64000  // Lower bitrate for better compatibility
+                };
+                
+                // Try different MIME types if webm fails
+                let mimeType = 'audio/webm;codecs=opus';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'audio/webm';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        mimeType = 'audio/ogg;codecs=opus';
+                        if (!MediaRecorder.isTypeSupported(mimeType)) {
+                            mimeType = 'audio/wav';
+                        }
+                    }
+                }
+                
+                console.log('Using MIME type:', mimeType);
+                
+                mediaRecorder = new MediaRecorder(stream, {
+                    mimeType: mimeType,
+                    audioBitsPerSecond: 64000
+                });
+                
+                audioChunks = [];
+                
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0 && socket && socket.readyState === WebSocket.OPEN) {
+                        // Convert to base64 and send
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                            const base64Data = reader.result.split(',')[1];
+                            if (base64Data && base64Data.length > 100) {  // Only send if we have substantial data
+                                socket.send(JSON.stringify({
+                                    type: 'audio_chunk',
+                                    audio_data: base64Data,
+                                    mime_type: mimeType
+                                }));
+                            }
+                        };
+                        reader.readAsDataURL(event.data);
+                    }
+                };
+                
+                mediaRecorder.onstop = () => {
+                    if (socket && socket.readyState === WebSocket.OPEN) {
+                        socket.send(JSON.stringify({
+                            type: 'stop_recording'
+                        }));
+                    }
+                    
+                    // Stop all tracks
+                    stream.getTracks().forEach(track => track.stop());
+                };
+                
+                mediaRecorder.onerror = (error) => {
+                    console.error('MediaRecorder error:', error);
+                    statusDiv.textContent = 'Recording error';
+                    statusDiv.className = 'status error';
+                };
+                
+                // Start recording with shorter intervals for better streaming
+                mediaRecorder.start(1000); // 1 second intervals
+                isRecording = true;
+                
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+                statusDiv.textContent = 'Recording... Speak now!';
+                statusDiv.className = 'status connected';
+                
+            } catch (error) {
+                console.error('Error starting recording:', error);
+                statusDiv.textContent = `Error: ${error.message}`;
+                statusDiv.className = 'status error';
+            }
+        }
+        
+        function stopRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+            }
+            
+            if (socket) {
+                socket.close();
+                socket = null;
+            }
+            
+            startBtn.disabled = false;
+            stopBtn.disabled = true;
+            statusDiv.textContent = 'Recording stopped';
+        }
+    </script>
+</body>
+</html>
