@@ -22,6 +22,8 @@ from utils.speech_flags import WHISPER_AVAILABLE, SPEECH_RECOGNITION_AVAILABLE
 
 executor = ThreadPoolExecutor(max_workers=2)
 
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
+
 class SpeechService:
     def __init__(self, db: Session):
         self.db = db
@@ -709,3 +711,26 @@ class SpeechService:
             import traceback
             traceback.print_exc()
             return None
+
+    def transcribe_with_whisper(self, audio_path: str, language: Optional[str] = None):
+        try:
+            print(f"Loading Whisper model ({WHISPER_MODEL_SIZE})...")
+            model = whisper.load_model(WHISPER_MODEL_SIZE)  # Use the environment variable
+            print("Whisper model loaded successfully")
+            
+            # Transcribe
+            result = model.transcribe(
+                audio_path,
+                language=language,
+                verbose=False
+            )
+            
+            return {
+                "success": True,
+                "text": result["text"].strip(),
+                "language": result.get("language"),
+                "confidence": None  # Whisper doesn't return confidence scores
+            }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)}
