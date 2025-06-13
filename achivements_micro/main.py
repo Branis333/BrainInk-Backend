@@ -2,10 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import achivements as auth
 from Endpoints import tournaments
+from Endpoints import questions  # Add this
 from db.connection import engine
 from db.database import test_connection
-import models.models as models
+import models.models as models  # This now includes QuestionBank
 import models.tournament_models as tournament_models
+from models.question_bank import QuestionBank, Base as QuestionBankBase  # Add Base import
+
 from sqlalchemy import text
 
 app = FastAPI(
@@ -28,26 +31,24 @@ app.add_middleware(
 async def startup_event():
     print("Testing Supabase connection...")
     try:
-        # Test connection directly here
         with engine.connect() as connection:
             result = connection.execute(text("SELECT NOW() as current_time, version() as db_version;"))
             row = result.fetchone()
             print(f"✅ Supabase connection successful!")
             print(f"Database time: {row[0]}")
             print(f"Database version: {row[1]}")
-            
-        # Create database tables for both models
         print("Creating database tables...")
         models.Base.metadata.create_all(bind=engine)
         tournament_models.Base.metadata.create_all(bind=engine)
+        QuestionBankBase.metadata.create_all(bind=engine)  # <-- Explicitly create QuestionBank table
         print("✅ All database tables created successfully!")
-        
     except Exception as e:
         print(f"❌ Supabase connection failed: {e}")
 
 # Include routers
 app.include_router(auth.router)
 app.include_router(tournaments.router)
+app.include_router(questions.router)
 
 @app.get("/")
 def root():
@@ -72,25 +73,34 @@ def health_check():
 def initialize_database():
     """Initialize database with default ranks, achievements, and tournament tables"""
     try:
-        # Create tables if they don't exist
         print("Creating achievement tables...")
         models.Base.metadata.create_all(bind=engine)
-        
         print("Creating tournament tables...")
         tournament_models.Base.metadata.create_all(bind=engine)
-        
+        print("Creating question bank table...")
+        QuestionBankBase.metadata.create_all(bind=engine)  # <-- Explicitly create QuestionBank table
         print("✅ All tables created successfully!")
-        
         return {
             "message": "Database initialized successfully!", 
             "tables_created": [
                 "achievements", "ranks", "users", "user_achievements", "user_ranks", "otp",
                 "tournaments", "tournament_participants", "tournament_brackets", 
-                "tournament_matches", "tournament_invitations", "tournament_questions"
+                "tournament_matches", "tournament_invitations", "tournament_questions",
+                "question_bank"
             ]
         }
     except Exception as e:
         return {"error": f"Initialization failed: {str(e)}"}
+
+@app.post("/populate-questions")
+def populate_question_bank_endpoint():
+    """Populate the question bank with sample questions"""
+    try:
+        from utils.populate_questions import populate_question_bank
+        populate_question_bank()
+        return {"message": "Question bank populated successfully!", "questions_added": 50}
+    except Exception as e:
+        return {"error": f"Failed to populate questions: {str(e)}"}
 
 @app.get("/database-status")
 def database_status():
