@@ -1,9 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import achivements as auth
+from Endpoints import tournaments
 from db.connection import engine
 from db.database import test_connection
 import models.models as models
+import models.tournament_models as tournament_models
 from sqlalchemy import text
 
 app = FastAPI(
@@ -33,14 +35,19 @@ async def startup_event():
             print(f"✅ Supabase connection successful!")
             print(f"Database time: {row[0]}")
             print(f"Database version: {row[1]}")
+            
+        # Create database tables for both models
+        print("Creating database tables...")
+        models.Base.metadata.create_all(bind=engine)
+        tournament_models.Base.metadata.create_all(bind=engine)
+        print("✅ All database tables created successfully!")
+        
     except Exception as e:
         print(f"❌ Supabase connection failed: {e}")
 
-# Create database tables
-models.Base.metadata.create_all(bind=engine)
-
 # Include routers
 app.include_router(auth.router)
+app.include_router(tournaments.router)
 
 @app.get("/")
 def root():
@@ -63,13 +70,52 @@ def health_check():
 
 @app.post("/initialize-database")
 def initialize_database():
-    """Initialize database with default ranks and achievements"""
+    """Initialize database with default ranks, achievements, and tournament tables"""
     try:
-        from init_db import main as init_main
-        success = init_main()
-        if success:
-            return {"message": "Database initialized successfully!"}
-        else:
-            return {"error": "Failed to initialize database"}
+        # Create tables if they don't exist
+        print("Creating achievement tables...")
+        models.Base.metadata.create_all(bind=engine)
+        
+        print("Creating tournament tables...")
+        tournament_models.Base.metadata.create_all(bind=engine)
+        
+        print("✅ All tables created successfully!")
+        
+        return {
+            "message": "Database initialized successfully!", 
+            "tables_created": [
+                "achievements", "ranks", "users", "user_achievements", "user_ranks", "otp",
+                "tournaments", "tournament_participants", "tournament_brackets", 
+                "tournament_matches", "tournament_invitations", "tournament_questions"
+            ]
+        }
     except Exception as e:
         return {"error": f"Initialization failed: {str(e)}"}
+
+@app.get("/database-status")
+def database_status():
+    """Get detailed database status and table information"""
+    try:
+        with engine.connect() as connection:
+            # Check if tables exist
+            tables_query = text("""
+                SELECT table_name 
+                FROM information_schema.tables 
+                WHERE table_schema = 'public'
+                ORDER BY table_name;
+            """)
+            result = connection.execute(tables_query)
+            tables = [row[0] for row in result.fetchall()]
+            
+            return {
+                "database_connected": True,
+                "total_tables": len(tables),
+                "tables": tables
+            }
+    except Exception as e:
+        return {
+            "database_connected": False,
+            "error": str(e),
+            "total_tables": 0,
+            "tables": []
+        }
