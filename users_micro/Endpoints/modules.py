@@ -544,7 +544,7 @@ async def call_kana_ai(prompt: str) -> str:
     try:
         # Try multiple Kana service URLs/ports with the new quiz generation endpoints
         kana_urls = [
-            # "https://kana-backend-app.onrender.com",
+            "https://kana-backend-app.onrender.com",
             "http://localhost:10000",
         ]
         
