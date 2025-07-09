@@ -11,7 +11,6 @@ class CreateUserRequest(BaseModel):  # registeration Schema
     email: Optional[EmailStr] = None
     password: Optional[str] = None
     class Config:
-        orm_mode = True
         from_attributes = True
 
 
@@ -20,7 +19,6 @@ class Token(BaseModel):  # token validation schema
     token_type: Optional[str] = None
     UserInfo: ReturnUser
     class Config:
-        orm_mode = True
         from_attributes = True
 
 
@@ -29,13 +27,11 @@ class FromData(BaseModel):  # token validation schema
     username: Optional[str]
     password: Optional[str]
     class Config:
-        orm_mode = True
         from_attributes = True
 
 class UserLogin(BaseModel):  # login schema
     username: Optional[str] = None
     password: Optional[str] = None
     class Config:
-        orm_mode = True
         from_attributes = True
 
