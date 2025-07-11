@@ -19,3 +19,5 @@ google-auth
 python-dotenv 
 psycopg2
 dotenv
+aiofiles
+httpx
