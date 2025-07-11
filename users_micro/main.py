@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules
+from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus
 from db.connection import engine
 from db.database import test_connection
 import models.users_models as models
@@ -43,7 +43,8 @@ async def startup_event():
         print(f"✅ Loaded school_invitations router with {len(school_invitations.router.routes)} endpoints")
         print(f"✅ Loaded class_room router with {len(class_room.router.routes)} endpoints")
         print(f"✅ Loaded modules router with {len(modules.router.routes)} endpoints")
-        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes)
+        print(f"✅ Loaded syllabus router with {len(syllabus.router.routes)} endpoints")
+        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes)
         print(f"🔄 Total endpoints: {total_endpoints}")
     except Exception as e:
         print(f"❌ Supabase connection failed: {e}")
@@ -60,6 +61,7 @@ app.include_router(grades.router, prefix="/study-area/grades")
 app.include_router(school_invitations.router, prefix="/study-area")
 app.include_router(class_room.router, prefix="/study-area")
 app.include_router(modules.router, prefix="/study-area/modules/quizzes")
+app.include_router(syllabus.router, prefix="/study-area")
 
 @app.get("/")
 def root():

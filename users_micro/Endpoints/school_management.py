@@ -60,7 +60,7 @@ async def create_school_request(
             status_code=400, 
             detail="You already have a pending or approved school request"
         )
-    
+
     # Check if school name already exists
     if db.query(School).filter(School.name == school_request.school_name).first():
         raise HTTPException(
@@ -584,6 +584,79 @@ async def get_average_session_time(db: db_dependency, current_user: user_depende
 
 # === ROLE MANAGEMENT ENDPOINTS ===
 
+@router.get("/role/current-role")
+async def get_current_user_role(db: db_dependency, current_user: user_dependency):
+    """
+    Get current user's roles and associated school information - accessible by any authenticated user
+    """
+    user = db.query(User).filter(User.id == current_user["user_id"]).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    user_roles = _get_user_roles(db, current_user["user_id"])
+    
+    response = {
+        "user_id": user.id,
+        "username": user.username,
+        "email": user.email,
+        "full_name": f"{user.fname} {user.lname}".strip() if user.fname or user.lname else None,
+        "roles": [role.value for role in user_roles],
+        "is_student": UserRole.student in user_roles,
+        "is_teacher": UserRole.teacher in user_roles,
+        "is_principal": UserRole.principal in user_roles,
+        "is_admin": UserRole.admin in user_roles
+    }
+    
+    # Add role-specific school information
+    school_info = {}
+    
+    # If user is a principal, get their school
+    if UserRole.principal in user_roles:
+        school = db.query(School).filter(School.principal_id == user.id).first()
+        if school:
+            school_info["principal_school"] = {
+                "school_id": school.id,
+                "school_name": school.name,
+                "school_address": school.address
+            }
+    
+    # If user is a teacher, get their school(s)
+    if UserRole.teacher in user_roles:
+        teacher_records = db.query(Teacher).filter(Teacher.user_id == user.id).all()
+        if teacher_records:
+            teacher_schools = []
+            for teacher in teacher_records:
+                school = db.query(School).filter(School.id == teacher.school_id).first()
+                if school:
+                    teacher_schools.append({
+                        "school_id": school.id,
+                        "school_name": school.name,
+                        "teacher_id": teacher.id
+                    })
+            if teacher_schools:
+                school_info["teacher_schools"] = teacher_schools
+    
+    # If user is a student, get their school(s)
+    if UserRole.student in user_roles:
+        student_records = db.query(Student).filter(Student.user_id == user.id).all()
+        if student_records:
+            student_schools = []
+            for student in student_records:
+                school = db.query(School).filter(School.id == student.school_id).first()
+                if school:
+                    student_schools.append({
+                        "school_id": school.id,
+                        "school_name": school.name,
+                        "student_id": student.id
+                    })
+            if student_schools:
+                school_info["student_schools"] = student_schools
+    
+    if school_info:
+        response["school_info"] = school_info
+    
+    return response
+
 @router.post("/roles/assign")
 async def assign_role_to_user(
     db: db_dependency, 
@@ -754,28 +827,6 @@ async def get_user_status(db: db_dependency, current_user: user_dependency):
     # Add role-specific information
     if UserRole.principal in user_roles:
         school = db.query(School).filter(School.principal_id == user.id).first()
-        if school:
-            status["principal_info"] = {
-                "school_id": school.id,
-                "school_name": school.name,
-                "school_address": school.address
-            }
-        else:
-            # Check for pending school requests
-            pending_request = db.query(SchoolRequest).filter(
-                SchoolRequest.principal_id == user.id,
-                SchoolRequest.status == SchoolRequestStatus.pending
-            ).first()
-            if pending_request:
-                status["principal_info"] = {
-                    "pending_school_request": {
-                        "id": pending_request.id,
-                        "school_name": pending_request.school_name,
-                        "status": pending_request.status.value,
-                        "created_at": pending_request.created_date
-                    }
-                }
-    
     if UserRole.teacher in user_roles:
         teacher_records = db.query(Teacher).filter(Teacher.user_id == user.id).all()
         if teacher_records:

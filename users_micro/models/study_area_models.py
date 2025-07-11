@@ -180,6 +180,7 @@ class Subject(Base):
     teachers = relationship("Teacher", secondary=subject_teachers, back_populates="subjects")
     students = relationship("Student", secondary=subject_students, back_populates="subjects")
     assignments = relationship("Assignment", back_populates="subject", cascade="all, delete-orphan")
+    syllabuses = relationship("Syllabus", back_populates="subject", cascade="all, delete-orphan")
     
     # Ensure subject names are unique per school
     __table_args__ = (
@@ -247,4 +248,80 @@ class SchoolInvitation(Base):
     # Ensure one active invitation per email per school per type
     __table_args__ = (
         UniqueConstraint('email', 'school_id', 'invitation_type', name='uq_email_school_type'),
+    )
+
+# --- Syllabus Models ---
+
+class SyllabusStatus(enum.Enum):
+    draft = "draft"
+    active = "active"
+    archived = "archived"
+
+class Syllabus(Base):
+    __tablename__ = "syllabuses"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)  # Principal or Teacher
+    term_length_weeks = Column(Integer, nullable=False, default=16)  # Number of weeks in the term
+    textbook_filename = Column(String, nullable=True)  # Original textbook filename
+    textbook_path = Column(String, nullable=True)  # Path to uploaded textbook
+    ai_processing_status = Column(String, default="pending")  # pending, processing, completed, failed
+    ai_analysis_data = Column(Text, nullable=True)  # JSON data from K.A.N.A. analysis
+    status = Column(Enum(SyllabusStatus), default=SyllabusStatus.draft)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    subject = relationship("Subject", back_populates="syllabuses")
+    creator = relationship("User", foreign_keys=[created_by])
+    weekly_plans = relationship("WeeklyPlan", back_populates="syllabus", cascade="all, delete-orphan")
+
+class WeeklyPlan(Base):
+    __tablename__ = "weekly_plans"
+    id = Column(Integer, primary_key=True, index=True)
+    syllabus_id = Column(Integer, ForeignKey("syllabuses.id"), nullable=False)
+    week_number = Column(Integer, nullable=False)  # 1, 2, 3, etc.
+    title = Column(String, nullable=False)  # e.g., "Introduction to Algebra"
+    description = Column(Text, nullable=True)
+    learning_objectives = Column(Text, nullable=True)  # JSON array of objectives
+    topics_covered = Column(Text, nullable=True)  # JSON array of topics
+    textbook_chapters = Column(String, nullable=True)  # e.g., "Chapters 1-2"
+    textbook_pages = Column(String, nullable=True)  # e.g., "Pages 15-45"
+    assignments = Column(Text, nullable=True)  # JSON array of assignments
+    resources = Column(Text, nullable=True)  # JSON array of additional resources
+    notes = Column(Text, nullable=True)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    syllabus = relationship("Syllabus", back_populates="weekly_plans")
+    
+    # Ensure unique week numbers per syllabus
+    __table_args__ = (
+        UniqueConstraint('syllabus_id', 'week_number', name='uq_syllabus_week'),
+    )
+
+class StudentSyllabusProgress(Base):
+    __tablename__ = "student_syllabus_progress"
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
+    syllabus_id = Column(Integer, ForeignKey("syllabuses.id"), nullable=False)
+    current_week = Column(Integer, default=1)
+    completed_weeks = Column(Text, nullable=True)  # JSON array of completed week numbers
+    progress_percentage = Column(Integer, default=0)  # 0-100
+    last_accessed = Column(DateTime, default=datetime.utcnow)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    student = relationship("Student")
+    syllabus = relationship("Syllabus")
+    
+    # Ensure one progress record per student per syllabus
+    __table_args__ = (
+        UniqueConstraint('student_id', 'syllabus_id', name='uq_student_syllabus_progress'),
     )
