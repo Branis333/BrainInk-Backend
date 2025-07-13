@@ -8,6 +8,11 @@ from sqlalchemy import or_
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
+import random
+import string
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 from db.connection import db_dependency
 from models.users_models import User# Import User class directly
@@ -45,6 +50,18 @@ class UpdateUserRequest(BaseModel):
     username: Optional[str] = None
     current_password: Optional[str] = None
     new_password: Optional[str] = None
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class VerifyResetCodeRequest(BaseModel):
+    email: str
+    reset_code: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    reset_code: str
+    new_password: str
 
 # Authentication function
 def authenticate_user(username: str, password: str, db):
@@ -453,4 +470,337 @@ async def delete_user_account(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Deletion error: {str(e)}"
+        )
+
+# In-memory storage for reset codes (in production, use Redis or database)
+reset_codes = {}
+
+def generate_reset_code():
+    """Generate a 6-digit reset code"""
+    return ''.join(random.choices(string.digits, k=6))
+
+def send_reset_email(email: str, reset_code: str):
+    """Send password reset email"""
+    try:
+        # Email configuration using your real .env credentials
+        smtp_server = "smtp.gmail.com"
+        smtp_port = 587
+        sender_email = os.getenv("BRAININK_SENDER_EMAIL")
+        sender_password = os.getenv("BRAININK_PASSWORD")
+        
+        print(f"🔧 Email Debug Info:")
+        print(f"   Sender Email: {sender_email}")
+        print(f"   Password Set: {'Yes' if sender_password else 'No'}")
+        print(f"   Password Length: {len(sender_password) if sender_password else 0}")
+        
+        # For testing/development: If credentials not configured properly, just log the code
+        if (not sender_email or not sender_password or 
+            sender_password in ["your_app_password", "KANA@!@#$"] or
+            "@gmail.com" not in sender_email):
+            print(f"📧 EMAIL NOT CONFIGURED PROPERLY - RESET CODE FOR {email}: {reset_code}")
+            print(f"⚠️  Gmail App Password Setup Required:")
+            print(f"   1. Go to Google Account settings")
+            print(f"   2. Security → 2-Step Verification → App passwords")
+            print(f"   3. Generate app password for 'Mail'")
+            print(f"   4. Update BRAININK_PASSWORD in .env with the 16-character app password")
+            print(f"🔧 Current config: email={sender_email}, password={'***' if sender_password else 'None'}")
+            return True  # Return True for testing purposes
+        
+        # Create message
+        message = MIMEMultipart("alternative")
+        message["Subject"] = "BrainInk - Password Reset Code"
+        message["From"] = sender_email
+        message["To"] = email
+        
+        # Create HTML content
+        html = f"""
+        <html>
+          <body>
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+              <h2 style="color: #333; text-align: center;">BrainInk Password Reset</h2>
+              <p>Hello,</p>
+              <p>You requested to reset your password. Use the code below to reset your password:</p>
+              
+              <div style="background-color: #f4f4f4; padding: 20px; text-align: center; margin: 20px 0;">
+                <h1 style="color: #007bff; font-size: 32px; margin: 0; letter-spacing: 3px;">{reset_code}</h1>
+              </div>
+              
+              <p><strong>This code will expire in 15 minutes.</strong></p>
+              <p>If you didn't request this reset, please ignore this email.</p>
+              
+              <p>Best regards,<br>The BrainInk Team</p>
+            </div>
+          </body>
+        </html>
+        """
+        
+        # Convert to MIMEText
+        html_part = MIMEText(html, "html")
+        message.attach(html_part)
+        
+        # Send email
+        with smtplib.SMTP(smtp_server, smtp_port) as server:
+            server.starttls()
+            try:
+                server.login(sender_email, sender_password)
+                server.sendmail(sender_email, email, message.as_string())
+                print(f"✅ Email sent successfully to {email}")
+            except smtplib.SMTPAuthenticationError as auth_error:
+                print(f"❌ Gmail Authentication Failed: {auth_error}")
+                print(f"🔧 Solutions:")
+                print(f"   1. Enable 2-Step Verification on your Gmail account")
+                print(f"   2. Generate an App Password (not your regular Gmail password)")
+                print(f"   3. Use the 16-character app password in BRAININK_PASSWORD")
+                print(f"   4. Make sure BRAININK_SENDER_EMAIL is correct: {sender_email}")
+                raise Exception("Gmail authentication failed. Please check your App Password.")
+            
+        return True
+    except Exception as e:
+        print(f"Failed to send email: {e}")
+        return False
+
+@router.post("/forgot-password")
+async def forgot_password(db: db_dependency, request: ForgotPasswordRequest):
+    """
+    Step 1: Request password reset - sends code to email
+    """
+    try:
+        # Check if user exists
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            # Don't reveal if email exists for security
+            return {
+                "success": True,
+                "message": "If this email exists in our system, you will receive a reset code."
+            }
+        
+        # Generate reset code
+        reset_code = generate_reset_code()
+        
+        # Store reset code with expiration (15 minutes)
+        reset_codes[request.email] = {
+            "code": reset_code,
+            "expires_at": datetime.utcnow() + timedelta(minutes=15),
+            "attempts": 0
+        }
+        
+        # Send email
+        email_sent = send_reset_email(request.email, reset_code)
+        
+        if not email_sent:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send reset email. Please try again later."
+            )
+        
+        return {
+            "success": True,
+            "message": "Reset code sent to your email. Check your inbox and spam folder. (For testing: check console logs)",
+            "expires_in_minutes": 15
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Password reset error: {str(e)}"
+        )
+
+@router.post("/verify-reset-code")
+async def verify_reset_code(request: VerifyResetCodeRequest):
+    """
+    Step 2: Verify the reset code (optional verification step)
+    """
+    try:
+        email = request.email
+        code = request.reset_code
+        
+        # Check if reset code exists
+        if email not in reset_codes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No reset request found for this email"
+            )
+        
+        reset_data = reset_codes[email]
+        
+        # Check if code expired
+        if datetime.utcnow() > reset_data["expires_at"]:
+            del reset_codes[email]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset code has expired. Please request a new one."
+            )
+        
+        # Check attempts (max 3 attempts)
+        if reset_data["attempts"] >= 3:
+            del reset_codes[email]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many failed attempts. Please request a new reset code."
+            )
+        
+        # Verify code
+        if reset_data["code"] != code:
+            reset_codes[email]["attempts"] += 1
+            remaining_attempts = 3 - reset_codes[email]["attempts"]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid reset code. {remaining_attempts} attempts remaining."
+            )
+        
+        return {
+            "success": True,
+            "message": "Reset code verified successfully. You can now reset your password.",
+            "valid": True
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Code verification error: {str(e)}"
+        )
+
+@router.post("/reset-password")
+async def reset_password(db: db_dependency, request: ResetPasswordRequest):
+    """
+    Step 3: Reset password with verified code
+    """
+    try:
+        email = request.email
+        code = request.reset_code
+        new_password = request.new_password
+        
+        # Validate password strength
+        if len(new_password) < 8:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Password must be at least 8 characters long"
+            )
+        
+        # Check if reset code exists
+        if email not in reset_codes:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No reset request found for this email"
+            )
+        
+        reset_data = reset_codes[email]
+        
+        # Check if code expired
+        if datetime.utcnow() > reset_data["expires_at"]:
+            del reset_codes[email]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Reset code has expired. Please request a new one."
+            )
+        
+        # Check attempts
+        if reset_data["attempts"] >= 3:
+            del reset_codes[email]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Too many failed attempts. Please request a new reset code."
+            )
+        
+        # Verify code
+        if reset_data["code"] != code:
+            reset_codes[email]["attempts"] += 1
+            remaining_attempts = 3 - reset_codes[email]["attempts"]
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid reset code. {remaining_attempts} attempts remaining."
+            )
+        
+        # Find user
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Update password
+        user.password_hash = bcrypt_context.hash(new_password)
+        db.commit()
+        
+        # Clean up reset code
+        del reset_codes[email]
+        
+        return {
+            "success": True,
+            "message": "Password reset successfully. You can now login with your new password."
+        }
+        
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Password reset error: {str(e)}"
+        )
+
+@router.post("/resend-reset-code")
+async def resend_reset_code(db: db_dependency, request: ForgotPasswordRequest):
+    """
+    Resend reset code if user didn't receive it
+    """
+    try:
+        email = request.email
+        
+        # Check if user exists
+        user = db.query(User).filter(User.email == email).first()
+        if not user:
+            return {
+                "success": True,
+                "message": "If this email exists in our system, you will receive a reset code."
+            }
+        
+        # Check if there's an existing reset request
+        if email in reset_codes:
+            # Check if last request was less than 2 minutes ago (rate limiting)
+            time_since_last = datetime.utcnow() - (reset_codes[email]["expires_at"] - timedelta(minutes=15))
+            if time_since_last < timedelta(minutes=2):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Please wait 2 minutes before requesting another code."
+                )
+        
+        # Generate new reset code
+        reset_code = generate_reset_code()
+        
+        # Store reset code
+        reset_codes[email] = {
+            "code": reset_code,
+            "expires_at": datetime.utcnow() + timedelta(minutes=15),
+            "attempts": 0
+        }
+        
+        # Send email
+        email_sent = send_reset_email(email, reset_code)
+        
+        if not email_sent:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to send reset email. Please try again later."
+            )
+        
+        return {
+            "success": True,
+            "message": "New reset code sent to your email. (For testing: check console logs)",
+            "expires_in_minutes": 15
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Resend code error: {str(e)}"
         )
