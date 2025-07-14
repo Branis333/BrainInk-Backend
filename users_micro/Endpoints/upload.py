@@ -599,14 +599,31 @@ async def get_image_file(
     if not image:
         raise HTTPException(status_code=404, detail="Image not found")
     
-    # Check if file exists
+    # Check if file exists - handle different path formats
     file_path = Path(image.file_path)
-    if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Image file not found on disk")
+    
+    # If the stored path is absolute, use it directly
+    if file_path.is_absolute() and file_path.exists():
+        actual_path = file_path
+    else:
+        # Try relative to current directory
+        if file_path.exists():
+            actual_path = file_path
+        else:
+            # Try relative to UPLOAD_DIR
+            actual_path = UPLOAD_DIR / file_path.name
+            if not actual_path.exists():
+                # Try the stored path as relative to current dir
+                actual_path = Path(image.file_path.replace('\\', '/'))
+                if not actual_path.exists():
+                    raise HTTPException(
+                        status_code=404, 
+                        detail=f"Image file not found. Searched paths: {file_path}, {UPLOAD_DIR / file_path.name}, {actual_path}"
+                    )
     
     # Return the file
     return FileResponse(
-        path=str(file_path),
+        path=str(actual_path),
         media_type=image.mime_type,
         filename=image.original_filename
     )
