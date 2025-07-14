@@ -325,3 +325,28 @@ class StudentSyllabusProgress(Base):
     __table_args__ = (
         UniqueConstraint('student_id', 'syllabus_id', name='uq_student_syllabus_progress'),
     )
+
+# --- Student Image Model ---
+class StudentImage(Base):
+    __tablename__ = "student_images"
+    id = Column(Integer, primary_key=True, index=True)
+    filename = Column(String, nullable=False)
+    original_filename = Column(String, nullable=False)
+    file_path = Column(String, nullable=False)
+    file_size = Column(Integer, nullable=False)  # Size in bytes
+    mime_type = Column(String, nullable=False)
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=False)  # Teacher who uploaded
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)  # Optional subject association
+    description = Column(Text, nullable=True)
+    tags = Column(String, nullable=True)  # Comma-separated tags for categorization
+    upload_date = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Analysis fields
+    extracted_text = Column(Text, nullable=True)  # OCR extracted text
+    ai_analysis = Column(Text, nullable=True)  # AI analysis results
+    analysis_date = Column(DateTime, nullable=True)
+    
+    # Relationships
+    uploader = relationship("User", foreign_keys=[uploaded_by])
+    subject = relationship("Subject", foreign_keys=[subject_id])
