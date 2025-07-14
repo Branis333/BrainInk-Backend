@@ -1,11 +1,12 @@
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Query
+from fastapi.responses import FileResponse
 from typing import Annotated, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, or_
+from pathlib import Path
 import os
 import shutil
-from pathlib import Path
 import uuid
 
 from db.connection import db_dependency
@@ -576,4 +577,36 @@ async def get_subject_images(
         page=page,
         per_page=per_page,
         total_pages=total_pages
+    )
+
+@router.get("/images-management/{image_id}/file", tags=["Images"])
+async def get_image_file(
+    image_id: int,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Get the actual image file (only by the teacher who uploaded it)
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    image = db.query(StudentImage).filter(
+        StudentImage.id == image_id,
+        StudentImage.uploaded_by == current_user["user_id"],
+        StudentImage.is_active == True
+    ).first()
+    
+    if not image:
+        raise HTTPException(status_code=404, detail="Image not found")
+    
+    # Check if file exists
+    file_path = Path(image.file_path)
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Image file not found on disk")
+    
+    # Return the file
+    return FileResponse(
+        path=str(file_path),
+        media_type=image.mime_type,
+        filename=image.original_filename
     )
