@@ -40,6 +40,8 @@ class User(Base):
     school_requests = relationship("SchoolRequest", foreign_keys="SchoolRequest.principal_id", back_populates="principal")
     student_profile = relationship("Student", back_populates="user", uselist=False)
     teacher_profile = relationship("Teacher", back_populates="user", uselist=False)
+    subjects_created = relationship("Subject", back_populates="creator")
+    uploaded_images = relationship("StudentImage", back_populates="uploader")
     
     def has_role(self, role_name):
         """Check if user has a specific role"""

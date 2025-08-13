@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload
+from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service
 from db.connection import engine
 from db.database import test_connection
 import models.users_models as models
@@ -45,7 +45,8 @@ async def startup_event():
         print(f"✅ Loaded modules router with {len(modules.router.routes)} endpoints")
         print(f"✅ Loaded syllabus router with {len(syllabus.router.routes)} endpoints")
         print(f"✅ Loaded upload router with {len(upload.router.routes)} endpoints")
-        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes)
+        print(f"✅ Loaded kana_service router with {len(kana_service.router.routes)} endpoints")
+        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes)
         print(f"🔄 Total endpoints: {total_endpoints}")
     except Exception as e:
         print(f"❌ Supabase connection failed: {e}")
@@ -64,6 +65,7 @@ app.include_router(class_room.router, prefix="/study-area")
 app.include_router(modules.router, prefix="/study-area/modules/quizzes")
 app.include_router(syllabus.router, prefix="/study-area")
 app.include_router(upload.router, prefix="/study-area")
+app.include_router(kana_service.router, prefix="/kana")
 
 @app.get("/")
 def root():

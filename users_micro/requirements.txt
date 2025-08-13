@@ -21,3 +21,6 @@ psycopg2
 dotenv
 aiofiles
 httpx
+# for bulk image to PDF conversion
+pillow
+reportlab

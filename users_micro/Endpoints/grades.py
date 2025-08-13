@@ -74,6 +74,7 @@ async def create_assignment(
         new_assignment = Assignment(
             title=assignment.title,
             description=assignment.description,
+            rubric=assignment.rubric,
             subtopic=assignment.subtopic,
             subject_id=assignment.subject_id,
             teacher_id=teacher.id,
@@ -90,6 +91,7 @@ async def create_assignment(
             id=new_assignment.id,
             title=new_assignment.title,
             description=new_assignment.description,
+            rubric=new_assignment.rubric,
             subtopic=new_assignment.subtopic,
             subject_id=new_assignment.subject_id,
             teacher_id=new_assignment.teacher_id,
@@ -111,69 +113,92 @@ async def get_teacher_assignments(db: db_dependency, current_user: user_dependen
     """
     Get all assignments created by the current teacher with grade statistics
     """
-    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
-    
-    teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher profile not found")
-    
-    result = []
-    for assignment in teacher.assignments:
-        if not assignment.is_active:
-            continue
+    try:
+        ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+        
+        teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
+        
+        result = []
+        for assignment in teacher.assignments:
+            if not assignment.is_active:
+                continue
+                
+            # Get grade statistics
+            grades = [g for g in assignment.grades if g.is_active]
+            total_students = len(assignment.subject.students)
+            graded_count = len(grades)
+            average_score = None
             
-        # Get grade statistics
-        grades = [g for g in assignment.grades if g.is_active]
-        total_students = len(assignment.subject.students)
-        graded_count = len(grades)
-        average_score = None
-        
-        if grades:
-            avg_points = sum(grade.points_earned for grade in grades) / len(grades)
-            average_score = (avg_points / assignment.max_points) * 100 if assignment.max_points > 0 else 0
-        
-        # Convert grades to response format
-        grade_responses = []
-        for grade in grades:
-            percentage = (grade.points_earned / assignment.max_points) * 100 if assignment.max_points > 0 else 0
-            grade_responses.append(GradeResponse(
-                id=grade.id,
-                assignment_id=grade.assignment_id,
-                student_id=grade.student_id,
-                teacher_id=grade.teacher_id,
-                points_earned=grade.points_earned,
-                feedback=grade.feedback,
-                graded_date=grade.graded_date,
-                is_active=grade.is_active,
-                assignment_title=assignment.title,
-                assignment_max_points=assignment.max_points,
-                student_name=f"{grade.student.user.fname} {grade.student.user.lname}",
+            if grades:
+                avg_points = sum(grade.points_earned for grade in grades) / len(grades)
+                average_score = (avg_points / assignment.max_points) * 100 if assignment.max_points > 0 else 0
+            
+            # Convert grades to response format
+            grade_responses = []
+            for grade in grades:
+                percentage = (grade.points_earned / assignment.max_points) * 100 if assignment.max_points > 0 else 0
+                grade_responses.append(GradeResponse(
+                    id=grade.id,
+                    assignment_id=grade.assignment_id,
+                    student_id=grade.student_id,
+                    teacher_id=grade.teacher_id,
+                    points_earned=grade.points_earned,
+                    feedback=grade.feedback,
+                    graded_date=grade.graded_date,
+                    is_active=grade.is_active,
+                    assignment_title=assignment.title,
+                    assignment_max_points=assignment.max_points,
+                    student_name=f"{grade.student.user.fname} {grade.student.user.lname}",
+                    teacher_name=f"{teacher.user.fname} {teacher.user.lname}",
+                    percentage=percentage
+                ))
+            
+            # Ensure rubric has a value (required by schema)
+            rubric = assignment.rubric or "Grading rubric not provided - please update this assignment with detailed grading criteria."
+            
+            # Ensure description has minimum length and maximum length (required by schema)
+            description = assignment.description or "Assignment description not provided - please update this assignment with detailed instructions."
+            if len(description.strip()) < 10:
+                description = "Assignment description not provided - please update this assignment with detailed instructions and requirements."
+            elif len(description) > 1000:
+                description = description[:997] + "..."
+            
+            assignment_response = AssignmentWithGrades(
+                id=assignment.id,
+                title=assignment.title,
+                description=description,
+                rubric=rubric,
+                subtopic=assignment.subtopic,
+                subject_id=assignment.subject_id,
+                teacher_id=assignment.teacher_id,
+                max_points=assignment.max_points,
+                due_date=assignment.due_date,
+                created_date=assignment.created_date,
+                is_active=assignment.is_active,
+                subject_name=assignment.subject.name,
                 teacher_name=f"{teacher.user.fname} {teacher.user.lname}",
-                percentage=percentage
-            ))
+                grades=grade_responses,
+                total_students=total_students,
+                graded_count=graded_count,
+                average_score=average_score
+            )
+            
+            result.append(assignment_response)
         
-        assignment_response = AssignmentWithGrades(
-            id=assignment.id,
-            title=assignment.title,
-            description=assignment.description,
-            subtopic=assignment.subtopic,
-            subject_id=assignment.subject_id,
-            teacher_id=assignment.teacher_id,
-            max_points=assignment.max_points,
-            due_date=assignment.due_date,
-            created_date=assignment.created_date,
-            is_active=assignment.is_active,
-            subject_name=assignment.subject.name,
-            teacher_name=f"{teacher.user.fname} {teacher.user.lname}",
-            grades=grade_responses,
-            total_students=total_students,
-            graded_count=graded_count,
-            average_score=average_score
-        )
-        
-        result.append(assignment_response)
+        return result
     
-    return result
+    except Exception as e:
+        # Handle database connection errors
+        if "server closed the connection unexpectedly" in str(e) or "Can't reconnect until invalid transaction is rolled back" in str(e):
+            try:
+                db.rollback()
+            except:
+                pass
+            raise HTTPException(status_code=503, detail="Database connection error. Please try again.")
+        else:
+            raise HTTPException(status_code=500, detail=f"Error retrieving assignments: {str(e)}")
 
 @router.get("/assignments-management/subject/{subject_id}", response_model=List[AssignmentResponse])
 async def get_subject_assignments(
@@ -220,10 +245,19 @@ async def get_subject_assignments(
     
     result = []
     for assignment in assignments:
+        # Ensure rubric has a value (required by schema)
+        rubric = assignment.rubric or "Grading rubric not provided - please update this assignment with detailed grading criteria."
+        
+        # Ensure description has minimum length (required by schema)
+        description = assignment.description or "Assignment description not provided - please update this assignment with detailed instructions."
+        if len(description.strip()) < 10:
+            description = "Assignment description not provided - please update this assignment with detailed instructions and requirements."
+        
         result.append(AssignmentResponse(
             id=assignment.id,
             title=assignment.title,
-            description=assignment.description,
+            description=description,
+            rubric=rubric,
             subtopic=assignment.subtopic,
             subject_id=assignment.subject_id,
             teacher_id=assignment.teacher_id,
@@ -291,10 +325,19 @@ async def update_assignment(
         db.commit()
         db.refresh(assignment)
         
+        # Ensure rubric has a value (required by schema)
+        rubric = assignment.rubric or "Grading rubric not provided - please update this assignment with detailed grading criteria."
+        
+        # Ensure description has minimum length (required by schema)
+        description = assignment.description or "Assignment description not provided - please update this assignment with detailed instructions."
+        if len(description.strip()) < 10:
+            description = "Assignment description not provided - please update this assignment with detailed instructions and requirements."
+        
         return AssignmentResponse(
             id=assignment.id,
             title=assignment.title,
-            description=assignment.description,
+            description=description,
+            rubric=rubric,
             subtopic=assignment.subtopic,
             subject_id=assignment.subject_id,
             teacher_id=assignment.teacher_id,
@@ -910,6 +953,162 @@ async def delete_grade(
     """
     Soft delete a grade (only by the teacher who created it)
     """
+
+@router.get("/grades-management/subject/{subject_id}/average")
+async def get_subject_average(
+    subject_id: int,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Get the average grade for a subject (Teachers assigned to subject, Principal)
+    Returns: {subject_id, subject_name, average_percentage, total_grades, student_count, assignment_count}
+    """
+    user_roles = _get_user_roles(db, current_user["user_id"])
+    
+    # Get subject
+    subject = db.query(Subject).filter(Subject.id == subject_id).first()
+    if not subject:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subject not found"
+        )
+    
+    # Check access permissions
+    has_access = False
+    
+    if UserRole.teacher in user_roles:
+        teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+        if teacher and subject in teacher.subjects:
+            has_access = True
+    
+    if UserRole.principal in user_roles:
+        if subject.school.principal_id == current_user["user_id"]:
+            has_access = True
+    
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied. You can only view averages for subjects you teach or manage."
+        )
+    
+    try:
+        # Get all active assignments for this subject
+        assignments = db.query(Assignment).filter(
+            Assignment.subject_id == subject_id,
+            Assignment.is_active == True
+        ).all()
+        
+        # Get all grades for these assignments
+        all_grades = db.query(Grade).filter(
+            Grade.is_active == True
+        ).join(Assignment).filter(
+            Assignment.subject_id == subject_id,
+            Assignment.is_active == True
+        ).all()
+        
+        # Calculate average percentage
+        average_percentage = 0
+        if all_grades:
+            total_percentage = 0
+            valid_grades = 0
+            
+            for grade in all_grades:
+                if grade.assignment.max_points > 0:
+                    percentage = (grade.points_earned / grade.assignment.max_points) * 100
+                    total_percentage += percentage
+                    valid_grades += 1
+            
+            if valid_grades > 0:
+                average_percentage = round(total_percentage / valid_grades, 1)
+        
+        # Get student count for this subject
+        student_count = len(subject.students)
+        assignment_count = len(assignments)
+        
+        # Calculate completion rate
+        total_possible_submissions = student_count * assignment_count
+        completion_rate = 0
+        if total_possible_submissions > 0:
+            completion_rate = round((len(all_grades) / total_possible_submissions) * 100, 1)
+        
+        return {
+            "subject_id": subject_id,
+            "subject_name": subject.name,
+            "average_percentage": average_percentage,
+            "total_grades": len(all_grades),
+            "student_count": student_count,
+            "assignment_count": assignment_count,
+            "completion_rate": completion_rate
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error calculating subject average: {str(e)}"
+        )
+
+@router.get("/grades-management/teacher/overall-completion-rate")
+async def get_teacher_overall_completion_rate(
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Get the overall completion rate across all subjects for the current teacher
+    Returns: {overall_completion_rate, total_students, total_assignments, total_submissions}
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    
+    try:
+        total_possible_submissions = 0
+        total_actual_submissions = 0
+        total_students = 0
+        total_assignments = 0
+        
+        # Process each subject assigned to the teacher
+        for subject in teacher.subjects:
+            # Get assignments for this subject
+            subject_assignments = db.query(Assignment).filter(
+                Assignment.subject_id == subject.id,
+                Assignment.is_active == True
+            ).all()
+            
+            # Get grades for this subject
+            subject_grades = db.query(Grade).filter(
+                Grade.is_active == True
+            ).join(Assignment).filter(
+                Assignment.subject_id == subject.id,
+                Assignment.is_active == True
+            ).all()
+            
+            subject_students = len(subject.students)
+            subject_assignment_count = len(subject_assignments)
+            
+            # Add to totals
+            total_students += subject_students
+            total_assignments += subject_assignment_count
+            total_possible_submissions += subject_students * subject_assignment_count
+            total_actual_submissions += len(subject_grades)
+        
+        # Calculate overall completion rate
+        overall_completion_rate = 0
+        if total_possible_submissions > 0:
+            overall_completion_rate = round((total_actual_submissions / total_possible_submissions) * 100, 1)
+        
+        return {
+            "overall_completion_rate": overall_completion_rate,
+            "total_students": total_students,
+            "total_assignments": total_assignments,
+            "total_possible_submissions": total_possible_submissions,
+            "total_actual_submissions": total_actual_submissions
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating overall completion rate: {str(e)}")
     ensure_user_role(db, current_user["user_id"], UserRole.teacher)
     
     teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()

@@ -1,12 +1,15 @@
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, status
 from typing import Annotated, List
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
+import traceback
+import traceback
 
 from db.connection import db_dependency
 from models.study_area_models import (
-    Role, School, Subject, Student, Teacher, UserRole, Assignment, Grade
+    Role, School, Subject, Student, Teacher, UserRole, Assignment, Grade,
+    StudentImage, StudentPDF, GradingSession
 )
 from models.users_models import User
 from schemas.subjects_schemas import (
@@ -16,7 +19,7 @@ from schemas.subjects_schemas import (
 from schemas.assignments_schemas import (
     AssignmentCreate, AssignmentUpdate, AssignmentResponse, AssignmentWithGrades,
     GradeCreate, GradeUpdate, GradeResponse, StudentGradeReport, SubjectGradesSummary,
-    BulkGradeCreate, BulkGradeResponse
+    BulkGradeCreate, BulkGradeResponse, GradeCheckResponse, GradeDetailResponse
 )
 from Endpoints.auth import get_current_user
 from schemas.direct_join_schemas import SchoolSelectionResponse
@@ -495,8 +498,19 @@ async def create_assignment(
 ):
     """
     Create a new assignment (teachers only - for subjects they teach)
+    Requires: title, description, rubric, subject_id, due_date, max_points
     """
     ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    # Validate required fields
+    if not assignment.description or assignment.description.strip() == "":
+        raise HTTPException(status_code=400, detail="Assignment description is required")
+    
+    if not assignment.rubric or assignment.rubric.strip() == "":
+        raise HTTPException(status_code=400, detail="Assignment rubric is required")
+    
+    if assignment.max_points <= 0:
+        raise HTTPException(status_code=400, detail="Maximum points must be greater than 0")
     
     # Get teacher and verify they teach this subject
     teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
@@ -514,6 +528,7 @@ async def create_assignment(
         db_assignment = Assignment(
             title=assignment.title,
             description=assignment.description,
+            rubric=assignment.rubric,
             subtopic=assignment.subtopic,
             subject_id=assignment.subject_id,
             teacher_id=teacher.id,
@@ -523,7 +538,23 @@ async def create_assignment(
         db.add(db_assignment)
         db.commit()
         db.refresh(db_assignment)
-        return db_assignment
+        
+        # Return response with additional data
+        return AssignmentResponse(
+            id=db_assignment.id,
+            title=db_assignment.title,
+            description=db_assignment.description,
+            rubric=db_assignment.rubric,
+            subtopic=db_assignment.subtopic,
+            subject_id=db_assignment.subject_id,
+            teacher_id=db_assignment.teacher_id,
+            due_date=db_assignment.due_date,
+            max_points=db_assignment.max_points,
+            created_date=db_assignment.created_date,
+            is_active=db_assignment.is_active,
+            subject_name=subject.name if subject else None,
+            teacher_name=f"{teacher.user.fname} {teacher.user.lname}"
+        )
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Assignment creation error: {str(e)}")
@@ -571,7 +602,52 @@ async def get_subject_assignments(
         Assignment.is_active == True
     ).all()
     
-    return assignments
+    # Clean up assignments to ensure they meet schema validation requirements
+    cleaned_assignments = []
+    for assignment in assignments:
+        # Get teacher info for response
+        teacher = db.query(Teacher).filter(Teacher.id == assignment.teacher_id).first()
+        teacher_name = f"{teacher.user.fname} {teacher.user.lname}" if teacher and teacher.user else "Unknown Teacher"
+        
+        # Clean and validate data before creating response
+        description = assignment.description or ""
+        if len(description) < 10:
+            description = "Assignment description not provided - please update this assignment."
+        elif len(description) > 1000:
+            description = description[:997] + "..."
+            
+        rubric = assignment.rubric or ""
+        if len(rubric) < 20:
+            rubric = "Grading rubric not provided - please update this assignment with detailed grading criteria."
+        elif len(rubric) > 2000:
+            rubric = rubric[:1997] + "..."
+            
+        title = assignment.title or "Untitled Assignment"
+        if len(title) > 200:
+            title = title[:197] + "..."
+            
+        subtopic = assignment.subtopic or ""
+        if len(subtopic) > 100:
+            subtopic = subtopic[:97] + "..."
+        
+        cleaned_assignment = AssignmentResponse(
+            id=assignment.id,
+            title=title,
+            description=description,
+            rubric=rubric,
+            subtopic=subtopic,
+            subject_id=assignment.subject_id,
+            teacher_id=assignment.teacher_id,
+            max_points=max(1, assignment.max_points or 100),  # Ensure at least 1 point
+            due_date=assignment.due_date,
+            created_date=assignment.created_date,
+            is_active=assignment.is_active,
+            subject_name=subject.name,
+            teacher_name=teacher_name
+        )
+        cleaned_assignments.append(cleaned_assignment)
+    
+    return cleaned_assignments
 
 @router.put("/assignments/{assignment_id}", response_model=AssignmentResponse)
 async def update_assignment(
@@ -598,22 +674,47 @@ async def update_assignment(
         raise HTTPException(status_code=403, detail="You can only edit assignments you created")
     
     try:
+        # Update fields if provided
         if assignment_update.title is not None:
             assignment.title = assignment_update.title
         if assignment_update.description is not None:
             assignment.description = assignment_update.description
-        if assignment_update.due_date is not None:
-            assignment.due_date = assignment_update.due_date
+        if assignment_update.rubric is not None:
+            assignment.rubric = assignment_update.rubric
+        if assignment_update.subtopic is not None:
+            assignment.subtopic = assignment_update.subtopic
         if assignment_update.max_points is not None:
             assignment.max_points = assignment_update.max_points
+        if assignment_update.due_date is not None:
+            assignment.due_date = assignment_update.due_date
+        if assignment_update.is_active is not None:
+            assignment.is_active = assignment_update.is_active
         
         db.commit()
         db.refresh(assignment)
-        return assignment
+        
+        # Get subject info for response
+        subject = db.query(Subject).filter(Subject.id == assignment.subject_id).first()
+        
+        return AssignmentResponse(
+            id=assignment.id,
+            title=assignment.title,
+            description=assignment.description,
+            rubric=assignment.rubric,
+            subtopic=assignment.subtopic,
+            subject_id=assignment.subject_id,
+            teacher_id=assignment.teacher_id,
+            due_date=assignment.due_date,
+            max_points=assignment.max_points,
+            created_date=assignment.created_date,
+            is_active=assignment.is_active,
+            subject_name=subject.name if subject else None,
+            teacher_name=f"{teacher.user.fname} {teacher.user.lname}"
+        )
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Assignment update error: {str(e)}")
-
+    
 @router.delete("/assignments/{assignment_id}")
 async def delete_assignment(
     assignment_id: int,
@@ -647,6 +748,118 @@ async def delete_assignment(
 
 # === GRADE ENDPOINTS ===
 
+@router.get("/grades/check/{assignment_id}/{student_id}", response_model=GradeCheckResponse)
+async def check_student_grade_exists(
+    assignment_id: int,
+    student_id: int,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Check if a student has already been graded for an assignment
+    Returns grade details if exists, null if not graded yet
+    """
+    try:
+        ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+        
+        # Verify teacher has access to this assignment
+        assignment = db.query(Assignment).join(Subject).filter(Assignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
+        
+        # Get existing grade if it exists
+        existing_grade = db.query(Grade).filter(
+            Grade.assignment_id == assignment_id,
+            Grade.student_id == student_id,
+            Grade.is_active == True
+        ).first()
+        
+        if existing_grade:
+            # Get student and assignment details
+            student = db.query(Student).join(User).filter(Student.id == student_id).first()
+            student_name = f"{student.user.fname} {student.user.lname}" if student and student.user else "Unknown Student"
+            
+            return {
+                "already_graded": True,
+                "grade_id": existing_grade.id,
+                "assignment_id": assignment_id,
+                "assignment_title": assignment.title,
+                "student_id": student_id,
+                "student_name": student_name,
+                "points_earned": existing_grade.points_earned,
+                "max_points": assignment.max_points,
+                "percentage": round((existing_grade.points_earned / assignment.max_points) * 100, 2) if assignment.max_points > 0 else 0,
+                "feedback": existing_grade.feedback if existing_grade.feedback else "",
+                "graded_date": existing_grade.graded_date.isoformat() if existing_grade.graded_date else None,
+                "teacher_id": existing_grade.teacher_id
+            }
+        else:
+            # Get student details for new grading
+            student = db.query(Student).join(User).filter(Student.id == student_id).first()
+            student_name = f"{student.user.fname} {student.user.lname}" if student and student.user else "Unknown Student"
+            
+            return {
+                "already_graded": False,
+                "assignment_id": assignment_id,
+                "assignment_title": assignment.title,
+                "student_id": student_id,
+                "student_name": student_name,
+                "max_points": assignment.max_points
+            }
+    except Exception as e:
+        print(f"❌ Grade check error: {str(e)}")
+        # Handle database connection errors gracefully
+        if "server closed the connection" in str(e) or "connection" in str(e).lower():
+            raise HTTPException(status_code=503, detail="Database temporarily unavailable")
+        else:
+            raise HTTPException(status_code=500, detail=f"Grade check error: {str(e)}")
+
+@router.get("/grades/view/{grade_id}", response_model=GradeDetailResponse)
+async def get_grade_details(
+    grade_id: int,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Get complete grade details including full feedback
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    grade = db.query(Grade).join(Assignment).join(Subject).join(Student).join(User).filter(
+        Grade.id == grade_id,
+        Grade.is_active == True
+    ).first()
+    
+    if not grade:
+        raise HTTPException(status_code=404, detail="Grade not found")
+    
+    # Verify teacher has access
+    teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    
+    return {
+        "id": grade.id,
+        "assignment_id": grade.assignment_id,
+        "assignment_title": grade.assignment.title,
+        "assignment_description": grade.assignment.description,
+        "assignment_rubric": grade.assignment.rubric,
+        "student_id": grade.student_id,
+        "student_name": f"{grade.student.user.fname} {grade.student.user.lname}",
+        "points_earned": grade.points_earned,
+        "max_points": grade.assignment.max_points,
+        "percentage": round((grade.points_earned / grade.assignment.max_points) * 100, 2) if grade.assignment.max_points > 0 else 0,
+        "feedback": grade.feedback if grade.feedback else "",
+        "graded_date": grade.graded_date.isoformat() if grade.graded_date else None,
+        "teacher_id": grade.teacher_id,
+        "ai_generated": grade.ai_generated if hasattr(grade, 'ai_generated') else False,
+        "ai_confidence": grade.ai_confidence if hasattr(grade, 'ai_confidence') else None
+    }
+
 @router.post("/grades/create", response_model=GradeResponse)
 async def create_grade(
     grade: GradeCreate,
@@ -655,6 +868,7 @@ async def create_grade(
 ):
     """
     Create or update a grade for a student's assignment (teachers only)
+    This endpoint now handles complete feedback storage
     """
     ensure_user_role(db, current_user["user_id"], UserRole.teacher)
     
@@ -664,16 +878,13 @@ async def create_grade(
         raise HTTPException(status_code=404, detail="Assignment not found")
     
     teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
-    if not teacher or assignment.subject not in teacher.subjects:
-        raise HTTPException(status_code=403, detail="You are not authorized to grade this assignment")
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
     
     # Verify student is enrolled in the subject
     student = db.query(Student).filter(Student.id == grade.student_id).first()
     if not student:
         raise HTTPException(status_code=404, detail="Student not found")
-    
-    if assignment.subject not in student.subjects:
-        raise HTTPException(status_code=400, detail="Student is not enrolled in this subject")
     
     # Check if grade already exists
     existing_grade = db.query(Grade).filter(
@@ -685,30 +896,77 @@ async def create_grade(
         # Update existing grade
         try:
             existing_grade.points_earned = grade.points_earned
-            existing_grade.feedback = grade.comments
+            # Store complete feedback using the feedback field
+            existing_grade.feedback = grade.feedback if grade.feedback else ""
             existing_grade.teacher_id = teacher.id
             existing_grade.graded_date = datetime.utcnow()
             
+            # Handle AI grading metadata if provided
+            if hasattr(grade, 'ai_generated') and hasattr(existing_grade, 'ai_generated'):
+                existing_grade.ai_generated = getattr(grade, 'ai_generated', False)
+            if hasattr(grade, 'ai_confidence') and hasattr(existing_grade, 'ai_confidence'):
+                existing_grade.ai_confidence = getattr(grade, 'ai_confidence', None)
+            
             db.commit()
             db.refresh(existing_grade)
-            return existing_grade
+            
+            # Return enhanced response
+            return {
+                "id": existing_grade.id,
+                "assignment_id": existing_grade.assignment_id,
+                "student_id": existing_grade.student_id,
+                "teacher_id": existing_grade.teacher_id,
+                "points_earned": existing_grade.points_earned,
+                "feedback": existing_grade.feedback,
+                "graded_date": existing_grade.graded_date,
+                "is_active": existing_grade.is_active,
+                "assignment_title": assignment.title,
+                "assignment_max_points": assignment.max_points,
+                "student_name": f"{student.user.fname} {student.user.lname}" if student.user else "Unknown",
+                "teacher_name": f"{teacher.user.fname} {teacher.user.lname}" if teacher.user else "Unknown",
+                "percentage": round((existing_grade.points_earned / assignment.max_points) * 100, 2) if assignment.max_points > 0 else 0
+            }
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Grade update error: {str(e)}")
     else:
         # Create new grade
         try:
+            # Store complete feedback
             db_grade = Grade(
                 assignment_id=grade.assignment_id,
                 student_id=grade.student_id,
                 teacher_id=teacher.id,
                 points_earned=grade.points_earned,
-                feedback=grade.feedback
+                feedback=grade.feedback if grade.feedback else ""
             )
+            
+            # Handle AI grading metadata if provided
+            if hasattr(grade, 'ai_generated') and hasattr(db_grade, 'ai_generated'):
+                db_grade.ai_generated = getattr(grade, 'ai_generated', False)
+            if hasattr(grade, 'ai_confidence') and hasattr(db_grade, 'ai_confidence'):
+                db_grade.ai_confidence = getattr(grade, 'ai_confidence', None)
+                
             db.add(db_grade)
             db.commit()
             db.refresh(db_grade)
-            return db_grade
+            
+            # Return enhanced response
+            return {
+                "id": db_grade.id,
+                "assignment_id": db_grade.assignment_id,
+                "student_id": db_grade.student_id,
+                "teacher_id": db_grade.teacher_id,
+                "points_earned": db_grade.points_earned,
+                "feedback": db_grade.feedback,
+                "graded_date": db_grade.graded_date,
+                "is_active": db_grade.is_active,
+                "assignment_title": assignment.title,
+                "assignment_max_points": assignment.max_points,
+                "student_name": f"{student.user.fname} {student.user.lname}" if student.user else "Unknown",
+                "teacher_name": f"{teacher.user.fname} {teacher.user.lname}" if teacher.user else "Unknown",
+                "percentage": round((db_grade.points_earned / assignment.max_points) * 100, 2) if assignment.max_points > 0 else 0
+            }
         except Exception as e:
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Grade creation error: {str(e)}")
@@ -858,7 +1116,7 @@ async def create_bulk_grades(
             if existing_grade:
                 # Update existing grade
                 existing_grade.points_earned = grade_data.points_earned
-                existing_grade.feedback = grade_data.comments
+                existing_grade.feedback = grade_data.feedback
                 existing_grade.teacher_id = teacher.id
                 existing_grade.graded_date = datetime.utcnow()
                 updated_grades.append(existing_grade)
@@ -869,7 +1127,7 @@ async def create_bulk_grades(
                     student_id=grade_data.student_id,
                     teacher_id=teacher.id,
                     points_earned=grade_data.points_earned,
-                    feedback=grade_data.comments
+                    feedback=grade_data.feedback
                 )
                 db.add(new_grade)
                 created_grades.append(new_grade)
@@ -893,6 +1151,389 @@ async def create_bulk_grades(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Bulk grade creation error: {str(e)}")
+
+@router.post("/grades/grade-class")
+async def grade_class_assignments(
+    request: dict,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Grade assignments for multiple students in a class using K.A.N.A. AI
+    """
+    try:
+        ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+        
+        # Extract data from request
+        subject_id = request.get("subject_id")
+        assignment_id = request.get("assignment_id")
+        student_ids = request.get("student_ids", [])
+        grade_all_students = request.get("grade_all_students", False)
+        
+        print(f"Grade class request: subject_id={subject_id}, assignment_id={assignment_id}, grade_all={grade_all_students}")
+        
+        if not subject_id or not assignment_id:
+            raise HTTPException(status_code=400, detail="Subject ID and Assignment ID are required")
+        
+        # Verify teacher teaches this subject
+        teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
+        
+        # Get subject and assignment
+        subject = db.query(Subject).filter(Subject.id == subject_id).first()
+        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        
+        if not subject or not assignment:
+            raise HTTPException(status_code=404, detail="Subject or assignment not found")
+        
+        print(f"Found subject: {subject.name}, assignment: {assignment.title}")
+    
+    except Exception as e:
+        print(f"Error in grade_class_assignments: {str(e)}")
+        if "OperationalError" in str(type(e)) or "server closed the connection" in str(e):
+            # Database connection error - try to rollback and reconnect
+            try:
+                db.rollback()
+            except:
+                pass
+            raise HTTPException(status_code=503, detail="Database connection error. Please try again.")
+        elif "InFailedSqlTransaction" in str(e):
+            # Transaction aborted - rollback and continue
+            try:
+                db.rollback()
+                print("Database transaction rolled back due to previous error")
+            except:
+                pass
+        else:
+            traceback.print_exc()
+            raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+    
+    # Reset database state before main queries
+    try:
+        db.rollback()  # Ensure clean transaction state
+    except:
+        pass
+    
+    # Get students to grade
+    if grade_all_students:
+        # Get all students in the subject with user data eagerly loaded
+        students = db.query(Student).options(joinedload(Student.user)).filter(
+            Student.school_id == subject.school_id,
+            Student.is_active == True
+        ).all()
+    else:
+        # Get specific students with user data eagerly loaded
+        if not student_ids:
+            raise HTTPException(status_code=400, detail="No students selected for grading")
+        students = db.query(Student).options(joinedload(Student.user)).filter(
+            Student.id.in_(student_ids),
+            Student.is_active == True
+        ).all()
+    
+    if not students:
+        raise HTTPException(status_code=404, detail="No students found for grading")
+    
+    # Collect student work data for K.A.N.A. processing
+    grading_data = []
+    for student in students:
+        try:
+            # Safely get student name
+            student_name = f"{student.user.fname or ''} {student.user.lname or ''}".strip()
+            if not student_name:
+                student_name = f"Student {student.id}"
+            
+            # Get student's uploaded PDFs for this assignment (using the proper relationship)
+            try:
+                student_pdfs = db.query(StudentPDF).filter(
+                    StudentPDF.student_id == student.id,
+                    StudentPDF.assignment_id == assignment_id
+                ).all()
+                
+                print(f"Found {len(student_pdfs)} PDFs for student {student.id} (assignment {assignment_id})")
+                
+            except Exception as pdf_error:
+                print(f"Error querying StudentPDF: {pdf_error}")
+                student_pdfs = []
+            
+            # Create student work data - focus on PDFs since they have proper assignment relationships
+            if student_pdfs:
+                student_work = {
+                    "student_id": student.id,
+                    "student_name": student_name,
+                    "pdfs": [{"id": pdf.id, "path": getattr(pdf, 'pdf_path', ''), "filename": getattr(pdf, 'pdf_filename', '')} for pdf in student_pdfs],
+                    "has_work": True
+                }
+                grading_data.append(student_work)
+                print(f"Added student {student_name} with {len(student_pdfs)} PDFs to grading data")
+            else:
+                # Add student even without uploaded work for K.A.N.A. to process
+                student_work = {
+                    "student_id": student.id,
+                    "student_name": student_name,
+                    "pdfs": [],
+                    "has_work": False,
+                    "note": "No PDF work found - manual grading may be required"
+                }
+                grading_data.append(student_work)
+                print(f"Added student {student_name} without work to grading data")
+                
+        except Exception as e:
+            # Log the error and continue with next student
+            print(f"Error processing student {student.id}: {str(e)}")
+            continue
+    
+    if not grading_data:
+        # If no student work found, still return students for manual grading
+        print("No student PDF work found in database, creating basic student data for manual grading")
+        try:
+            # Reset database transaction state in case of previous errors
+            db.rollback()
+            
+            for student in students:
+                try:
+                    student_name = f"{student.user.fname or ''} {student.user.lname or ''}".strip()
+                    if not student_name:
+                        student_name = f"Student {student.id}"
+                        
+                    grading_data.append({
+                        "student_id": student.id,
+                        "student_name": student_name,
+                        "pdfs": [],
+                        "has_work": False,
+                        "note": "Manual grading required - no PDF work found"
+                    })
+                    print(f"Added {student_name} to manual grading data")
+                except Exception as e:
+                    print(f"Error creating manual grading data for student {student.id}: {str(e)}")
+                    continue
+        except Exception as e:
+            print(f"Error in fallback grading data creation: {str(e)}")
+    
+    if not grading_data:
+        raise HTTPException(status_code=404, detail="No students found for grading")
+    
+    print(f"Total grading data entries: {len(grading_data)}")
+    
+    # Now process the actual grading with K.A.N.A. if we have PDF work
+    students_with_pdfs = [student for student in grading_data if student.get("has_work", False)]
+    
+    if students_with_pdfs:
+        print(f"Processing {len(students_with_pdfs)} students with PDFs through K.A.N.A.")
+        
+        # Prepare data for K.A.N.A. bulk PDF grading
+        try:
+            import base64
+            import os
+            
+            pdf_files = []
+            student_names = []
+            
+            for student_data in students_with_pdfs:
+                student_name = student_data["student_name"]
+                pdfs = student_data.get("pdfs", [])
+                
+                # Process each PDF for this student
+                for pdf_info in pdfs:
+                    pdf_path = pdf_info.get("path", "")
+                    
+                    # Convert PDF file to base64
+                    try:
+                        # Construct full path if needed
+                        if not os.path.isabs(pdf_path):
+                            # Assume PDFs are stored in a relative path from backend
+                            pdf_full_path = os.path.join(os.getcwd(), pdf_path)
+                        else:
+                            pdf_full_path = pdf_path
+                        
+                        print(f"Reading PDF from: {pdf_full_path}")
+                        
+                        with open(pdf_full_path, 'rb') as pdf_file:
+                            pdf_content = pdf_file.read()
+                            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+                            pdf_files.append(pdf_base64)
+                            student_names.append(student_name)
+                            
+                        print(f"Successfully encoded PDF for {student_name} ({len(pdf_base64)} chars)")
+                        
+                    except Exception as pdf_error:
+                        print(f"Error reading PDF for {student_name}: {pdf_error}")
+                        continue
+            
+            if pdf_files:
+                # Call K.A.N.A. bulk PDF grading endpoint
+                import requests
+                
+                kana_payload = {
+                    "pdf_files": pdf_files,
+                    "assignment_title": assignment.title,
+                    "max_points": assignment.max_points,
+                    "grading_rubric": assignment.rubric,
+                    "feedback_type": "both",
+                    "student_names": student_names
+                }
+                
+                print(f"Calling K.A.N.A. with {len(pdf_files)} PDFs...")
+                print(f"Assignment title: '{assignment.title}'")
+                print(f"Max points: {assignment.max_points}")
+                print(f"Rubric length: {len(assignment.rubric) if assignment.rubric else 0}")
+                print(f"Rubric content: '{assignment.rubric[:100] if assignment.rubric else 'None'}'...")
+                
+                # Validate required fields before sending
+                if not assignment.title or not assignment.title.strip():
+                    raise HTTPException(status_code=400, detail="Assignment title is missing or empty")
+                if not assignment.max_points or assignment.max_points <= 0:
+                    raise HTTPException(status_code=400, detail="Assignment max_points is missing or invalid")
+                if not assignment.rubric or not assignment.rubric.strip():
+                    print("⚠️ Assignment rubric is missing, using default rubric")
+                    kana_payload["grading_rubric"] = "Standard academic grading criteria based on correctness, completeness, and presentation quality."
+                
+                # Use environment variable or default K.A.N.A. endpoint
+                kana_base_url = "http://localhost:10000"  # Default K.A.N.A. server
+                kana_endpoint = f"{kana_base_url}/api/kana/bulk-grade-pdfs"
+                
+                response = requests.post(
+                    kana_endpoint,
+                    json=kana_payload,
+                    timeout=300  # 5 minute timeout for bulk grading
+                )
+                
+                if response.status_code == 200:
+                    kana_results = response.json()
+                    print(f"✅ K.A.N.A. grading successful: {kana_results.get('batch_summary', {}).get('successfully_graded', 0)} students graded")
+                    
+                    # Store grades in database
+                    from schemas.assignments_schemas import GradeCreate
+                    grading_results = []
+                    
+                    for result in kana_results.get("student_results", []):
+                        if result.get("success", False):
+                            student_name = result.get("student_name", "")
+                            score = result.get("score", 0)
+                            feedback = result.get("detailed_feedback", "")
+                            
+                            # Find student ID by name
+                            matching_student = None
+                            for student_data in grading_data:
+                                if student_data["student_name"] == student_name:
+                                    matching_student = student_data
+                                    break
+                            
+                            if matching_student:
+                                try:
+                                    # Create grade record
+                                    grade_create = GradeCreate(
+                                        assignment_id=assignment.id,
+                                        student_id=matching_student["student_id"],
+                                        points_earned=score,
+                                        feedback=feedback
+                                    )
+                                    
+                                    # Check if grade already exists
+                                    existing_grade = db.query(Grade).filter(
+                                        Grade.assignment_id == assignment.id,
+                                        Grade.student_id == matching_student["student_id"]
+                                    ).first()
+                                    
+                                    if existing_grade:
+                                        # Update existing grade
+                                        existing_grade.points_earned = score
+                                        existing_grade.feedback = feedback
+                                        existing_grade.teacher_id = teacher.id
+                                        existing_grade.graded_date = datetime.utcnow()
+                                        existing_grade.ai_generated = True
+                                        existing_grade.ai_confidence = 85  # High confidence for K.A.N.A. grading
+                                    else:
+                                        # Create new grade
+                                        new_grade = Grade(
+                                            assignment_id=assignment.id,
+                                            student_id=matching_student["student_id"],
+                                            teacher_id=teacher.id,
+                                            points_earned=score,
+                                            feedback=feedback,
+                                            ai_generated=True,
+                                            ai_confidence=85
+                                        )
+                                        db.add(new_grade)
+                                    
+                                    grading_results.append({
+                                        "student_id": matching_student["student_id"],
+                                        "student_name": student_name,
+                                        "score": score,
+                                        "max_points": assignment.max_points,
+                                        "percentage": result.get("percentage", 0),
+                                        "feedback": feedback,
+                                        "success": True
+                                    })
+                                    
+                                except Exception as grade_error:
+                                    print(f"Error saving grade for {student_name}: {grade_error}")
+                                    grading_results.append({
+                                        "student_name": student_name,
+                                        "error": str(grade_error),
+                                        "success": False
+                                    })
+                    
+                    # Commit all grades to database
+                    try:
+                        db.commit()
+                        print(f"✅ Successfully saved {len([r for r in grading_results if r['success']])} grades to database")
+                    except Exception as commit_error:
+                        db.rollback()
+                        print(f"❌ Error committing grades: {commit_error}")
+                        raise HTTPException(status_code=500, detail=f"Failed to save grades: {str(commit_error)}")
+                    
+                    # Return enhanced response with actual grading results
+                    return {
+                        "status": "success",
+                        "message": f"Successfully graded {len(grading_results)} students with K.A.N.A.",
+                        "assignment": {
+                            "id": assignment.id,
+                            "title": assignment.title,
+                            "description": assignment.description,
+                            "rubric": assignment.rubric,
+                            "max_points": assignment.max_points
+                        },
+                        "subject": {
+                            "id": subject.id,
+                            "name": subject.name
+                        },
+                        "grading_results": grading_results,
+                        "batch_summary": kana_results.get("batch_summary", {}),
+                        "total_students": len(grading_data),
+                        "students_graded": len([r for r in grading_results if r["success"]]),
+                        "students_failed": len([r for r in grading_results if not r["success"]])
+                    }
+                    
+                else:
+                    print(f"❌ K.A.N.A. grading failed: {response.status_code} - {response.text}")
+                    raise HTTPException(status_code=500, detail=f"K.A.N.A. grading failed: {response.status_code}")
+            
+            else:
+                print("No valid PDF files found for K.A.N.A. grading")
+                
+        except Exception as kana_error:
+            print(f"❌ K.A.N.A. integration error: {kana_error}")
+            # Continue with basic response even if K.A.N.A. fails
+    
+    # Return data for K.A.N.A. processing (fallback or when no PDFs available)
+    return {
+        "status": "success",
+        "message": f"Found {len(grading_data)} students with work to grade",
+        "assignment": {
+            "id": assignment.id,
+            "title": assignment.title,
+            "description": assignment.description,
+            "rubric": assignment.rubric,
+            "max_points": assignment.max_points
+        },
+        "subject": {
+            "id": subject.id,
+            "name": subject.name
+        },
+        "students_data": grading_data,
+        "total_students": len(grading_data)
+    }
 
 # === ACADEMIC STATUS ENDPOINTS ===
 
@@ -1818,4 +2459,209 @@ async def get_study_analytics(db: db_dependency, current_user: user_dependency):
                 "graded_date": g.graded_date
             } for g in recent_grades
         ]
+    }
+
+# === ASSIGNMENT IMAGE AND PDF MANAGEMENT ENDPOINTS ===
+
+@router.get("/assignments/{assignment_id}/images-status")
+async def get_assignment_images_status(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Get image upload status for an assignment (Teachers only)
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    
+    # Get assignment and verify access
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    
+    if assignment.teacher_id != teacher.id:
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+    
+    # Get all students in the subject
+    students = db.query(Student).filter(
+        Student.subjects.contains(assignment.subject),
+        Student.is_active == True
+    ).all()
+    
+    # Get image and PDF counts
+    image_stats = []
+    total_images = 0
+    students_with_images = 0
+    students_with_pdfs = 0
+    
+    for student in students:
+        images_count = db.query(StudentImage).filter(
+            StudentImage.assignment_id == assignment_id,
+            StudentImage.student_id == student.id
+        ).count()
+        
+        pdf_exists = db.query(StudentPDF).filter(
+            StudentPDF.assignment_id == assignment_id,
+            StudentPDF.student_id == student.id
+        ).first() is not None
+        
+        total_images += images_count
+        if images_count > 0:
+            students_with_images += 1
+        if pdf_exists:
+            students_with_pdfs += 1
+        
+        image_stats.append({
+            "student_id": student.id,
+            "student_name": f"{student.user.fname} {student.user.lname}",
+            "images_uploaded": images_count,
+            "pdf_generated": pdf_exists
+        })
+    
+    return {
+        "assignment_id": assignment_id,
+        "assignment_title": assignment.title,
+        "total_students": len(students),
+        "students_with_images": students_with_images,
+        "students_with_pdfs": students_with_pdfs,
+        "total_images": total_images,
+        "completion_percentage": round((students_with_images / len(students)) * 100, 2) if students else 0,
+        "pdf_generation_percentage": round((students_with_pdfs / len(students)) * 100, 2) if students else 0,
+        "students_status": image_stats
+    }
+
+@router.get("/assignments/{assignment_id}/grading-ready")
+async def check_assignment_grading_readiness(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Check if assignment is ready for grading (has PDFs) (Teachers only)
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    
+    # Get assignment and verify access
+    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    
+    if assignment.teacher_id != teacher.id:
+        raise HTTPException(status_code=403, detail="Access denied to this assignment")
+    
+    # Count PDFs available for grading
+    pdf_count = db.query(StudentPDF).filter(
+        StudentPDF.assignment_id == assignment_id
+    ).count()
+    
+    graded_count = db.query(StudentPDF).filter(
+        StudentPDF.assignment_id == assignment_id,
+        StudentPDF.is_graded == True
+    ).count()
+    
+    ungraded_count = pdf_count - graded_count
+    
+    # Check if there's an active grading session
+    active_session = db.query(GradingSession).filter(
+        GradingSession.assignment_id == assignment_id,
+        GradingSession.is_completed == False
+    ).first()
+    
+    return {
+        "assignment_id": assignment_id,
+        "assignment_title": assignment.title,
+        "total_pdfs": pdf_count,
+        "graded_pdfs": graded_count,
+        "ungraded_pdfs": ungraded_count,
+        "ready_for_grading": ungraded_count > 0,
+        "grading_complete": ungraded_count == 0 and pdf_count > 0,
+        "has_active_session": active_session is not None,
+        "active_session_id": active_session.id if active_session else None,
+        "completion_percentage": round((graded_count / pdf_count) * 100, 2) if pdf_count > 0 else 0
+    }
+
+@router.get("/teacher/dashboard/assignments-overview")
+async def get_teacher_assignments_overview(
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Get overview of all teacher's assignments with grading status
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+    
+    teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+    if not teacher:
+        raise HTTPException(status_code=404, detail="Teacher profile not found")
+    
+    # Get all teacher's assignments
+    assignments = db.query(Assignment).filter(
+        Assignment.teacher_id == teacher.id,
+        Assignment.is_active == True
+    ).order_by(Assignment.created_date.desc()).all()
+    
+    assignments_overview = []
+    
+    for assignment in assignments:
+        # Count images and PDFs
+        total_images = db.query(StudentImage).filter(
+            StudentImage.assignment_id == assignment.id
+        ).count()
+        
+        total_pdfs = db.query(StudentPDF).filter(
+            StudentPDF.assignment_id == assignment.id
+        ).count()
+        
+        graded_pdfs = db.query(StudentPDF).filter(
+            StudentPDF.assignment_id == assignment.id,
+            StudentPDF.is_graded == True
+        ).count()
+        
+        # Count students in subject
+        students_count = db.query(Student).filter(
+            Student.subjects.contains(assignment.subject),
+            Student.is_active == True
+        ).count()
+        
+        # Check for active grading session
+        active_session = db.query(GradingSession).filter(
+            GradingSession.assignment_id == assignment.id,
+            GradingSession.is_completed == False
+        ).first()
+        
+        assignments_overview.append({
+            "assignment_id": assignment.id,
+            "title": assignment.title,
+            "description": assignment.description[:100] + "..." if len(assignment.description) > 100 else assignment.description,
+            "subject_name": assignment.subject.name,
+            "due_date": assignment.due_date,
+            "max_points": assignment.max_points,
+            "created_date": assignment.created_date,
+            "students_count": students_count,
+            "total_images": total_images,
+            "total_pdfs": total_pdfs,
+            "graded_pdfs": graded_pdfs,
+            "grading_progress": round((graded_pdfs / total_pdfs) * 100, 2) if total_pdfs > 0 else 0,
+            "has_active_session": active_session is not None,
+            "status": "completed" if graded_pdfs == total_pdfs and total_pdfs > 0 else "in_progress" if total_pdfs > 0 else "pending_uploads"
+        })
+    
+    return {
+        "teacher_id": teacher.id,
+        "teacher_name": f"{teacher.user.fname} {teacher.user.lname}",
+        "total_assignments": len(assignments),
+        "assignments": assignments_overview,
+        "summary": {
+            "completed_assignments": len([a for a in assignments_overview if a["status"] == "completed"]),
+            "in_progress_assignments": len([a for a in assignments_overview if a["status"] == "in_progress"]),
+            "pending_uploads": len([a for a in assignments_overview if a["status"] == "pending_uploads"])
+        }
     }
