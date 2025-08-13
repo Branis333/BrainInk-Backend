@@ -38,12 +38,20 @@ router = APIRouter(tags=["Assignment Image Upload, PDF Management & Bulk Upload"
 user_dependency = Annotated[dict, Depends(get_current_user)]
 
 # Configuration
-ASSIGNMENT_IMAGES_DIR = Path("uploads/assignment_images")
-STUDENT_PDFS_DIR = Path("uploads/student_pdfs")
-BULK_PDFS_DIR = Path("uploads/bulk_pdfs")  # New directory for bulk PDF uploads
+# Make paths absolute to avoid issues with working directory changes
+BASE_DIR = Path(__file__).parent.parent.parent  # Go up to the project root
+ASSIGNMENT_IMAGES_DIR = BASE_DIR / "uploads" / "assignment_images"
+STUDENT_PDFS_DIR = BASE_DIR / "uploads" / "student_pdfs"
+BULK_PDFS_DIR = BASE_DIR / "uploads" / "bulk_pdfs"  # New directory for bulk PDF uploads
+
+# Ensure directories exist
 ASSIGNMENT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 STUDENT_PDFS_DIR.mkdir(parents=True, exist_ok=True)
 BULK_PDFS_DIR.mkdir(parents=True, exist_ok=True)  # Create bulk PDFs directory
+
+print(f"📁 PDF Directory: {STUDENT_PDFS_DIR.absolute()}")
+print(f"📁 Images Directory: {ASSIGNMENT_IMAGES_DIR.absolute()}")
+print(f"📁 Bulk Directory: {BULK_PDFS_DIR.absolute()}")
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
@@ -1089,6 +1097,11 @@ async def bulk_upload_images_to_pdf_assignment(
         # Create PDF from images
         pdf_path = await create_pdf_from_images(valid_files, pdf_filename, use_student_dir=True)
         
+        # Ensure we store the absolute path
+        absolute_pdf_path = str(Path(pdf_path).resolve())
+        
+        print(f"📄 Created PDF at: {absolute_pdf_path}")
+        
         # Check if PDF already exists for this student and assignment
         existing_pdf = db.query(StudentPDF).filter(
             StudentPDF.student_id == student_id,
@@ -1098,7 +1111,7 @@ async def bulk_upload_images_to_pdf_assignment(
         if existing_pdf:
             # Update existing PDF record
             existing_pdf.pdf_filename = pdf_filename
-            existing_pdf.pdf_path = pdf_path
+            existing_pdf.pdf_path = absolute_pdf_path
             existing_pdf.image_count = len(valid_files)
             existing_pdf.generated_date = datetime.utcnow()
             db.commit()
@@ -1110,7 +1123,7 @@ async def bulk_upload_images_to_pdf_assignment(
                 assignment_id=assignment_id,
                 student_id=student_id,
                 pdf_filename=pdf_filename,
-                pdf_path=pdf_path,
+                pdf_path=absolute_pdf_path,
                 image_count=len(valid_files)
             )
             
@@ -1216,6 +1229,10 @@ async def get_student_assignment_pdf(
     """
     Download the PDF for a specific student assignment
     """
+    print(f"🔍 PDF Download Request: assignment_id={assignment_id}, student_id={student_id}")
+    print(f"📁 Current working directory: {Path.cwd()}")
+    print(f"📁 STUDENT_PDFS_DIR: {STUDENT_PDFS_DIR.absolute()}")
+    
     try:
         # Ensure user is a teacher
         ensure_user_role(db, current_user["user_id"], UserRole.teacher)
@@ -1241,12 +1258,61 @@ async def get_student_assignment_pdf(
         if not student_pdf:
             raise HTTPException(status_code=404, detail="PDF not found for this student assignment")
         
+        # Fix path handling - ensure absolute path
+        pdf_path = Path(student_pdf.pdf_path)
+        if not pdf_path.is_absolute():
+            # If path is relative, make it relative to the current working directory
+            pdf_path = Path.cwd() / pdf_path
+        
         # Check if file exists
-        if not Path(student_pdf.pdf_path).exists():
-            raise HTTPException(status_code=404, detail="PDF file not found on disk")
+        if not pdf_path.exists():
+            # Try alternative path locations
+            alternative_paths = [
+                STUDENT_PDFS_DIR / student_pdf.pdf_filename,  # Use filename in correct directory
+                Path("uploads") / "student_pdfs" / student_pdf.pdf_filename,  # Alternative relative path
+                Path("/opt/render/project/src/uploads/student_pdfs") / student_pdf.pdf_filename,  # Render absolute path
+            ]
+            
+            found_path = None
+            for alt_path in alternative_paths:
+                if alt_path.exists():
+                    found_path = alt_path
+                    break
+            
+            if not found_path:
+                # Generate a temporary PDF if none exists
+                try:
+                    student = db.query(Student).options(joinedload(Student.user)).filter(Student.id == student_id).first()
+                    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+                    
+                    if student and assignment:
+                        # Create a simple PDF with student and assignment info
+                        temp_pdf_path = STUDENT_PDFS_DIR / f"temp_{student_pdf.pdf_filename}"
+                        
+                        # Ensure directory exists
+                        temp_pdf_path.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        c = canvas.Canvas(str(temp_pdf_path), pagesize=letter)
+                        c.drawString(100, 750, f"Student: {student.user.fname} {student.user.lname}")
+                        c.drawString(100, 730, f"Assignment: {assignment.title}")
+                        c.drawString(100, 710, f"Note: Original PDF file not found")
+                        c.drawString(100, 690, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                        c.save()
+                        
+                        found_path = temp_pdf_path
+                        
+                        # Update the PDF path in database
+                        student_pdf.pdf_path = str(found_path)
+                        db.commit()
+                        
+                except Exception as e:
+                    print(f"Error generating temporary PDF: {e}")
+                    raise HTTPException(status_code=404, detail=f"PDF file not found and could not generate replacement. Original path: {student_pdf.pdf_path}")
+            
+            pdf_path = found_path
         
         return FileResponse(
-            path=student_pdf.pdf_path,
+            path=str(pdf_path),
             filename=student_pdf.pdf_filename,
             media_type="application/pdf"
         )
