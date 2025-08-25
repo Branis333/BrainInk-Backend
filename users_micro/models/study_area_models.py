@@ -409,3 +409,166 @@ class GradingSession(Base):
     assignment = relationship("Assignment", back_populates="grading_sessions")
     teacher = relationship("Teacher", back_populates="grading_sessions")
     subject = relationship("Subject", back_populates="grading_sessions")
+
+# --- Report Models ---
+
+# --- Report Type Enum ---
+class ReportType(enum.Enum):
+    student_progress = "student_progress"
+    class_performance = "class_performance"
+    subject_analytics = "subject_analytics"
+    assignment_analysis = "assignment_analysis"
+    grade_distribution = "grade_distribution"
+    attendance_report = "attendance_report"
+    teacher_performance = "teacher_performance"
+    school_overview = "school_overview"
+
+# --- Report Status Enum ---
+class ReportStatus(enum.Enum):
+    pending = "pending"
+    generating = "generating"
+    completed = "completed"
+    failed = "failed"
+    expired = "expired"
+
+# --- Report Format Enum ---
+class ReportFormat(enum.Enum):
+    pdf = "pdf"
+    excel = "excel"
+    csv = "csv"
+    json = "json"
+
+# --- Report Template Model ---
+class ReportTemplate(Base):
+    __tablename__ = "report_templates"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    report_type = Column(Enum(ReportType), nullable=False)
+    template_config = Column(Text, nullable=False)  # JSON configuration
+    school_id = Column(Integer, ForeignKey("schools.id"), nullable=False)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False)
+    
+    # Relationships
+    school = relationship("School")
+    creator = relationship("User")
+    reports = relationship("Report", back_populates="template")
+
+# --- Report Model ---
+class Report(Base):
+    __tablename__ = "reports"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    report_type = Column(Enum(ReportType), nullable=False)
+    template_id = Column(Integer, ForeignKey("report_templates.id"), nullable=True)
+    
+    # Report scope
+    school_id = Column(Integer, ForeignKey("schools.id"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=True)
+    
+    # Report parameters
+    date_from = Column(DateTime, nullable=True)
+    date_to = Column(DateTime, nullable=True)
+    parameters = Column(Text, nullable=True)  # JSON parameters
+    
+    # Report generation
+    requested_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    requested_date = Column(DateTime, default=datetime.utcnow)
+    generated_date = Column(DateTime, nullable=True)
+    status = Column(Enum(ReportStatus), default=ReportStatus.pending)
+    format = Column(Enum(ReportFormat), default=ReportFormat.pdf)
+    
+    # File information
+    file_path = Column(String, nullable=True)
+    file_name = Column(String, nullable=True)
+    file_size = Column(Integer, nullable=True)
+    
+    # Report data and metadata
+    report_data = Column(Text, nullable=True)  # JSON report data
+    summary_stats = Column(Text, nullable=True)  # JSON summary statistics
+    error_message = Column(Text, nullable=True)
+    
+    # Expiration and access
+    expires_date = Column(DateTime, nullable=True)
+    access_count = Column(Integer, default=0)
+    last_accessed = Column(DateTime, nullable=True)
+    is_public = Column(Boolean, default=False)
+    
+    # Relationships
+    school = relationship("School")
+    subject = relationship("Subject")
+    classroom = relationship("Classroom")
+    student = relationship("Student")
+    teacher = relationship("Teacher")
+    assignment = relationship("Assignment")
+    requester = relationship("User")
+    template = relationship("ReportTemplate", back_populates="reports")
+
+# --- Report Share Model ---
+class ReportShare(Base):
+    __tablename__ = "report_shares"
+    id = Column(Integer, primary_key=True, index=True)
+    report_id = Column(Integer, ForeignKey("reports.id"), nullable=False)
+    shared_with_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    shared_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    share_date = Column(DateTime, default=datetime.utcnow)
+    access_level = Column(String, default="view")  # view, download, edit
+    expires_date = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)
+    access_count = Column(Integer, default=0)
+    last_accessed = Column(DateTime, nullable=True)
+    
+    # Relationships
+    report = relationship("Report")
+    shared_with = relationship("User", foreign_keys=[shared_with_user_id])
+    shared_by = relationship("User", foreign_keys=[shared_by_user_id])
+
+# --- Report Schedule Model ---
+class ReportSchedule(Base):
+    __tablename__ = "report_schedules"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    template_id = Column(Integer, ForeignKey("report_templates.id"), nullable=False)
+    
+    # Schedule configuration
+    frequency = Column(String, nullable=False)  # daily, weekly, monthly, quarterly
+    schedule_config = Column(Text, nullable=False)  # JSON cron-like configuration
+    
+    # Report parameters
+    school_id = Column(Integer, ForeignKey("schools.id"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True)
+    parameters = Column(Text, nullable=True)  # JSON parameters
+    
+    # Recipients
+    recipient_emails = Column(Text, nullable=False)  # JSON array of emails
+    recipient_user_ids = Column(Text, nullable=True)  # JSON array of user IDs
+    
+    # Schedule management
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    last_run_date = Column(DateTime, nullable=True)
+    next_run_date = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, default=True)
+    
+    # Statistics
+    total_runs = Column(Integer, default=0)
+    successful_runs = Column(Integer, default=0)
+    failed_runs = Column(Integer, default=0)
+    
+    # Relationships
+    template = relationship("ReportTemplate")
+    school = relationship("School")
+    subject = relationship("Subject")
+    classroom = relationship("Classroom")
+    creator = relationship("User")
