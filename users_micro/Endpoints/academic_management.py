@@ -1782,6 +1782,112 @@ async def principal_remove_student_from_subject(
 
 # === STUDENT-SPECIFIC ENDPOINTS FOR STUDY CENTRE ===
 
+@router.get("/students/assignment/{assignment_id}/details")
+async def get_assignment_details(
+    assignment_id: int,
+    db: db_dependency, 
+    current_user: user_dependency
+):
+    """
+    Get detailed assignment information for a student including full description, rubric, and grade status
+    """
+    try:
+        ensure_user_role(db, current_user["user_id"], UserRole.student)
+        
+        # Get student record
+        student = db.query(Student).filter(
+            Student.user_id == current_user["user_id"],
+            Student.is_active == True
+        ).first()
+        if not student:
+            raise HTTPException(status_code=404, detail="Student profile not found")
+        
+        # Get the assignment with proper relationship loading
+        assignment = db.query(Assignment).options(
+            joinedload(Assignment.subject),
+            joinedload(Assignment.teacher).joinedload(Teacher.user)
+        ).filter(
+            Assignment.id == assignment_id,
+            Assignment.is_active == True
+        ).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        # Check if student is enrolled in the subject for this assignment
+        subject = assignment.subject
+        if subject not in student.subjects:
+            raise HTTPException(status_code=403, detail="You are not enrolled in this subject")
+        
+        # Get teacher info safely
+        teacher_name = "Unknown Teacher"
+        teacher_id = assignment.teacher_id
+        if assignment.teacher and assignment.teacher.user:
+            teacher_name = f"{assignment.teacher.user.fname} {assignment.teacher.user.lname}"
+        
+        # Check if student has a grade for this assignment
+        grade = db.query(Grade).filter(
+            Grade.assignment_id == assignment.id,
+            Grade.student_id == student.id,
+            Grade.is_active == True
+        ).first()
+        
+        # Calculate assignment status
+        status = "completed" if grade else (
+            "overdue" if assignment.due_date and assignment.due_date < datetime.utcnow() else "pending"
+        )
+        
+        # Get student submission status (PDFs only)
+        student_pdf = db.query(StudentPDF).filter(
+            StudentPDF.assignment_id == assignment.id,
+            StudentPDF.student_id == student.id
+        ).first()
+        
+        return {
+            "assignment_id": assignment.id,
+            "title": assignment.title,
+            "description": assignment.description or "",
+            "rubric": assignment.rubric or "",
+            "subtopic": assignment.subtopic,
+            "max_points": assignment.max_points,
+            "due_date": assignment.due_date.isoformat() if assignment.due_date else None,
+            "created_date": assignment.created_date.isoformat() if assignment.created_date else None,
+            "subject": {
+                "id": subject.id,
+                "name": subject.name,
+                "description": subject.description or ""
+            },
+            "teacher": {
+                "name": teacher_name,
+                "id": teacher_id
+            },
+            "status": status,
+            "is_completed": grade is not None,
+            "grade": {
+                "id": grade.id,
+                "points_earned": grade.points_earned,
+                "percentage": round((grade.points_earned / assignment.max_points) * 100, 2) if assignment.max_points > 0 else 0,
+                "feedback": grade.feedback or "",
+                "graded_date": grade.graded_date.isoformat() if grade.graded_date else None,
+                "ai_generated": getattr(grade, 'ai_generated', False),
+                "ai_confidence": getattr(grade, 'ai_confidence', None)
+            } if grade else None,
+            "submission": {
+                "has_pdf": student_pdf is not None,
+                "pdf_filename": student_pdf.pdf_filename if student_pdf else None,
+                "pdf_generated_date": student_pdf.generated_date.isoformat() if student_pdf and student_pdf.generated_date else None
+            },
+            "time_remaining": None if not assignment.due_date else (
+                max(0, int((assignment.due_date - datetime.utcnow()).total_seconds()))
+                if assignment.due_date > datetime.utcnow() else 0
+            )
+        }
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        print(f"❌ Error in get_assignment_details: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
 @router.get("/students/my-assignments")
 async def get_my_assignments(db: db_dependency, current_user: user_dependency):
     """

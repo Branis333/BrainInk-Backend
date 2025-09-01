@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports
+from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
 from db.connection import engine
 from db.database import test_connection
 import models.users_models as models
@@ -16,10 +16,34 @@ app = FastAPI(
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:5173", 
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        "https://brainink.vercel.app",
+        "https://brainink.org",
+        "https://brainink-frontend.onrender.com",
+        "*"  # Allow all origins for development
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language", 
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "Origin",
+        "Cache-Control",
+        "Pragma",
+        "Access-Control-Allow-Origin",
+        "Access-Control-Allow-Headers",
+        "Access-Control-Allow-Methods",
+        "Access-Control-Allow-Credentials"
+    ],
+    expose_headers=["*"]
 )
 
 # Test database connection on startup
@@ -47,7 +71,8 @@ async def startup_event():
         print(f"✅ Loaded upload router with {len(upload.router.routes)} endpoints")
         print(f"✅ Loaded kana_service router with {len(kana_service.router.routes)} endpoints")
         print(f"✅ Loaded reports router with {len(reports.router.routes)} endpoints")
-        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes) + len(reports.router.routes)
+        print(f"✅ Loaded calendar router with {len(calendar.router.routes)} endpoints")
+        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes) + len(reports.router.routes) + len(calendar.router.routes)
         print(f"🔄 Total endpoints: {total_endpoints}")
     except Exception as e:
         print(f"❌ Supabase connection failed: {e}")
@@ -68,6 +93,7 @@ app.include_router(syllabus.router, prefix="/study-area")
 app.include_router(upload.router, prefix="/study-area")
 app.include_router(kana_service.router, prefix="/kana")
 app.include_router(reports.router, prefix="/study-area/reports")
+app.include_router(calendar.router, prefix="/study-area/calendar")
 
 @app.get("/")
 def root():

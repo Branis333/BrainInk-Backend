@@ -214,6 +214,12 @@ async def google_register(db: db_dependency, google_request: GoogleAuthRequest):
     try:
         # Verify the Google token
         google_client_id = os.getenv("GOOGLE_CLIENT_ID")
+        if not google_client_id:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Google authentication not configured"
+            )
+            
         idinfo = id_token.verify_oauth2_token(
             google_request.token, requests.Request(), google_client_id
         )
@@ -288,19 +294,38 @@ async def google_login(db: db_dependency, google_request: GoogleAuthRequest):
     """
     try:
         # Verify the Google token
-        google_client_id = os.getenv("GOOGLE_CLIENT_ID")
-        idinfo = id_token.verify_oauth2_token(
-            google_request.token, requests.Request(), google_client_id
-        )
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID", "969723698837-9aepndmu033gu0bk3gdrb6o1707mknp6.apps.googleusercontent.com")
+        
+        print(f"🔍 Attempting Google login with client ID: {google_client_id}")
+        print(f"🎫 Token received: {google_request.token[:50]}...")
+        
+        try:
+            idinfo = id_token.verify_oauth2_token(
+                google_request.token, requests.Request(), google_client_id
+            )
+            print(f"✅ Token verified successfully: {idinfo}")
+        except ValueError as e:
+            print(f"❌ Token verification failed: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"Invalid Google token: {str(e)}"
+            )
         
         # Check if email is verified
-        if not idinfo.get("email_verified"):
+        if not idinfo.get("email_verified", True):  # Default to True if not present
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Email not verified by Google"
             )
             
         email = idinfo.get("email")
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No email found in Google token"
+            )
+        
+        print(f"📧 Email from Google: {email}")
         
         # Find user with this email
         user = db.query(User).filter(User.email == email).first()
@@ -804,3 +829,9 @@ async def resend_reset_code(db: db_dependency, request: ForgotPasswordRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Resend code error: {str(e)}"
         )
+
+# CORS preflight handler for Google authentication
+@router.options("/google-register")
+@router.options("/google-login")
+async def options_handler():
+    return {"message": "OK"}

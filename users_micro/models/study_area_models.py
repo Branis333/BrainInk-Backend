@@ -410,6 +410,170 @@ class GradingSession(Base):
     teacher = relationship("Teacher", back_populates="grading_sessions")
     subject = relationship("Subject", back_populates="grading_sessions")
 
+# --- Calendar Models ---
+
+# --- Calendar Event Type Enum ---
+class CalendarEventType(enum.Enum):
+    assignment_due = "assignment_due"
+    assignment_created = "assignment_created"
+    syllabus_milestone = "syllabus_milestone"
+    class_schedule = "class_schedule"
+    exam = "exam"
+    holiday = "holiday"
+    reminder = "reminder"
+    custom_event = "custom_event"
+
+# --- Calendar Event Priority Enum ---
+class CalendarEventPriority(enum.Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+    urgent = "urgent"
+
+# --- Calendar Event Status Enum ---
+class CalendarEventStatus(enum.Enum):
+    scheduled = "scheduled"
+    in_progress = "in_progress"
+    completed = "completed"
+    cancelled = "cancelled"
+    postponed = "postponed"
+
+# --- Calendar Event Model ---
+class CalendarEvent(Base):
+    __tablename__ = "calendar_events"
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    event_type = Column(Enum(CalendarEventType), nullable=False)
+    priority = Column(Enum(CalendarEventPriority), default=CalendarEventPriority.medium)
+    status = Column(Enum(CalendarEventStatus), default=CalendarEventStatus.scheduled)
+    
+    # Date and time
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=True)
+    all_day = Column(Boolean, default=False)
+    
+    # Recurrence
+    is_recurring = Column(Boolean, default=False)
+    recurrence_pattern = Column(String, nullable=True)  # daily, weekly, monthly, yearly
+    recurrence_interval = Column(Integer, default=1)  # every X days/weeks/months
+    recurrence_end_date = Column(DateTime, nullable=True)
+    
+    # Associations
+    school_id = Column(Integer, ForeignKey("schools.id"), nullable=False)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=True)
+    assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=True)
+    syllabus_id = Column(Integer, ForeignKey("syllabuses.id"), nullable=True)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Management
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Notifications
+    send_notification = Column(Boolean, default=True)
+    notification_minutes_before = Column(Integer, default=60)  # Minutes before event to send notification
+    
+    # Relationships
+    school = relationship("School")
+    subject = relationship("Subject")
+    assignment = relationship("Assignment")
+    syllabus = relationship("Syllabus")
+    classroom = relationship("Classroom")
+    creator = relationship("User")
+    attendees = relationship("CalendarEventAttendee", back_populates="event", cascade="all, delete-orphan")
+    reminders = relationship("CalendarReminder", back_populates="event", cascade="all, delete-orphan")
+
+# --- Calendar Event Attendee Model ---
+class CalendarEventAttendee(Base):
+    __tablename__ = "calendar_event_attendees"
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("calendar_events.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=True)
+    
+    # Attendance tracking
+    response_status = Column(String, default="pending")  # pending, accepted, declined, tentative
+    response_date = Column(DateTime, nullable=True)
+    attendance_status = Column(String, default="unknown")  # present, absent, late, excused
+    notes = Column(Text, nullable=True)
+    
+    # Management
+    added_date = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    event = relationship("CalendarEvent", back_populates="attendees")
+    user = relationship("User")
+    student = relationship("Student")
+    teacher = relationship("Teacher")
+    
+    # Ensure one attendee record per user per event
+    __table_args__ = (
+        UniqueConstraint('event_id', 'user_id', name='uq_event_user_attendee'),
+    )
+
+# --- Calendar Reminder Model ---
+class CalendarReminder(Base):
+    __tablename__ = "calendar_reminders"
+    id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(Integer, ForeignKey("calendar_events.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    
+    # Reminder settings
+    reminder_minutes_before = Column(Integer, nullable=False)  # Minutes before event
+    reminder_method = Column(String, default="notification")  # notification, email, sms
+    
+    # Status tracking
+    is_sent = Column(Boolean, default=False)
+    sent_date = Column(DateTime, nullable=True)
+    scheduled_for = Column(DateTime, nullable=False)  # When to send reminder
+    
+    # Management
+    created_date = Column(DateTime, default=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    event = relationship("CalendarEvent", back_populates="reminders")
+    user = relationship("User")
+
+# --- Calendar View Model (for custom calendar views) ---
+class CalendarView(Base):
+    __tablename__ = "calendar_views"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    school_id = Column(Integer, ForeignKey("schools.id"), nullable=False)
+    
+    # View settings
+    view_type = Column(String, default="month")  # day, week, month, year, agenda
+    default_view = Column(Boolean, default=False)
+    show_weekends = Column(Boolean, default=True)
+    start_hour = Column(Integer, default=8)  # 24-hour format
+    end_hour = Column(Integer, default=18)  # 24-hour format
+    
+    # Filter settings (JSON)
+    filter_subjects = Column(Text, nullable=True)  # JSON array of subject IDs
+    filter_event_types = Column(Text, nullable=True)  # JSON array of event types
+    filter_priorities = Column(Text, nullable=True)  # JSON array of priorities
+    show_completed = Column(Boolean, default=True)
+    
+    # Colors and styling (JSON)
+    color_scheme = Column(Text, nullable=True)  # JSON color configuration
+    
+    # Management
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+    
+    # Relationships
+    user = relationship("User")
+    school = relationship("School")
+
 # --- Report Models ---
 
 # --- Report Type Enum ---
