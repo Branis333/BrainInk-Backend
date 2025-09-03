@@ -22,9 +22,11 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
         "https://brainink.vercel.app",
+        "https://brain-ink.vercel.app",  # Add both Vercel URLs
         "https://brainink.org",
-        "https://brainink-frontend.onrender.com",
-        "*"  # Allow all origins for development
+        "https://www.brainink.org",
+        "https://brainink-frontend.onrender.com"
+        # Remove "*" wildcard when using credentials
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD", "PATCH"],
@@ -37,11 +39,7 @@ app.add_middleware(
         "X-Requested-With",
         "Origin",
         "Cache-Control",
-        "Pragma",
-        "Access-Control-Allow-Origin",
-        "Access-Control-Allow-Headers",
-        "Access-Control-Allow-Methods",
-        "Access-Control-Allow-Credentials"
+        "Pragma"
     ],
     expose_headers=["*"]
 )
