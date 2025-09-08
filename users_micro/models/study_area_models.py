@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum, DateTime, Boolean, Text, Table, UniqueConstraint
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum, DateTime, Boolean, Text, Table, UniqueConstraint, LargeBinary
 from sqlalchemy.orm import relationship
 from db.connection import Base
 import enum
@@ -381,11 +381,16 @@ class StudentPDF(Base):
     assignment_id = Column(Integer, ForeignKey("assignments.id"), nullable=False)
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     pdf_filename = Column(String, nullable=False)
-    pdf_path = Column(String, nullable=False)
+    pdf_data = Column(LargeBinary, nullable=False)  # Store PDF file as binary data
+    pdf_size = Column(Integer, nullable=False)  # Size of PDF in bytes
     image_count = Column(Integer, default=0)
     generated_date = Column(DateTime, default=datetime.utcnow)
     is_graded = Column(Boolean, default=False)
     grade_id = Column(Integer, ForeignKey("grades.id"), nullable=True)
+    
+    # Optional fields for backward compatibility and metadata
+    content_hash = Column(String, nullable=True)  # MD5 hash for deduplication
+    mime_type = Column(String, default="application/pdf")
     
     # Relationships
     assignment = relationship("Assignment", back_populates="student_pdfs")

@@ -1,6 +1,6 @@
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from typing import Annotated, List, Optional
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc, or_
@@ -10,6 +10,7 @@ import shutil
 import uuid
 import asyncio
 import aiofiles
+import hashlib
 from PIL import Image
 import io
 import httpx
@@ -38,24 +39,15 @@ router = APIRouter(tags=["Assignment Image Upload, PDF Management & Bulk Upload"
 user_dependency = Annotated[dict, Depends(get_current_user)]
 
 # Configuration
-# Make paths absolute to avoid issues with working directory changes
-BASE_DIR = Path(__file__).parent.parent.parent  # Go up to the project root
-ASSIGNMENT_IMAGES_DIR = BASE_DIR / "uploads" / "assignment_images"
-STUDENT_PDFS_DIR = BASE_DIR / "uploads" / "student_pdfs"
-BULK_PDFS_DIR = BASE_DIR / "uploads" / "bulk_pdfs"  # New directory for bulk PDF uploads
-
-# Ensure directories exist
-ASSIGNMENT_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-STUDENT_PDFS_DIR.mkdir(parents=True, exist_ok=True)
-BULK_PDFS_DIR.mkdir(parents=True, exist_ok=True)  # Create bulk PDFs directory
-
-print(f"📁 PDF Directory: {STUDENT_PDFS_DIR.absolute()}")
-print(f"📁 Images Directory: {ASSIGNMENT_IMAGES_DIR.absolute()}")
-print(f"📁 Bulk Directory: {BULK_PDFS_DIR.absolute()}")
-
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
 KANA_BASE_URL = os.getenv("KANA_BASE_URL", "https://kana-backend-app.onrender.com")
+
+# Legacy file path for backward compatibility (deprecated - using database storage now)
+STUDENT_PDFS_DIR = Path("uploads/student_pdfs")
+STUDENT_PDFS_DIR.mkdir(parents=True, exist_ok=True)
+
+print("📊 Using Database PDF Storage - No file system dependencies!")
 
 # === UTILITY FUNCTIONS ===
 
@@ -222,17 +214,14 @@ def resize_image_for_pdf(image: Image.Image, max_width: float, max_height: float
     return new_width, new_height
 
 
-async def create_pdf_from_images(images: List[UploadFile], filename: str, use_student_dir: bool = False) -> str:
+async def create_pdf_from_images(images: List[UploadFile], filename: str) -> tuple[bytes, str]:
     """
     Create a PDF file from a list of image files
-    Returns the path to the created PDF file
+    Returns tuple of (pdf_bytes, content_hash)
     """
-    # Choose directory based on usage
-    pdf_dir = STUDENT_PDFS_DIR if use_student_dir else BULK_PDFS_DIR
-    pdf_path = pdf_dir / filename
-    
-    # Create PDF canvas
-    c = canvas.Canvas(str(pdf_path), pagesize=A4)
+    # Create PDF in memory
+    pdf_buffer = io.BytesIO()
+    c = canvas.Canvas(pdf_buffer, pagesize=A4)
     page_width, page_height = A4
    
     # Add margins (50 points = ~0.7 inches)
@@ -277,10 +266,18 @@ async def create_pdf_from_images(images: List[UploadFile], filename: str, use_st
             print(f"Error processing image {image_file.filename}: {str(e)}")
             continue
     
-    # Save the PDF
+    # Save the PDF to buffer
     c.save()
     
-    return str(pdf_path)
+    # Get PDF bytes
+    pdf_buffer.seek(0)
+    pdf_bytes = pdf_buffer.read()
+    
+    # Generate content hash for deduplication
+    content_hash = hashlib.md5(pdf_bytes).hexdigest()
+    
+    print(f"📄 PDF created in memory: {len(pdf_bytes)} bytes, hash: {content_hash}")
+    return pdf_bytes, content_hash
 
 # === ASSIGNMENT IMAGE UPLOAD ENDPOINTS ===
 
@@ -1094,13 +1091,11 @@ async def bulk_upload_images_to_pdf_assignment(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         pdf_filename = f"{student_name}_{assignment_title}_{timestamp}.pdf"
         
-        # Create PDF from images
-        pdf_path = await create_pdf_from_images(valid_files, pdf_filename, use_student_dir=True)
+        # Create PDF from images (returns bytes and hash)
+        pdf_bytes, content_hash = await create_pdf_from_images(valid_files, pdf_filename)
+        pdf_size = len(pdf_bytes)
         
-        # Ensure we store the absolute path
-        absolute_pdf_path = str(Path(pdf_path).resolve())
-        
-        print(f"📄 Created PDF at: {absolute_pdf_path}")
+        print(f"📄 Created PDF in memory: {pdf_size} bytes, hash: {content_hash}")
         
         # Check if PDF already exists for this student and assignment
         existing_pdf = db.query(StudentPDF).filter(
@@ -1111,7 +1106,9 @@ async def bulk_upload_images_to_pdf_assignment(
         if existing_pdf:
             # Update existing PDF record
             existing_pdf.pdf_filename = pdf_filename
-            existing_pdf.pdf_path = absolute_pdf_path
+            existing_pdf.pdf_data = pdf_bytes
+            existing_pdf.pdf_size = pdf_size
+            existing_pdf.content_hash = content_hash
             existing_pdf.image_count = len(valid_files)
             existing_pdf.generated_date = datetime.utcnow()
             db.commit()
@@ -1123,25 +1120,29 @@ async def bulk_upload_images_to_pdf_assignment(
                 assignment_id=assignment_id,
                 student_id=student_id,
                 pdf_filename=pdf_filename,
-                pdf_path=absolute_pdf_path,
-                image_count=len(valid_files)
+                pdf_data=pdf_bytes,
+                pdf_size=pdf_size,
+                content_hash=content_hash,
+                image_count=len(valid_files),
+                mime_type="application/pdf"
             )
             
             db.add(student_pdf)
             db.commit()
             db.refresh(student_pdf)
         
-        # Return the PDF file
-        return FileResponse(
-            path=pdf_path,
-            filename=pdf_filename,
+        # Return the PDF file directly from memory
+        return Response(
+            content=pdf_bytes,
             media_type="application/pdf",
             headers={
                 "Content-Disposition": f"attachment; filename={pdf_filename}",
+                "Content-Length": str(pdf_size),
                 "X-Total-Images": str(len(valid_files)),
                 "X-Student-Name": f"{student.user.fname} {student.user.lname}",
                 "X-Assignment-Title": assignment.title,
-                "X-PDF-ID": str(student_pdf.id)
+                "X-PDF-ID": str(student_pdf.id),
+                "X-Content-Hash": content_hash
             }
         )
         
@@ -1227,11 +1228,9 @@ async def get_student_assignment_pdf(
     current_user: user_dependency
 ):
     """
-    Download the PDF for a specific student assignment
+    Download the PDF for a specific student assignment from database
     """
     print(f"🔍 PDF Download Request: assignment_id={assignment_id}, student_id={student_id}")
-    print(f"📁 Current working directory: {Path.cwd()}")
-    print(f"📁 STUDENT_PDFS_DIR: {STUDENT_PDFS_DIR.absolute()}")
     
     try:
         # Ensure user is a teacher
@@ -1249,7 +1248,7 @@ async def get_student_assignment_pdf(
         if assignment.teacher_id != teacher.id:
             raise HTTPException(status_code=403, detail="Access denied to this assignment")
         
-        # Get student PDF
+        # Get student PDF from database
         student_pdf = db.query(StudentPDF).filter(
             StudentPDF.assignment_id == assignment_id,
             StudentPDF.student_id == student_id
@@ -1258,63 +1257,23 @@ async def get_student_assignment_pdf(
         if not student_pdf:
             raise HTTPException(status_code=404, detail="PDF not found for this student assignment")
         
-        # Fix path handling - ensure absolute path
-        pdf_path = Path(student_pdf.pdf_path)
-        if not pdf_path.is_absolute():
-            # If path is relative, make it relative to the current working directory
-            pdf_path = Path.cwd() / pdf_path
+        # Check if PDF data exists in database
+        if not student_pdf.pdf_data:
+            raise HTTPException(status_code=404, detail="PDF data not found in database")
         
-        # Check if file exists
-        if not pdf_path.exists():
-            # Try alternative path locations
-            alternative_paths = [
-                STUDENT_PDFS_DIR / student_pdf.pdf_filename,  # Use filename in correct directory
-                Path("uploads") / "student_pdfs" / student_pdf.pdf_filename,  # Alternative relative path
-                Path("/opt/render/project/src/uploads/student_pdfs") / student_pdf.pdf_filename,  # Render absolute path
-            ]
-            
-            found_path = None
-            for alt_path in alternative_paths:
-                if alt_path.exists():
-                    found_path = alt_path
-                    break
-            
-            if not found_path:
-                # Generate a temporary PDF if none exists
-                try:
-                    student = db.query(Student).options(joinedload(Student.user)).filter(Student.id == student_id).first()
-                    assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
-                    
-                    if student and assignment:
-                        # Create a simple PDF with student and assignment info
-                        temp_pdf_path = STUDENT_PDFS_DIR / f"temp_{student_pdf.pdf_filename}"
-                        
-                        # Ensure directory exists
-                        temp_pdf_path.parent.mkdir(parents=True, exist_ok=True)
-                        
-                        c = canvas.Canvas(str(temp_pdf_path), pagesize=letter)
-                        c.drawString(100, 750, f"Student: {student.user.fname} {student.user.lname}")
-                        c.drawString(100, 730, f"Assignment: {assignment.title}")
-                        c.drawString(100, 710, f"Note: Original PDF file not found")
-                        c.drawString(100, 690, f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                        c.save()
-                        
-                        found_path = temp_pdf_path
-                        
-                        # Update the PDF path in database
-                        student_pdf.pdf_path = str(found_path)
-                        db.commit()
-                        
-                except Exception as e:
-                    print(f"Error generating temporary PDF: {e}")
-                    raise HTTPException(status_code=404, detail=f"PDF file not found and could not generate replacement. Original path: {student_pdf.pdf_path}")
-            
-            pdf_path = found_path
+        print(f"📄 Serving PDF from database: {student_pdf.pdf_filename}, size: {len(student_pdf.pdf_data)} bytes")
         
-        return FileResponse(
-            path=str(pdf_path),
-            filename=student_pdf.pdf_filename,
-            media_type="application/pdf"
+        # Return PDF data directly from database
+        return Response(
+            content=student_pdf.pdf_data,
+            media_type=student_pdf.mime_type or "application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={student_pdf.pdf_filename}",
+                "Content-Length": str(len(student_pdf.pdf_data)),
+                "X-PDF-ID": str(student_pdf.id),
+                "X-Content-Hash": student_pdf.content_hash or "",
+                "X-Image-Count": str(student_pdf.image_count or 0)
+            }
         )
         
     except HTTPException:
@@ -1360,18 +1319,16 @@ async def delete_student_assignment_pdf(
         
         # Store filename before deletion
         deleted_filename = student_pdf.pdf_filename
+        pdf_size = len(student_pdf.pdf_data) if student_pdf.pdf_data else 0
         
-        # Delete file from disk if it exists
-        pdf_path = Path(student_pdf.pdf_path)
-        if pdf_path.exists():
-            pdf_path.unlink()
-        
-        # Delete database record
+        # Delete database record (PDF data is stored in database)
         db.delete(student_pdf)
         db.commit()
         
+        print(f"🗑️ Deleted PDF from database: {deleted_filename}, size: {pdf_size} bytes")
+        
         return BulkUploadDeleteResponse(
-            message="PDF deleted successfully",
+            message="PDF deleted successfully from database",
             assignment_id=assignment_id,
             student_id=student_id,
             deleted_filename=deleted_filename
@@ -1393,5 +1350,12 @@ async def bulk_upload_health_check():
         "service": "Assignment-Based Bulk Image to PDF Converter",
         "timestamp": datetime.now().isoformat(),
         "supported_formats": list(ALLOWED_EXTENSIONS),
-        "upload_directory": str(BULK_PDFS_DIR)
+        "storage_method": "database_binary",
+        "features": [
+            "Image validation and resizing",
+            "PDF generation in memory",
+            "Database binary storage",
+            "Content deduplication via hashing",
+            "No file system dependencies"
+        ]
     }

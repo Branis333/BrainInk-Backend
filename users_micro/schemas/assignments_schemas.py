@@ -183,11 +183,13 @@ class StudentPDF(BaseModel):
     assignment_id: int
     student_id: int
     pdf_filename: str
-    pdf_path: str
+    pdf_size: int  # Size in bytes instead of path
     image_count: int
     generated_date: datetime
     is_graded: bool = False
     grade_id: Optional[int] = None
+    content_hash: Optional[str] = None  # MD5 hash for deduplication
+    mime_type: str = "application/pdf"
     
     # Include related info
     assignment_title: Optional[str] = None
