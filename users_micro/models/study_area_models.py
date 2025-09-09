@@ -387,6 +387,8 @@ class StudentPDF(Base):
     generated_date = Column(DateTime, default=datetime.utcnow)
     is_graded = Column(Boolean, default=False)
     grade_id = Column(Integer, ForeignKey("grades.id"), nullable=True)
+    # Backward compatibility: optional file system path (was previously NOT NULL in legacy schema)
+    pdf_path = Column(String, nullable=True)
     
     # Optional fields for backward compatibility and metadata
     content_hash = Column(String, nullable=True)  # MD5 hash for deduplication

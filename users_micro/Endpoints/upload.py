@@ -1006,7 +1006,9 @@ async def bulk_upload_images_to_pdf_assignment(
     current_user: user_dependency,
     assignment_id: int = Form(..., description="Assignment ID"),
     student_id: int = Form(..., description="Student ID"),
-    files: List[UploadFile] = File(..., description="Multiple image files to combine into PDF")
+    files: List[UploadFile] = File(..., description="Multiple image files to combine into PDF"),
+    storage_mode: str = Form("database", description="Storage mode: 'database' (default) or 'path' for legacy path-based storage if available"),
+    skip_db: bool = Form(False, description="If true, only generate PDF and return; do not persist (debug)")
 ):
     """
     Upload multiple image files for a specific student assignment and combine them into a single PDF.
@@ -1066,24 +1068,38 @@ async def bulk_upload_images_to_pdf_assignment(
         if not files:
             raise HTTPException(status_code=400, detail="No files provided")
         
-        # Validate all files are images
+        # Validate all files are images & size constraints early
         invalid_files = []
-        valid_files = []
-        
+        oversized_files = []
+        valid_files: List[UploadFile] = []
         for file in files:
-            if not validate_bulk_image_file(file):
-                invalid_files.append(file.filename or "unnamed file")
-            else:
-                valid_files.append(file)
-        
+            if not file.filename:
+                invalid_files.append("<no name>")
+                continue
+            ext = Path(file.filename).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                invalid_files.append(file.filename)
+                continue
+            # Fast size check (UploadFile may not have .size attr in some servers; attempt header fallback)
+            if hasattr(file, 'size') and file.size and file.size > MAX_FILE_SIZE:
+                oversized_files.append(f"{file.filename} ({round(file.size/1024/1024,2)}MB)")
+                continue
+            valid_files.append(file)
+
         if invalid_files:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Invalid file types: {', '.join(invalid_files)}. Only image files are supported."
-            )
-        
+            raise HTTPException(status_code=400, detail=f"Invalid file types: {', '.join(invalid_files)}")
+        if oversized_files:
+            raise HTTPException(status_code=400, detail=f"Oversized files: {', '.join(oversized_files)} > {MAX_FILE_SIZE//1024//1024}MB limit")
         if not valid_files:
-            raise HTTPException(status_code=400, detail="No valid image files found")
+            raise HTTPException(status_code=400, detail="No valid image files found after validation")
+
+        # Reset file pointers (FastAPI's UploadFile is a SpooledTemporaryFile; we re-seek before read in create_pdf_from_images)
+        for f in valid_files:
+            try:
+                if f.file.seekable():
+                    f.file.seek(0)
+            except Exception:
+                pass
         
         # Generate PDF filename with student and assignment names
         student_name = f"{student.user.fname}_{student.user.lname}".replace(" ", "_")
@@ -1092,10 +1108,31 @@ async def bulk_upload_images_to_pdf_assignment(
         pdf_filename = f"{student_name}_{assignment_title}_{timestamp}.pdf"
         
         # Create PDF from images (returns bytes and hash)
-        pdf_bytes, content_hash = await create_pdf_from_images(valid_files, pdf_filename)
+        try:
+            pdf_bytes, content_hash = await create_pdf_from_images(valid_files, pdf_filename)
+        except Exception as gen_err:
+            raise HTTPException(status_code=500, detail=f"Failed to generate PDF from images: {gen_err}")
         pdf_size = len(pdf_bytes)
         
         print(f"📄 Created PDF in memory: {pdf_size} bytes, hash: {content_hash}")
+
+        # Early return for debug mode (skip DB persistence)
+        if skip_db:
+            return Response(
+                content=pdf_bytes,
+                media_type="application/pdf",
+                headers={
+                    "X-Debug-Skip-DB": "true",
+                    "X-Generated-Only": "true",
+                    "X-Content-Hash": content_hash,
+                    "Content-Disposition": f"attachment; filename={pdf_filename}"
+                }
+            )
+
+        # Normalize storage_mode
+        storage_mode_normalized = storage_mode.lower().strip()
+        if storage_mode_normalized not in {"database", "path"}:
+            storage_mode_normalized = "database"
         
         # Check if PDF already exists for this student and assignment
         existing_pdf = db.query(StudentPDF).filter(
@@ -1103,33 +1140,42 @@ async def bulk_upload_images_to_pdf_assignment(
             StudentPDF.assignment_id == assignment_id
         ).first()
         
-        if existing_pdf:
-            # Update existing PDF record
-            existing_pdf.pdf_filename = pdf_filename
-            existing_pdf.pdf_data = pdf_bytes
-            existing_pdf.pdf_size = pdf_size
-            existing_pdf.content_hash = content_hash
-            existing_pdf.image_count = len(valid_files)
-            existing_pdf.generated_date = datetime.utcnow()
-            db.commit()
-            db.refresh(existing_pdf)
-            student_pdf = existing_pdf
-        else:
-            # Create new PDF record in database
-            student_pdf = StudentPDF(
-                assignment_id=assignment_id,
-                student_id=student_id,
-                pdf_filename=pdf_filename,
-                pdf_data=pdf_bytes,
-                pdf_size=pdf_size,
-                content_hash=content_hash,
-                image_count=len(valid_files),
-                mime_type="application/pdf"
-            )
-            
-            db.add(student_pdf)
-            db.commit()
-            db.refresh(student_pdf)
+        try:
+            if existing_pdf:
+                # Update existing PDF record
+                existing_pdf.pdf_filename = pdf_filename
+                existing_pdf.pdf_data = pdf_bytes
+                existing_pdf.pdf_size = pdf_size
+                existing_pdf.content_hash = content_hash
+                existing_pdf.image_count = len(valid_files)
+                existing_pdf.generated_date = datetime.utcnow()
+                # Backward compatibility path (store a synthetic path reference)
+                if hasattr(existing_pdf, 'pdf_path'):
+                    existing_pdf.pdf_path = f"uploads/student_pdfs/{pdf_filename}"
+                db.commit()
+                db.refresh(existing_pdf)
+                student_pdf = existing_pdf
+            else:
+                # Create new PDF record in database
+                student_pdf = StudentPDF(
+                    assignment_id=assignment_id,
+                    student_id=student_id,
+                    pdf_filename=pdf_filename,
+                    pdf_data=pdf_bytes if storage_mode_normalized == "database" else None,
+                    pdf_size=pdf_size,
+                    content_hash=content_hash,
+                    image_count=len(valid_files),
+                    mime_type="application/pdf"
+                )
+                if hasattr(student_pdf, 'pdf_path'):
+                    setattr(student_pdf, 'pdf_path', f"uploads/student_pdfs/{pdf_filename}")
+                # NOTE: If legacy path-based mode is required and model supports pdf_path, you would set it here.
+                db.add(student_pdf)
+                db.commit()
+                db.refresh(student_pdf)
+        except Exception as db_err:
+            # Provide a JSON diagnostic fallback (client can display meaningful info)
+            raise HTTPException(status_code=500, detail=f"Database persistence failed: {db_err}")
         
         # Return the PDF file directly from memory
         return Response(
