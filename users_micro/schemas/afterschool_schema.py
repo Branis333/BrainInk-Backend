@@ -1,0 +1,248 @@
+from pydantic import BaseModel, Field, validator
+from typing import Optional, List
+from datetime import datetime
+
+# ===============================
+# COURSE SCHEMAS
+# ===============================
+
+class CourseCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200, description="Course title")
+    subject: str = Field(..., min_length=1, max_length=100, description="Subject (Math, Science, English, etc.)")
+    description: Optional[str] = Field(None, description="Course description")
+    age_min: int = Field(3, ge=3, le=16, description="Minimum age for course")
+    age_max: int = Field(16, ge=3, le=16, description="Maximum age for course")
+    difficulty_level: str = Field("beginner", description="Difficulty level")
+    
+    @validator('difficulty_level')
+    def validate_difficulty(cls, v):
+        allowed_levels = ['beginner', 'intermediate', 'advanced']
+        if v not in allowed_levels:
+            raise ValueError(f'Difficulty level must be one of: {allowed_levels}')
+        return v
+    
+    @validator('age_max')
+    def validate_age_range(cls, v, values):
+        if 'age_min' in values and v < values['age_min']:
+            raise ValueError('age_max must be greater than or equal to age_min')
+        return v
+
+class CourseUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    subject: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    age_min: Optional[int] = Field(None, ge=3, le=16)
+    age_max: Optional[int] = Field(None, ge=3, le=16)
+    difficulty_level: Optional[str] = None
+    is_active: Optional[bool] = None
+    
+    @validator('difficulty_level')
+    def validate_difficulty(cls, v):
+        if v is not None:
+            allowed_levels = ['beginner', 'intermediate', 'advanced']
+            if v not in allowed_levels:
+                raise ValueError(f'Difficulty level must be one of: {allowed_levels}')
+        return v
+
+class CourseOut(BaseModel):
+    id: int
+    title: str
+    subject: str
+    description: Optional[str]
+    age_min: int
+    age_max: int
+    difficulty_level: str
+    created_by: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# ===============================
+# LESSON SCHEMAS
+# ===============================
+
+class LessonCreate(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200, description="Lesson title")
+    content: Optional[str] = Field(None, description="Lesson content/instructions")
+    learning_objectives: Optional[str] = Field(None, description="What students should learn")
+    order_index: int = Field(1, ge=1, description="Order of lesson in course")
+    estimated_duration: int = Field(30, ge=5, le=180, description="Estimated duration in minutes")
+
+class LessonUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    content: Optional[str] = None
+    learning_objectives: Optional[str] = None
+    order_index: Optional[int] = Field(None, ge=1)
+    estimated_duration: Optional[int] = Field(None, ge=5, le=180)
+    is_active: Optional[bool] = None
+
+class LessonOut(BaseModel):
+    id: int
+    course_id: int
+    title: str
+    content: Optional[str]
+    learning_objectives: Optional[str]
+    order_index: int
+    estimated_duration: int
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class CourseWithLessons(CourseOut):
+    lessons: List[LessonOut] = []
+
+# ===============================
+# STUDY SESSION SCHEMAS
+# ===============================
+
+class StudySessionStart(BaseModel):
+    course_id: int = Field(..., description="Course ID")
+    lesson_id: int = Field(..., description="Lesson ID")
+
+class StudySessionEnd(BaseModel):
+    completion_percentage: float = Field(..., ge=0, le=100, description="Completion percentage")
+    status: str = Field("completed", description="Session status")
+    
+    @validator('status')
+    def validate_status(cls, v):
+        allowed_statuses = ['completed', 'abandoned']
+        if v not in allowed_statuses:
+            raise ValueError(f'Status must be one of: {allowed_statuses}')
+        return v
+
+class StudySessionOut(BaseModel):
+    id: int
+    user_id: int
+    course_id: int
+    lesson_id: int
+    started_at: datetime
+    ended_at: Optional[datetime]
+    duration_minutes: Optional[int]
+    ai_score: Optional[float]
+    ai_feedback: Optional[str]
+    ai_recommendations: Optional[str]
+    status: str
+    completion_percentage: float
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# ===============================
+# AI SUBMISSION SCHEMAS
+# ===============================
+
+class AISubmissionCreate(BaseModel):
+    course_id: int = Field(..., description="Course ID")
+    lesson_id: int = Field(..., description="Lesson ID")
+    session_id: int = Field(..., description="Study session ID")
+    submission_type: str = Field(..., description="Type of submission")
+    
+    @validator('submission_type')
+    def validate_submission_type(cls, v):
+        allowed_types = ['homework', 'quiz', 'practice', 'assessment']
+        if v not in allowed_types:
+            raise ValueError(f'Submission type must be one of: {allowed_types}')
+        return v
+
+class AISubmissionUpdate(BaseModel):
+    ai_processed: Optional[bool] = None
+    ai_score: Optional[float] = Field(None, ge=0, le=100)
+    ai_feedback: Optional[str] = None
+    ai_corrections: Optional[str] = None
+    ai_strengths: Optional[str] = None
+    ai_improvements: Optional[str] = None
+    requires_review: Optional[bool] = None
+
+class AISubmissionOut(BaseModel):
+    id: int
+    user_id: int
+    course_id: int
+    lesson_id: int
+    session_id: int
+    submission_type: str
+    original_filename: Optional[str]
+    file_path: Optional[str]
+    file_type: Optional[str]
+    ai_processed: bool
+    ai_score: Optional[float]
+    ai_feedback: Optional[str]
+    ai_corrections: Optional[str]
+    ai_strengths: Optional[str]
+    ai_improvements: Optional[str]
+    requires_review: bool
+    reviewed_by: Optional[int]
+    manual_score: Optional[float]
+    manual_feedback: Optional[str]
+    submitted_at: datetime
+    processed_at: Optional[datetime]
+    reviewed_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
+
+# ===============================
+# STUDENT PROGRESS SCHEMAS
+# ===============================
+
+class StudentProgressOut(BaseModel):
+    id: int
+    user_id: int
+    course_id: int
+    lessons_completed: int
+    total_lessons: int
+    completion_percentage: float
+    average_score: Optional[float]
+    total_study_time: int
+    sessions_count: int
+    started_at: datetime
+    last_activity: datetime
+    completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# ===============================
+# RESPONSE SCHEMAS
+# ===============================
+
+class MessageResponse(BaseModel):
+    message: str
+
+class AIGradingResponse(BaseModel):
+    submission_id: int
+    ai_score: float
+    ai_feedback: str
+    ai_corrections: Optional[str]
+    ai_strengths: Optional[str]
+    ai_improvements: Optional[str]
+    processed_at: datetime
+
+class CourseListResponse(BaseModel):
+    courses: List[CourseOut]
+    total: int
+
+class LessonListResponse(BaseModel):
+    lessons: List[LessonOut]
+    total: int
+
+class StudySessionListResponse(BaseModel):
+    sessions: List[StudySessionOut]
+    total: int
+
+class StudentDashboard(BaseModel):
+    user_id: int
+    active_courses: List[CourseOut]
+    recent_sessions: List[StudySessionOut]
+    progress_summary: List[StudentProgressOut]
+    total_study_time: int
+    average_score: Optional[float]
