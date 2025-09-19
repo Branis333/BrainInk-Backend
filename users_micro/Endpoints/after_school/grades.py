@@ -220,38 +220,8 @@ async def get_user_sessions(
     
     return sessions
 
-@router.get("/{session_id}", response_model=StudySessionOut)
-async def get_session_details(
-    session_id: int,
-    db: db_dependency,
-    current_user: dict = user_dependency
-):
-    """
-    Get specific study session details
-    """
-    user_id = current_user["user_id"]
-    
-    session = db.query(StudySession).filter(
-        and_(
-            StudySession.id == session_id,
-            StudySession.user_id == user_id
-        )
-    ).first()
-    
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Study session not found"
-        )
-    
-    return session
-
 # ===============================
-# BULK AI GRADING ENDPOINTS (KANA INTEGRATION)
-# ===============================
-
-# ===============================
-# PROGRESS TRACKING ENDPOINTS
+# PROGRESS TRACKING ENDPOINTS (must be before /{session_id} route)
 # ===============================
 # Note: Session submissions are managed through /after-school/uploads/sessions/{session_id}/submissions
 # This avoids duplicate endpoints and provides better filtering options
@@ -301,6 +271,38 @@ async def get_course_progress(
         )
     
     return progress
+
+@router.get("/{session_id}", response_model=StudySessionOut)
+async def get_session_details(
+    session_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get specific study session details
+    """
+    user_id = current_user["user_id"]
+    
+    session = db.query(StudySession).filter(
+        and_(
+            StudySession.id == session_id,
+            StudySession.user_id == user_id
+        )
+    ).first()
+    
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Study session not found"
+        )
+    
+    return session
+
+# ===============================
+# BULK AI GRADING ENDPOINTS (KANA INTEGRATION)
+# ===============================
+
+
 
 # ===============================
 # ANALYTICS ENDPOINTS

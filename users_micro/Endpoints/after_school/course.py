@@ -347,6 +347,69 @@ async def list_courses(
             detail=f"Failed to retrieve courses: {str(e)}"
         )
 
+# ===============================
+# STUDENT DASHBOARD ENDPOINTS (must be before /{course_id} route)
+# ===============================
+
+@router.get("/dashboard", response_model=StudentDashboard)
+async def get_student_dashboard(
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get student dashboard with courses and progress
+    """
+    user_id = current_user["user_id"]
+    
+    # Get active courses the student is enrolled in (through study sessions)
+    active_course_ids = db.query(StudySession.course_id).filter(
+        StudySession.user_id == user_id
+    ).distinct().all()
+    
+    active_courses = []
+    if active_course_ids:
+        course_ids = [course_id[0] for course_id in active_course_ids]
+        active_courses = db.query(Course).filter(
+            and_(
+                Course.id.in_(course_ids),
+                Course.is_active == True
+            )
+        ).all()
+    
+    # Get recent study sessions (last 10)
+    recent_sessions = db.query(StudySession).filter(
+        StudySession.user_id == user_id
+    ).order_by(StudySession.started_at.desc()).limit(10).all()
+    
+    # Get progress summary
+    progress_summary = db.query(StudentProgress).filter(
+        StudentProgress.user_id == user_id
+    ).all()
+    
+    # Calculate total study time and average score
+    all_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.duration_minutes.isnot(None)
+        )
+    ).all()
+    
+    total_study_time = sum(session.duration_minutes or 0 for session in all_sessions)
+    
+    scored_sessions = [s for s in all_sessions if s.ai_score is not None]
+    average_score = None
+    if scored_sessions:
+        average_score = sum(s.ai_score for s in scored_sessions) / len(scored_sessions)
+    
+    return StudentDashboard(
+        user_id=user_id,
+        active_courses=active_courses,
+        recent_sessions=recent_sessions,
+        progress_summary=progress_summary,
+        total_study_time=total_study_time,
+        average_score=average_score
+    )
+
 @router.get("/{course_id}", response_model=CourseWithLessons)
 async def get_course_comprehensive_details(
     course_id: int,
@@ -1099,65 +1162,3 @@ async def delete_lesson(
     
     return MessageResponse(message=f"Lesson '{lesson.title}' has been deactivated")
 
-# ===============================
-# STUDENT DASHBOARD ENDPOINTS
-# ===============================
-
-@router.get("/dashboard", response_model=StudentDashboard)
-async def get_student_dashboard(
-    db: db_dependency,
-    current_user: dict = user_dependency
-):
-    """
-    Get student dashboard with courses and progress
-    """
-    user_id = current_user["user_id"]
-    
-    # Get active courses the student is enrolled in (through study sessions)
-    active_course_ids = db.query(StudySession.course_id).filter(
-        StudySession.user_id == user_id
-    ).distinct().all()
-    
-    active_courses = []
-    if active_course_ids:
-        course_ids = [course_id[0] for course_id in active_course_ids]
-        active_courses = db.query(Course).filter(
-            and_(
-                Course.id.in_(course_ids),
-                Course.is_active == True
-            )
-        ).all()
-    
-    # Get recent study sessions (last 10)
-    recent_sessions = db.query(StudySession).filter(
-        StudySession.user_id == user_id
-    ).order_by(StudySession.started_at.desc()).limit(10).all()
-    
-    # Get progress summary
-    progress_summary = db.query(StudentProgress).filter(
-        StudentProgress.user_id == user_id
-    ).all()
-    
-    # Calculate total study time and average score
-    all_sessions = db.query(StudySession).filter(
-        and_(
-            StudySession.user_id == user_id,
-            StudySession.duration_minutes.isnot(None)
-        )
-    ).all()
-    
-    total_study_time = sum(session.duration_minutes or 0 for session in all_sessions)
-    
-    scored_sessions = [s for s in all_sessions if s.ai_score is not None]
-    average_score = None
-    if scored_sessions:
-        average_score = sum(s.ai_score for s in scored_sessions) / len(scored_sessions)
-    
-    return StudentDashboard(
-        user_id=user_id,
-        active_courses=active_courses,
-        recent_sessions=recent_sessions,
-        progress_summary=progress_summary,
-        total_study_time=total_study_time,
-        average_score=average_score
-    )

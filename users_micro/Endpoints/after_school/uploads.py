@@ -487,6 +487,31 @@ async def get_session_submissions_summary(
         "session_status": session.status
     }
 
+@router.get("/submissions/{submission_id}", response_model=AISubmissionOut)
+async def get_submission_details(
+    submission_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get detailed information about a specific AI submission
+    """
+    user_id = current_user["user_id"]
+    
+    # Get the submission and verify it belongs to the user
+    submission = db.query(AISubmission).filter(
+        AISubmission.id == submission_id,
+        AISubmission.user_id == user_id
+    ).first()
+    
+    if not submission:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="AI submission not found or access denied"
+        )
+    
+    return submission
+
 @router.get("/submissions/{submission_id}/download")
 async def download_submission_file(
     submission_id: int,
