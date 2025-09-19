@@ -691,6 +691,141 @@ async def reprocess_submission_by_id(
         processed_at=submission.processed_at
     )
 
+# ===============================
+# USER-LEVEL STATISTICS ENDPOINTS
+# ===============================
+
+@router.get("/user/recent-submissions", response_model=List[AISubmissionOut])
+async def get_user_recent_submissions(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    limit: int = Query(10, ge=1, le=50, description="Limit results"),
+    submission_type: Optional[str] = Query(None, description="Filter by submission type")
+):
+    """
+    Get user's recent submissions across all sessions and courses
+    
+    This endpoint provides a user-level view of recent AI submissions,
+    aggregating submissions from all the user's study sessions.
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Build query to get user's submissions across all sessions
+        query = db.query(AISubmission).filter(AISubmission.user_id == user_id)
+        
+        # Apply optional filter by submission type
+        if submission_type:
+            query = query.filter(AISubmission.submission_type == submission_type)
+        
+        # Order by most recent and apply limit
+        submissions = query.order_by(AISubmission.submitted_at.desc()).limit(limit).all()
+        
+        return submissions
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching user recent submissions: {str(e)}"
+        )
+
+@router.get("/user/statistics")
+async def get_user_upload_statistics(
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get comprehensive upload statistics and analytics for the current user
+    
+    Returns aggregated statistics about the user's file uploads, AI processing,
+    scores, and activity patterns across all their study sessions.
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Get all user submissions for statistics
+        all_submissions = db.query(AISubmission).filter(AISubmission.user_id == user_id).all()
+        
+        # Basic counts
+        total_uploads = len(all_submissions)
+        successful_uploads = len([s for s in all_submissions if s.ai_processed])
+        pending_processing = total_uploads - successful_uploads
+        
+        # Calculate file sizes (if available from file paths)
+        total_size_uploaded = 0
+        for submission in all_submissions:
+            if submission.file_path and Path(submission.file_path).exists():
+                try:
+                    file_size = Path(submission.file_path).stat().st_size
+                    total_size_uploaded += file_size
+                except (OSError, FileNotFoundError):
+                    continue
+        
+        # Calculate average score from processed submissions
+        processed_scores = [s.ai_score for s in all_submissions if s.ai_score is not None]
+        average_score = sum(processed_scores) / len(processed_scores) if processed_scores else 0
+        
+        # Time-based analytics
+        from datetime import datetime, timedelta
+        
+        now = datetime.utcnow()
+        week_ago = now - timedelta(days=7)
+        month_ago = now - timedelta(days=30)
+        
+        this_week_uploads = len([
+            s for s in all_submissions 
+            if s.submitted_at and s.submitted_at >= week_ago
+        ])
+        
+        this_month_uploads = len([
+            s for s in all_submissions 
+            if s.submitted_at and s.submitted_at >= month_ago
+        ])
+        
+        # Submission type breakdown
+        submission_types = {}
+        for submission in all_submissions:
+            sub_type = submission.submission_type or "unknown"
+            submission_types[sub_type] = submission_types.get(sub_type, 0) + 1
+        
+        # File type breakdown
+        file_types = {}
+        for submission in all_submissions:
+            file_type = submission.file_type or "unknown"
+            file_types[file_type] = file_types.get(file_type, 0) + 1
+        
+        # Recent activity trend (last 7 days)
+        daily_uploads = {}
+        for i in range(7):
+            day = now - timedelta(days=i)
+            day_str = day.strftime("%Y-%m-%d")
+            day_uploads = len([
+                s for s in all_submissions 
+                if s.submitted_at and s.submitted_at.date() == day.date()
+            ])
+            daily_uploads[day_str] = day_uploads
+        
+        return {
+            "user_id": user_id,
+            "total_uploads": total_uploads,
+            "total_size_uploaded": total_size_uploaded,
+            "successful_uploads": successful_uploads,
+            "pending_processing": pending_processing,
+            "average_score": round(average_score, 2) if average_score else 0,
+            "this_week_uploads": this_week_uploads,
+            "this_month_uploads": this_month_uploads,
+            "submission_types": submission_types,
+            "file_types": file_types,
+            "daily_activity": daily_uploads,
+            "statistics_generated_at": now.isoformat()
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating user upload statistics: {str(e)}"
+        )
+
 @router.get("/health")
 async def after_school_upload_health_check():
     """
