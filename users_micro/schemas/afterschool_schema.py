@@ -101,11 +101,12 @@ class CourseOut(BaseModel):
     created_by: int
     is_active: bool
     
-    # Enhanced fields
-    total_weeks: int
-    blocks_per_week: int
-    textbook_source: Optional[str]
-    generated_by_ai: bool
+    # Enhanced fields with default values for backward compatibility
+    total_weeks: int = Field(default=8, description="Total duration in weeks")
+    blocks_per_week: int = Field(default=2, description="Number of learning blocks per week")
+    textbook_source: Optional[str] = Field(default=None, description="Source textbook information")
+    textbook_content: Optional[str] = Field(default=None, description="Original textbook content")
+    generated_by_ai: bool = Field(default=False, description="Whether course was AI-generated")
     
     created_at: datetime
     updated_at: datetime
@@ -296,8 +297,10 @@ class StudySessionOut(BaseModel):
 
 class AISubmissionCreate(BaseModel):
     course_id: int = Field(..., description="Course ID")
-    lesson_id: int = Field(..., description="Lesson ID")
+    lesson_id: Optional[int] = Field(None, description="Lesson ID (for legacy courses)")
+    block_id: Optional[int] = Field(None, description="Course Block ID (for AI-generated courses)")
     session_id: int = Field(..., description="Study session ID")
+    assignment_id: Optional[int] = Field(None, description="Assignment ID (if submission is for assignment)")
     submission_type: str = Field(..., description="Type of submission")
     
     @validator('submission_type')
@@ -305,6 +308,13 @@ class AISubmissionCreate(BaseModel):
         allowed_types = ['homework', 'quiz', 'practice', 'assessment']
         if v not in allowed_types:
             raise ValueError(f'Submission type must be one of: {allowed_types}')
+        return v
+    
+    @validator('lesson_id')
+    def validate_lesson_or_block(cls, v, values):
+        block_id = values.get('block_id')
+        if not v and not block_id:
+            raise ValueError('Either lesson_id or block_id must be provided')
         return v
 
 class AISubmissionUpdate(BaseModel):
@@ -320,8 +330,10 @@ class AISubmissionOut(BaseModel):
     id: int
     user_id: int
     course_id: int
-    lesson_id: int
+    lesson_id: Optional[int] = None  # Made optional for block-based sessions
+    block_id: Optional[int] = None  # New field for AI-generated course blocks
     session_id: int
+    assignment_id: Optional[int] = None  # New field for assignment submissions
     submission_type: str
     original_filename: Optional[str]
     file_path: Optional[str]
