@@ -760,17 +760,26 @@ async def enroll_in_course(
             db.add(student_assignment)
             created_assignments.append(student_assignment)
         
-        # Create initial progress record
-        progress = StudentProgress(
-            user_id=user_id,
-            course_id=course_id,
-            total_lessons=len(course.blocks),  # Use blocks instead of lessons
-            sessions_count=0,
-            started_at=enrollment_date,
-            last_activity=enrollment_date
-        )
-        
-        db.add(progress)
+        # Create initial progress record only if one doesn't already exist
+        existing_progress = db.query(StudentProgress).filter(
+            and_(StudentProgress.user_id == user_id, StudentProgress.course_id == course_id)
+        ).first()
+        if not existing_progress:
+            total_blocks = len(course.blocks)
+            # Fallback to lessons if no blocks present (legacy courses)
+            total_lessons = db.query(CourseLesson).filter(
+                and_(CourseLesson.course_id == course_id, CourseLesson.is_active == True)
+            ).count() if total_blocks == 0 else 0
+            total_content = total_blocks if total_blocks > 0 else total_lessons
+            progress = StudentProgress(
+                user_id=user_id,
+                course_id=course_id,
+                total_lessons=total_content,
+                sessions_count=0,
+                started_at=enrollment_date,
+                last_activity=enrollment_date
+            )
+            db.add(progress)
         db.commit()
         
         # Refresh to get IDs
@@ -852,8 +861,8 @@ async def get_student_dashboard(
     average_score = None
     if scored_sessions:
         average_score = sum(s.ai_score for s in scored_sessions) / len(scored_sessions)
-    
-        return StudentDashboard(
+
+    return StudentDashboard(
         user_id=user_id,
         active_courses=active_courses,
         recent_sessions=recent_sessions,

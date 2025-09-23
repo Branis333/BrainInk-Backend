@@ -339,24 +339,40 @@ async def get_course_progress(
     db: db_dependency,
     current_user: dict = user_dependency
 ):
-    """
-    Get detailed progress for a specific course
+    """Return (or create if absent) the user's progress for a course.
+
+    If progress does not exist yet we seed a minimal record so frontend never
+    has to treat 404 specially.
     """
     user_id = current_user["user_id"]
-    
     progress = db.query(StudentProgress).filter(
-        and_(
-            StudentProgress.user_id == user_id,
-            StudentProgress.course_id == course_id
-        )
+        and_(StudentProgress.user_id == user_id, StudentProgress.course_id == course_id)
     ).first()
-    
     if not progress:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No progress found for this course"
+        # Ensure course exists to avoid orphan progress
+        if not db.query(Course.id).filter(Course.id == course_id).first():
+            raise HTTPException(status_code=404, detail="Course not found")
+        # Compute total lessons/blocks for initial denominator
+        total_lessons = db.query(CourseLesson).filter(
+            and_(CourseLesson.course_id == course_id, CourseLesson.is_active == True)
+        ).count()
+        total_blocks = db.query(CourseBlock).filter(
+            and_(CourseBlock.course_id == course_id, CourseBlock.is_active == True)
+        ).count()
+        total_content = total_blocks if total_blocks > 0 else total_lessons
+        progress = StudentProgress(
+            user_id=user_id,
+            course_id=course_id,
+            total_lessons=total_content,
+            lessons_completed=0,
+            completion_percentage=0.0,
+            sessions_count=0,
+            total_study_time=0,
+            last_activity=datetime.utcnow()
         )
-    
+        db.add(progress)
+        db.commit()
+        db.refresh(progress)
     return progress
 
 @router.get("/{session_id}", response_model=StudySessionOut)
@@ -401,50 +417,33 @@ async def get_learning_analytics(
     current_user: dict = user_dependency,
     days: int = Query(30, description="Number of days to analyze")
 ):
-    """
-    Get learning analytics summary for the student
-    """
+    """Learning analytics summary (sessions, time, completion, streak)."""
+    if days < 1:
+        raise HTTPException(status_code=400, detail="days must be >= 1")
     user_id = current_user["user_id"]
     since_date = datetime.utcnow() - timedelta(days=days)
-    
-    # Get recent sessions
-    recent_sessions = db.query(StudySession).filter(
-        and_(
-            StudySession.user_id == user_id,
-            StudySession.started_at >= since_date
-        )
+    sessions = db.query(StudySession).filter(
+        and_(StudySession.user_id == user_id, StudySession.started_at >= since_date)
     ).all()
-    
-    # Calculate metrics
-    total_sessions = len(recent_sessions)
-    total_study_time = sum(s.duration_minutes or 0 for s in recent_sessions)
-    completed_sessions = len([s for s in recent_sessions if s.status == "completed"])
-    
-    # Average score from recent sessions with AI feedback
-    scored_sessions = [s for s in recent_sessions if s.ai_score is not None]
-    average_score = None
-    if scored_sessions:
-        average_score = sum(s.ai_score for s in scored_sessions) / len(scored_sessions)
-    
-    # Study streak (consecutive days with sessions)
-    study_dates = set()
-    for session in recent_sessions:
-        study_dates.add(session.started_at.date())
-    
-    streak_days = 0
-    current_date = datetime.utcnow().date()
-    while current_date in study_dates:
-        streak_days += 1
-        current_date = current_date - timedelta(days=1)
-    
+    total_sessions = len(sessions)
+    total_study_time = sum(s.duration_minutes or 0 for s in sessions)
+    completed_sessions = len([s for s in sessions if s.status == "completed"])
+    scored = [s for s in sessions if s.ai_score is not None]
+    average_score = round(sum(s.ai_score for s in scored) / len(scored), 2) if scored else None
+    study_dates = {s.started_at.date() for s in sessions}
+    streak = 0
+    cursor = datetime.utcnow().date()
+    while cursor in study_dates:
+        streak += 1
+        cursor = cursor - timedelta(days=1)
     return {
         "period_days": days,
         "total_sessions": total_sessions,
         "completed_sessions": completed_sessions,
         "total_study_time_minutes": total_study_time,
         "average_score": average_score,
-        "study_streak_days": streak_days,
-        "sessions_per_day": round(total_sessions / days, 2) if days > 0 else 0
+        "study_streak_days": streak,
+        "sessions_per_day": round(total_sessions / days, 2) if days else 0
     }
 
 # ===============================
