@@ -1,0 +1,9 @@
+# Add these to your existing requirements.txt file:
+
+# Google Generative AI (Gemini)
+google-generativeai>=0.3.0
+
+# Additional dependencies that might be needed
+python-multipart>=0.0.5  # For file uploads
+aiofiles>=0.8.0          # For async file operations
+reportlab>=3.6.0         # For PDF generation (if not already included)

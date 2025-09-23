@@ -1,18 +1,29 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, File, UploadFile, Form
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, desc, func
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
+import os
+import tempfile
+import mimetypes
+from pathlib import Path
 
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
-from models.afterschool_models import Course, CourseLesson, StudySession, StudentProgress
+from models.afterschool_models import (
+    Course, CourseLesson, CourseBlock, CourseAssignment, 
+    StudySession, StudentProgress, StudentAssignment
+)
+from models.study_area_models import StudentPDF
 from schemas.afterschool_schema import (
-    CourseCreate, CourseUpdate, CourseOut, CourseWithLessons,
+    CourseCreate, TextbookCourseCreate, TextbookCourseForm, CourseUpdate, CourseOut, CourseWithLessons,
+    CourseWithBlocks, ComprehensiveCourseOut, CourseBlockOut, CourseAssignmentOut,
     LessonCreate, LessonUpdate, LessonOut,
     CourseListResponse, LessonListResponse, MessageResponse,
     StudentDashboard, StudentProgressOut
 )
+from services.gemini_service import gemini_service
 
 router = APIRouter(prefix="/after-school/courses", tags=["After-School Courses"])
 
@@ -22,6 +33,320 @@ user_dependency = Depends(get_current_user)
 # ===============================
 # COURSE MANAGEMENT ENDPOINTS
 # ===============================
+
+@router.post("/from-textbook", response_model=ComprehensiveCourseOut)
+async def create_course_from_textbook(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    textbook_file: UploadFile = File(..., description="Upload textbook file (PDF, TXT, DOC, DOCX, PNG, JPG, WEBP)"),
+    title: str = Form(..., min_length=1, max_length=200, description="Course title"),
+    subject: str = Form(..., min_length=1, max_length=100, description="Subject (Math, Science, English, etc.)"),
+    textbook_source: Optional[str] = Form(None, description="Source information about the textbook"),
+    total_weeks: int = Form(8, ge=1, le=52, description="Total duration in weeks"),
+    blocks_per_week: int = Form(2, ge=1, le=5, description="Number of learning blocks per week"),
+    age_min: int = Form(3, ge=3, le=16, description="Minimum age for course"),
+    age_max: int = Form(16, ge=3, le=16, description="Maximum age for course"),
+    difficulty_level: str = Form("intermediate", description="Difficulty level: beginner, intermediate, advanced"),
+    include_assignments: bool = Form(True, description="Generate assignments automatically"),
+    include_resources: bool = Form(True, description="Generate resource links (videos, articles)")
+):
+    """
+    Create a comprehensive AI-generated course from uploaded textbook file
+    
+    This revolutionary endpoint transforms uploaded textbook files into structured, 
+    engaging courses using Gemini AI with:
+    
+    📁 **Advanced File Upload Support:**
+    - Accepts PDF, TXT, DOC, DOCX files and image formats (PNG, JPG, WEBP)
+    - Gemini native multimodal processing (reads text from images and documents)
+    - Processes scanned documents, textbook pages, and mixed content
+    - Advanced OCR and visual analysis capabilities
+    
+    🤖 **AI-Powered Course Generation:**
+    - Analyzes extracted textbook content with advanced AI
+    - Generates structured learning blocks and objectives
+    - Creates comprehensive course descriptions and metadata
+    
+    📚 **Textbook-to-Course Transformation:**
+    - Extracts key concepts and learning materials from files
+    - Organizes content into weekly blocks
+    - Maintains educational flow and progression
+    
+    🔗 **Automatic Resource Generation:**
+    - YouTube video links for visual learning
+    - Educational article recommendations
+    - Interactive learning tools and resources
+    
+    📝 **Integrated Assignment System:**
+    - Auto-generates assignments based on content
+    - Creates rubrics and grading criteria
+    - Sets appropriate deadlines and scheduling
+    
+    ⏰ **Time-Based Learning Structure:**
+    - Organizes content into manageable weekly blocks
+    - Balances learning load across time periods
+    - Provides estimated duration for each component
+    
+    🤖 **Gemini AI Native Processing:**
+    - Direct file processing without manual text extraction
+    - Multimodal analysis (text + images + diagrams)
+    - OCR for scanned documents and images
+    - Advanced content understanding and structure recognition
+    
+    🔒 **Security Features:**
+    - File type validation (documents and images)
+    - File size limits (max 20MB for native processing)
+    - Secure temporary file handling
+    - Native Gemini processing eliminates security risks of manual extraction
+    
+    **Request Format:** multipart/form-data
+    **File Types Supported:** .pdf, .txt, .doc, .docx, .png, .jpg, .jpeg, .gif, .webp
+    **Max File Size:** 20MB
+    
+    Returns a complete course structure ready for student enrollment
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Validate form data
+        if age_max < age_min:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="age_max must be greater than or equal to age_min"
+            )
+        
+        if difficulty_level not in ['beginner', 'intermediate', 'advanced']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="difficulty_level must be one of: beginner, intermediate, advanced"
+            )
+        
+        print(f"🚀 Starting AI course generation from uploaded textbook...")
+        print(f"📖 Course: {title} ({subject})")
+        print(f"📁 File: {textbook_file.filename} ({textbook_file.size} bytes)")
+        print(f"⏰ Structure: {total_weeks} weeks × {blocks_per_week} blocks")
+        
+        # Validate uploaded file
+        file_validation = gemini_service.validate_textbook_file(
+            textbook_file.filename, 
+            textbook_file.size
+        )
+        
+        if not file_validation["valid"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File validation failed: {'; '.join(file_validation['errors'])}"
+            )
+        
+        if file_validation["warnings"]:
+            print(f"⚠️ File warnings: {'; '.join(file_validation['warnings'])}")
+        
+        # Read and process the uploaded file
+        file_content = await textbook_file.read()
+        textbook_content = await gemini_service.process_uploaded_textbook_file(
+            file_content, textbook_file.filename
+        )
+        
+        # Validate content (skip for Gemini file URIs as they'll be processed natively)
+        if not textbook_content.startswith("GEMINI_FILE_URI:") and len(textbook_content.strip()) < 100:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Extracted text content is too short. Please provide a file with more substantial content (at least 100 characters)."
+            )
+        
+        if textbook_content.startswith("GEMINI_FILE_URI:"):
+            print(f"🤖 File uploaded to Gemini for native multimodal processing")
+        else:
+            print(f"📝 Extracted {len(textbook_content)} characters from uploaded file")
+        
+        # Generate course using Gemini AI
+        generated_course = await gemini_service.analyze_textbook_and_generate_course(
+            textbook_content=textbook_content,
+            course_title=title,
+            subject=subject,
+            target_age_range=(age_min, age_max),
+            total_weeks=total_weeks,
+            blocks_per_week=blocks_per_week,
+            difficulty_level=difficulty_level
+        )
+        
+        print(f"✅ AI generation complete. Creating database records...")
+        
+        # Refresh database connection after long AI generation process to avoid timeouts
+        try:
+            # Test if current connection is still alive
+            db.execute("SELECT 1")
+        except Exception:
+            # Connection is stale, create a fresh one
+            db.close()
+            from db.database import SessionLocal
+            db = SessionLocal()
+            print("🔄 Refreshed database connection after AI processing")
+        
+        try:
+            # Check for existing course with same title and subject
+            existing_course = db.query(Course).filter(
+                and_(
+                    Course.title.ilike(title.strip()),
+                    Course.subject.ilike(subject.strip()),
+                    Course.is_active == True
+                )
+            ).first()
+        
+            if existing_course:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Course already exists: A course titled '{title}' already exists for subject '{subject}'. Choose a different title or update the existing course."
+                )
+            
+            # Create the main course record
+            new_course = Course(
+                title=generated_course.title,
+                subject=generated_course.subject,
+                description=generated_course.description,
+                age_min=generated_course.age_min,
+                age_max=generated_course.age_max,
+                difficulty_level=generated_course.difficulty_level,
+                created_by=user_id,
+                total_weeks=generated_course.total_weeks,
+                blocks_per_week=generated_course.blocks_per_week,
+                textbook_source=textbook_source or f"Uploaded file: {textbook_file.filename}",
+                textbook_content=textbook_content[:10000] if not textbook_content.startswith("GEMINI_FILE_URI:") else f"Gemini processed file: {textbook_file.filename}",
+                generated_by_ai=True
+            )
+            
+            db.add(new_course)
+            db.commit()
+            db.refresh(new_course)
+        
+            print(f"📚 Course created with ID: {new_course.id}")
+            
+            # Create course blocks
+            created_blocks = []
+            for block_data in generated_course.blocks:
+                course_block = CourseBlock(
+                    course_id=new_course.id,
+                    week=block_data.week,
+                    block_number=block_data.block_number,
+                    title=block_data.title,
+                    description=block_data.description,
+                    learning_objectives=block_data.learning_objectives,
+                    content=block_data.content,
+                    duration_minutes=block_data.duration_minutes,
+                    resources=block_data.resources
+                )
+                
+                db.add(course_block)
+                created_blocks.append(course_block)
+        
+            # Create course assignments
+            created_assignments = []
+            
+            # Create block-specific assignments
+            for i, block_data in enumerate(generated_course.blocks):
+                for assignment_data in block_data.assignments:
+                    assignment = CourseAssignment(
+                        course_id=new_course.id,
+                        title=assignment_data["title"],
+                        description=assignment_data["description"],
+                        assignment_type=assignment_data["type"],
+                        instructions=assignment_data.get("instructions", ""),
+                        duration_minutes=assignment_data["duration_minutes"],
+                        points=assignment_data["points"],
+                        rubric=assignment_data["rubric"],
+                        week_assigned=block_data.week,
+                        due_days_after_assignment=assignment_data["due_days_after_block"],
+                        submission_format=assignment_data.get("submission_format", "PDF"),
+                        learning_outcomes=assignment_data.get("learning_outcomes", []),
+                        generated_by_ai=True
+                    )
+                    
+                    db.add(assignment)
+                    created_assignments.append(assignment)
+        
+            # Create overall course assignments (midterms, finals, projects)
+            for assignment_data in generated_course.overall_assignments:
+                assignment = CourseAssignment(
+                    course_id=new_course.id,
+                    title=assignment_data["title"],
+                    description=assignment_data["description"],
+                    assignment_type=assignment_data["type"],
+                    instructions=assignment_data.get("instructions", ""),
+                    duration_minutes=assignment_data["duration_minutes"],
+                    points=assignment_data["points"],
+                    rubric=assignment_data["rubric"],
+                    week_assigned=assignment_data["week_assigned"],
+                    due_days_after_assignment=assignment_data["due_days_after_assignment"],
+                    submission_format=assignment_data.get("submission_format", "PDF"),
+                    learning_outcomes=assignment_data.get("learning_outcomes", []),
+                    generated_by_ai=True
+                )
+                
+                db.add(assignment)
+                created_assignments.append(assignment)
+        
+            # Commit all changes
+            db.commit()
+            
+            # Refresh all objects to get IDs
+            for block in created_blocks:
+                db.refresh(block)
+            for assignment in created_assignments:
+                db.refresh(assignment)
+            
+            print(f"📝 Created {len(created_blocks)} blocks and {len(created_assignments)} assignments")
+            
+            # Calculate totals
+            total_blocks = len(created_blocks)
+            estimated_total_duration = sum(block.duration_minutes for block in created_blocks)
+            
+            # Prepare response
+            response_data = ComprehensiveCourseOut(
+                id=new_course.id,
+                title=new_course.title,
+                subject=new_course.subject,
+                description=new_course.description,
+                age_min=new_course.age_min,
+                age_max=new_course.age_max,
+                difficulty_level=new_course.difficulty_level,
+                created_by=new_course.created_by,
+                is_active=new_course.is_active,
+                total_weeks=new_course.total_weeks,
+                blocks_per_week=new_course.blocks_per_week,
+                textbook_source=new_course.textbook_source,
+                generated_by_ai=new_course.generated_by_ai,
+                created_at=new_course.created_at,
+                updated_at=new_course.updated_at,
+                blocks=[CourseBlockOut.from_orm(block) for block in created_blocks],
+                lessons=[],  # Keep empty for now (legacy support)
+                assignments=[CourseAssignmentOut.from_orm(assignment) for assignment in created_assignments],
+                total_blocks=total_blocks,
+                estimated_total_duration=estimated_total_duration
+            )
+            
+            print(f"🎉 Course generation complete! Course ID: {new_course.id}")
+            print(f"📊 Stats: {total_blocks} blocks, {len(created_assignments)} assignments, {estimated_total_duration} min total")
+            
+            return response_data
+            
+        finally:
+            # Ensure the new database connection is closed
+            db.close()
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error creating AI course: {str(e)}")
+        # Try to rollback if we have a database connection
+        try:
+            if 'db' in locals():
+                db.rollback()
+        except:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create AI-generated course: {str(e)}"
+        )
 
 @router.post("/", response_model=CourseOut)
 async def create_course(
@@ -351,6 +676,133 @@ async def list_courses(
 # STUDENT DASHBOARD ENDPOINTS (must be before /{course_id} route)
 # ===============================
 
+@router.post("/{course_id}/enroll")
+async def enroll_in_course(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Enroll student in a course and auto-assign all course assignments
+    
+    This endpoint handles the complete enrollment process:
+    - Verifies course exists and is active
+    - Creates student assignment records for all course assignments
+    - Sets appropriate due dates based on enrollment date
+    - Returns enrollment confirmation with assignment schedule
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Verify course exists and is active
+        course = db.query(Course).filter(
+            and_(Course.id == course_id, Course.is_active == True)
+        ).first()
+        
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Active course not found with ID {course_id}"
+            )
+        
+        # Check if student is already enrolled
+        existing_assignment = db.query(StudentAssignment).filter(
+            and_(
+                StudentAssignment.user_id == user_id,
+                StudentAssignment.course_id == course_id
+            )
+        ).first()
+        
+        if existing_assignment:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"You are already enrolled in course '{course.title}'"
+            )
+        
+        # Get all course assignments
+        course_assignments = db.query(CourseAssignment).filter(
+            and_(
+                CourseAssignment.course_id == course_id,
+                CourseAssignment.is_active == True
+            )
+        ).all()
+        
+        if not course_assignments:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This course has no assignments available for enrollment"
+            )
+        
+        enrollment_date = datetime.utcnow()
+        created_assignments = []
+        
+        # Create student assignment records for each course assignment
+        for assignment in course_assignments:
+            # Calculate due date based on enrollment date and assignment schedule
+            if assignment.week_assigned:
+                # For week-based assignments, calculate based on course start
+                days_from_start = (assignment.week_assigned - 1) * 7  # Week to days
+                assignment_date = enrollment_date + timedelta(days=days_from_start)
+                due_date = assignment_date + timedelta(days=assignment.due_days_after_assignment)
+            else:
+                # For immediate assignments, use direct offset
+                due_date = enrollment_date + timedelta(days=assignment.due_days_after_assignment)
+            
+            student_assignment = StudentAssignment(
+                user_id=user_id,
+                assignment_id=assignment.id,
+                course_id=course_id,
+                assigned_at=enrollment_date,
+                due_date=due_date,
+                status="assigned"
+            )
+            
+            db.add(student_assignment)
+            created_assignments.append(student_assignment)
+        
+        # Create initial progress record
+        progress = StudentProgress(
+            user_id=user_id,
+            course_id=course_id,
+            total_lessons=len(course.blocks),  # Use blocks instead of lessons
+            sessions_count=0,
+            started_at=enrollment_date,
+            last_activity=enrollment_date
+        )
+        
+        db.add(progress)
+        db.commit()
+        
+        # Refresh to get IDs
+        for assignment in created_assignments:
+            db.refresh(assignment)
+        
+        return {
+            "message": f"Successfully enrolled in course '{course.title}'",
+            "course_id": course_id,
+            "course_title": course.title,
+            "enrollment_date": enrollment_date,
+            "total_assignments": len(created_assignments),
+            "assignments_assigned": [
+                {
+                    "assignment_id": sa.assignment_id,
+                    "title": next(a.title for a in course_assignments if a.id == sa.assignment_id),
+                    "due_date": sa.due_date,
+                    "status": sa.status
+                }
+                for sa in created_assignments
+            ],
+            "next_steps": f"Start with Week 1 assignments. You have {course.total_weeks} weeks of learning ahead!"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to enroll in course: {str(e)}"
+        )
+
 @router.get("/dashboard", response_model=StudentDashboard)
 async def get_student_dashboard(
     db: db_dependency,
@@ -401,7 +853,7 @@ async def get_student_dashboard(
     if scored_sessions:
         average_score = sum(s.ai_score for s in scored_sessions) / len(scored_sessions)
     
-    return StudentDashboard(
+        return StudentDashboard(
         user_id=user_id,
         active_courses=active_courses,
         recent_sessions=recent_sessions,
@@ -410,7 +862,103 @@ async def get_student_dashboard(
         average_score=average_score
     )
 
-@router.get("/{course_id}", response_model=CourseWithLessons)
+@router.get("/assignments/my-assignments")
+async def get_my_assignments(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    course_id: Optional[int] = Query(None, description="Filter by course"),
+    status: Optional[str] = Query(None, description="Filter by status: assigned, submitted, graded, overdue"),
+    limit: int = Query(50, ge=1, le=100, description="Limit results")
+):
+    """
+    Get all assignments for the current student across all enrolled courses
+    
+    This endpoint provides comprehensive assignment management:
+    - Shows all assigned work with due dates and status
+    - Filters by course or assignment status
+    - Includes submission and grading information
+    - Helps students track their academic progress
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        query = db.query(StudentAssignment).options(
+            joinedload(StudentAssignment.assignment)
+        ).filter(StudentAssignment.user_id == user_id)
+        
+        if course_id:
+            query = query.filter(StudentAssignment.course_id == course_id)
+        
+        if status:
+            query = query.filter(StudentAssignment.status == status)
+        
+        # Update overdue assignments
+        current_time = datetime.utcnow()
+        overdue_assignments = db.query(StudentAssignment).filter(
+            and_(
+                StudentAssignment.user_id == user_id,
+                StudentAssignment.due_date < current_time,
+                StudentAssignment.status == "assigned"
+            )
+        ).all()
+        
+        for assignment in overdue_assignments:
+            assignment.status = "overdue"
+        
+        if overdue_assignments:
+            db.commit()
+        
+        # Get assignments with related data
+        student_assignments = query.order_by(StudentAssignment.due_date.asc()).limit(limit).all()
+        
+        # Format response with comprehensive information
+        assignments_data = []
+        for sa in student_assignments:
+            assignment_info = {
+                "student_assignment_id": sa.id,
+                "assignment_id": sa.assignment_id,
+                "course_id": sa.course_id,
+                "title": sa.assignment.title if sa.assignment else "Unknown Assignment",
+                "description": sa.assignment.description if sa.assignment else "",
+                "assignment_type": sa.assignment.assignment_type if sa.assignment else "homework",
+                "points": sa.assignment.points if sa.assignment else 100,
+                "duration_minutes": sa.assignment.duration_minutes if sa.assignment else 30,
+                "submission_format": sa.assignment.submission_format if sa.assignment else "PDF",
+                "assigned_at": sa.assigned_at,
+                "due_date": sa.due_date,
+                "status": sa.status,
+                "submitted_at": sa.submitted_at,
+                "grade": sa.grade,
+                "ai_grade": sa.ai_grade,
+                "manual_grade": sa.manual_grade,
+                "feedback": sa.feedback,
+                "days_until_due": (sa.due_date - current_time).days if sa.due_date > current_time else 0,
+                "is_overdue": sa.due_date < current_time and sa.status in ["assigned", "overdue"]
+            }
+            assignments_data.append(assignment_info)
+        
+        # Calculate summary statistics
+        total_assignments = len(assignments_data)
+        completed_assignments = len([a for a in assignments_data if a["status"] in ["submitted", "graded"]])
+        overdue_count = len([a for a in assignments_data if a["is_overdue"]])
+        upcoming_count = len([a for a in assignments_data if a["days_until_due"] <= 7 and not a["is_overdue"]])
+        
+        return {
+            "assignments": assignments_data,
+            "summary": {
+                "total_assignments": total_assignments,
+                "completed_assignments": completed_assignments,
+                "overdue_assignments": overdue_count,
+                "upcoming_assignments": upcoming_count,
+                "completion_rate": round((completed_assignments / total_assignments * 100), 1) if total_assignments > 0 else 0
+            }
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve assignments: {str(e)}"
+        )@router.get("/{course_id}", response_model=ComprehensiveCourseOut)
 async def get_course_comprehensive_details(
     course_id: int,
     db: db_dependency,
@@ -459,9 +1007,10 @@ async def get_course_comprehensive_details(
     user_id = current_user["user_id"]
     
     try:
-        # Get course with lessons using eager loading
+        # Get course with both lessons and blocks using eager loading
         course = db.query(Course).options(
-            joinedload(Course.lessons)
+            joinedload(Course.lessons),
+            joinedload(Course.blocks)
         ).filter(Course.id == course_id).first()
         
         if not course:
@@ -481,6 +1030,22 @@ async def get_course_comprehensive_details(
         active_lessons = [lesson for lesson in course.lessons if lesson.is_active]
         course.lessons = sorted(active_lessons, key=lambda x: x.order_index)
         
+        # Sort blocks by week and block_number for AI-generated courses
+        active_blocks = [block for block in course.blocks if block.is_active]
+        course.blocks = sorted(active_blocks, key=lambda x: (x.week, x.block_number))
+        
+        # Calculate totals for comprehensive response
+        total_blocks_count = len(course.blocks)
+        if course.generated_by_ai and course.blocks:
+            estimated_total_duration = sum(block.duration_minutes for block in course.blocks)
+        else:
+            estimated_total_duration = sum(lesson.estimated_duration for lesson in course.lessons)
+        
+        # Get course assignments for comprehensive view
+        course_assignments = db.query(CourseAssignment).filter(
+            CourseAssignment.course_id == course_id
+        ).all()
+        
         # Enhanced course response with comprehensive data
         course_data = {
             "id": course.id,
@@ -492,14 +1057,23 @@ async def get_course_comprehensive_details(
             "difficulty_level": course.difficulty_level,
             "created_by": course.created_by,
             "is_active": course.is_active,
+            "total_weeks": course.total_weeks,
+            "blocks_per_week": course.blocks_per_week,
+            "textbook_source": course.textbook_source,
+            "generated_by_ai": course.generated_by_ai,
             "created_at": course.created_at,
             "updated_at": course.updated_at,
-            "lessons": course.lessons
+            "lessons": course.lessons,
+            "blocks": course.blocks,
+            "assignments": course_assignments,
+            "total_blocks": total_blocks_count,
+            "estimated_total_duration": estimated_total_duration
         }
         
         if include_stats:
             # Calculate comprehensive course statistics
             total_lessons = len(course.lessons)
+            total_blocks = len(course.blocks)
             
             # Enrollment and engagement metrics
             total_enrollments = db.query(StudySession.user_id).filter(
@@ -543,8 +1117,15 @@ async def get_course_comprehensive_details(
                 )
             ).count()
             
+            # Calculate estimated duration based on content type
+            if course.generated_by_ai and course.blocks:
+                estimated_duration = sum(block.duration_minutes for block in course.blocks)
+            else:
+                estimated_duration = sum(lesson.estimated_duration for lesson in course.lessons)
+            
             course_data["statistics"] = {
                 "total_lessons": total_lessons,
+                "total_blocks": total_blocks,
                 "total_enrollments": total_enrollments,
                 "total_sessions": total_sessions,
                 "completed_sessions": completed_sessions,
@@ -552,7 +1133,7 @@ async def get_course_comprehensive_details(
                 "average_session_duration": round(avg_session_time, 2),
                 "average_score": round(avg_score, 2),
                 "recent_activity_7days": recent_activity,
-                "estimated_total_duration": sum(lesson.estimated_duration for lesson in course.lessons),
+                "estimated_total_duration": estimated_duration,
                 "engagement_level": "high" if recent_activity > 5 else "medium" if recent_activity > 2 else "low"
             }
         
@@ -634,7 +1215,7 @@ async def get_course_comprehensive_details(
         
         print(f"📖 Course details retrieved: '{course.title}' (ID: {course_id}) for user {user_id}")
         
-        return CourseWithLessons(**course_data)
+        return ComprehensiveCourseOut(**course_data)
         
     except HTTPException:
         raise
@@ -643,6 +1224,264 @@ async def get_course_comprehensive_details(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve course details: {str(e)}"
+        )
+
+@router.get("/{course_id}/blocks/{block_id}/assignments")
+async def get_block_assignments(
+    course_id: int,
+    block_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get assignments for a specific course block
+    Enables seamless flow from reading block content to completing assignments
+    """
+    try:
+        # Verify course exists and user has access
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+        
+        # Verify block exists in this course
+        block = db.query(CourseBlock).filter(
+            and_(CourseBlock.id == block_id, CourseBlock.course_id == course_id)
+        ).first()
+        if not block:
+            raise HTTPException(status_code=404, detail="Block not found in this course")
+        
+        # Get assignments for this block
+        assignments = db.query(CourseAssignment).filter(
+            CourseAssignment.block_id == block_id
+        ).all()
+        
+        # Get user's assignment progress
+        user_id = current_user["user_id"]
+        assignment_progress = []
+        
+        for assignment in assignments:
+            # Check if student has this assignment assigned
+            student_assignment = db.query(StudentAssignment).filter(
+                and_(
+                    StudentAssignment.assignment_id == assignment.id,
+                    StudentAssignment.user_id == user_id
+                )
+            ).first()
+            
+            assignment_progress.append({
+                "assignment": assignment,
+                "assigned": student_assignment is not None,
+                "status": student_assignment.status if student_assignment else "not_assigned",
+                "grade": student_assignment.grade if student_assignment else None,
+                "due_date": student_assignment.due_date.isoformat() if student_assignment and student_assignment.due_date else None,
+                "submitted_at": student_assignment.submitted_at.isoformat() if student_assignment and student_assignment.submitted_at else None
+            })
+        
+        return {
+            "course_id": course_id,
+            "course_title": course.title,
+            "block": {
+                "id": block.id,
+                "title": block.title,
+                "week": block.week,
+                "block_number": block.block_number,
+                "description": block.description,
+                "learning_objectives": block.learning_objectives,
+                "content": block.content,
+                "duration_minutes": block.duration_minutes
+            },
+            "assignments": assignment_progress,
+            "total_assignments": len(assignments),
+            "completion_flow": {
+                "next_step": "Choose an assignment to complete",
+                "auto_grading": True,
+                "instructions": "Upload your work images and they will automatically convert to PDF and be graded by AI"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error retrieving block assignments: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve block assignments: {str(e)}"
+        )
+
+@router.post("/{course_id}/assignments/{assignment_id}/submit-and-grade")
+async def submit_assignment_and_auto_grade(
+    course_id: int,
+    assignment_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Submit assignment work and automatically trigger AI grading
+    
+    This endpoint provides the seamless flow:
+    1. Check if student has uploaded work (images/PDF)
+    2. Generate PDF from images if needed
+    3. Automatically grade using AI
+    4. Return results immediately
+    
+    No manual intervention required - fully automated workflow
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Verify course and assignment exist
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise HTTPException(status_code=404, detail="Course not found")
+            
+        assignment = db.query(CourseAssignment).filter(
+            and_(
+                CourseAssignment.id == assignment_id,
+                CourseAssignment.course_id == course_id
+            )
+        ).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found in this course")
+        
+        print(f"🎯 Processing submission for assignment: {assignment.title}")
+        
+        # Check if student has a StudentAssignment record
+        student_assignment = db.query(StudentAssignment).filter(
+            and_(
+                StudentAssignment.assignment_id == assignment_id,
+                StudentAssignment.user_id == user_id
+            )
+        ).first()
+        
+        if not student_assignment:
+            raise HTTPException(
+                status_code=404, 
+                detail="You are not enrolled in this assignment. Please contact your instructor."
+            )
+        
+        # Check for uploaded work - first check for PDF
+        student_pdf = db.query(StudentPDF).filter(
+            and_(
+                StudentPDF.assignment_id == assignment_id,
+                StudentPDF.student_id == user_id
+            )
+        ).first()
+        
+        submission_content = ""
+        
+        if student_pdf:
+            print(f"📄 Found existing PDF submission: {student_pdf.pdf_filename}")
+            submission_content = f"PDF submission: {student_pdf.pdf_filename} ({student_pdf.image_count} images)"
+        else:
+            # Check for images and try to generate PDF
+            from models.study_area_models import StudentImage
+            
+            student_images = db.query(StudentImage).filter(
+                and_(
+                    StudentImage.assignment_id == assignment_id,
+                    StudentImage.student_id == user_id
+                )
+            ).all()
+            
+            if student_images:
+                print(f"📸 Found {len(student_images)} images - generating PDF...")
+                # Import the function we need
+                from Endpoints.upload import generate_student_pdf
+                
+                # Generate PDF from images
+                generated_pdf = await generate_student_pdf(
+                    db, user_id, assignment_id, student_images
+                )
+                
+                if generated_pdf:
+                    student_pdf = generated_pdf
+                    submission_content = f"Generated PDF from {len(student_images)} images"
+                    print(f"✅ PDF generated successfully: {generated_pdf.pdf_filename}")
+                else:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to generate PDF from uploaded images"
+                    )
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No work found to submit. Please upload your assignment images first."
+                )
+        
+        # Now trigger automatic grading
+        print(f"🤖 Starting automatic AI grading...")
+        
+        # Import Gemini service
+        from services.gemini_service import GeminiService
+        gemini_service = GeminiService()
+        
+        # Grade the submission
+        grade_result = await gemini_service.grade_submission(
+            submission_content=submission_content,
+            assignment_title=assignment.title,
+            assignment_description=assignment.description or assignment.title,
+            rubric=assignment.rubric or assignment.instructions or "Standard academic assessment",
+            max_points=assignment.points,
+            submission_type=assignment.assignment_type
+        )
+        
+        # Update student assignment with results
+        student_assignment.ai_grade = grade_result["percentage"]
+        student_assignment.grade = grade_result["percentage"]
+        student_assignment.feedback = grade_result.get("detailed_feedback", "")
+        student_assignment.submitted_at = datetime.utcnow()
+        student_assignment.status = "graded"
+        
+        if student_pdf:
+            student_assignment.submission_file_path = student_pdf.pdf_path
+            student_pdf.is_graded = True
+        
+        db.commit()
+        
+        print(f"🎉 Automatic grading complete: {grade_result['percentage']}%")
+        
+        return {
+            "status": "success",
+            "message": "Assignment submitted and automatically graded",
+            "course": {
+                "id": course.id,
+                "title": course.title
+            },
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "type": assignment.assignment_type,
+                "max_points": assignment.points
+            },
+            "submission": {
+                "submitted_at": student_assignment.submitted_at.isoformat(),
+                "content_type": "PDF" if student_pdf else "Text",
+                "file_name": student_pdf.pdf_filename if student_pdf else None
+            },
+            "grade_result": {
+                "score": grade_result.get("score", 0),
+                "percentage": grade_result["percentage"],
+                "max_points": assignment.points,
+                "grade_letter": grade_result.get("grade_letter", ""),
+                "feedback": grade_result.get("detailed_feedback", ""),
+                "strengths": grade_result.get("strengths", []),
+                "improvements": grade_result.get("improvements", []),
+                "ai_confidence": grade_result.get("confidence", 85)
+            },
+            "next_steps": {
+                "continue_learning": True,
+                "next_block": "Continue to next learning block",
+                "view_progress": f"Check your progress in the course dashboard"
+            }
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error in submit and grade flow: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to submit and grade assignment: {str(e)}"
         )
 
 @router.put("/{course_id}", response_model=CourseOut)

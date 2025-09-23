@@ -24,3 +24,9 @@ httpx
 # for bulk image to PDF conversion
 pillow
 reportlab
+
+# for Gemini AI integration with native file processing
+google-generativeai>=0.3.0
+
+# Note: PyPDF2 and python-docx are no longer needed - 
+# Gemini handles all file processing natively
