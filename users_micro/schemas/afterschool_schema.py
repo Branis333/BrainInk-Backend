@@ -176,6 +176,7 @@ class CourseAssignmentOut(BaseModel):
     points: int
     rubric: Optional[str]
     week_assigned: Optional[int]
+    block_id: Optional[int]
     due_days_after_assignment: int
     submission_format: Optional[str]
     learning_outcomes: Optional[List[str]]

@@ -969,6 +969,41 @@ async def get_my_assignments(
             detail=f"Failed to retrieve assignments: {str(e)}"
         )
 
+@router.get("/{course_id}/assignments", response_model=List[CourseAssignmentOut])
+async def list_course_assignments(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    active_only: bool = Query(True, description="Return only active assignments"),
+    block_id: Optional[int] = Query(None, description="Filter by related block id"),
+    include_inactive: bool = Query(False, description="Include inactive assignments (overrides active_only)")
+):
+    """Return assignment definition records for the specified course.
+
+    These are course-level assignment templates (not student-specific). The
+    frontend uses this endpoint to show available assignments even if they
+    have not yet been assigned to the current student.
+    """
+    # Ensure course exists
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    query = db.query(CourseAssignment).filter(CourseAssignment.course_id == course_id)
+
+    if block_id is not None:
+        query = query.filter(CourseAssignment.block_id == block_id)
+
+    if not include_inactive and active_only:
+        query = query.filter(CourseAssignment.is_active == True)  # noqa: E712
+
+    assignments = query.order_by(
+        CourseAssignment.week_assigned.nulls_last(),
+        CourseAssignment.id
+    ).all()
+
+    return assignments
+
 @router.get("/{course_id}", response_model=ComprehensiveCourseOut)
 async def get_course_comprehensive_details(
     course_id: int,
