@@ -958,7 +958,9 @@ async def get_my_assignments(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve assignments: {str(e)}"
-        )@router.get("/{course_id}", response_model=ComprehensiveCourseOut)
+        )
+
+@router.get("/{course_id}", response_model=ComprehensiveCourseOut)
 async def get_course_comprehensive_details(
     course_id: int,
     db: db_dependency,
