@@ -113,6 +113,21 @@ class CourseOut(BaseModel):
 
     class Config:
         from_attributes = True
+    
+    @validator('total_weeks', pre=True, always=True)
+    def validate_total_weeks(cls, v):
+        """Ensure total_weeks is never None"""
+        return v if v is not None else 8
+    
+    @validator('blocks_per_week', pre=True, always=True)
+    def validate_blocks_per_week(cls, v):
+        """Ensure blocks_per_week is never None"""
+        return v if v is not None else 2
+    
+    @validator('generated_by_ai', pre=True, always=True)
+    def validate_generated_by_ai(cls, v):
+        """Ensure generated_by_ai is never None"""
+        return v if v is not None else False
 
 # ===============================
 # BLOCK SCHEMAS
@@ -297,11 +312,16 @@ class StudySessionOut(BaseModel):
 
 class AISubmissionCreate(BaseModel):
     course_id: int = Field(..., description="Course ID")
-    lesson_id: Optional[int] = Field(None, description="Lesson ID (for legacy courses)")
-    block_id: Optional[int] = Field(None, description="Course Block ID (for AI-generated courses)")
+    lesson_id: Optional[int] = Field(default=None, description="Lesson ID (for legacy courses)")
+    block_id: Optional[int] = Field(default=None, description="Course Block ID (for AI-generated courses)")
     session_id: int = Field(..., description="Study session ID")
-    assignment_id: Optional[int] = Field(None, description="Assignment ID (if submission is for assignment)")
+    assignment_id: Optional[int] = Field(default=None, description="Assignment ID (if submission is for assignment)")
     submission_type: str = Field(..., description="Type of submission")
+    
+    @validator('lesson_id', 'block_id', 'assignment_id', pre=True, always=True)
+    def validate_nullable_ids(cls, v):
+        """Ensure nullable IDs handle None gracefully"""
+        return v if v is not None else None
     
     @validator('submission_type')
     def validate_submission_type(cls, v):
@@ -330,21 +350,21 @@ class AISubmissionOut(BaseModel):
     id: int
     user_id: int
     course_id: int
-    lesson_id: Optional[int] = None  # Made optional for block-based sessions
-    block_id: Optional[int] = None  # New field for AI-generated course blocks
+    lesson_id: Optional[int] = Field(default=None)  # Made optional for block-based sessions
+    block_id: Optional[int] = Field(default=None)  # New field for AI-generated course blocks
     session_id: int
-    assignment_id: Optional[int] = None  # New field for assignment submissions
+    assignment_id: Optional[int] = Field(default=None)  # New field for assignment submissions
     submission_type: str
     original_filename: Optional[str]
     file_path: Optional[str]
     file_type: Optional[str]
-    ai_processed: bool
+    ai_processed: bool = Field(default=False)
     ai_score: Optional[float]
     ai_feedback: Optional[str]
     ai_corrections: Optional[str]
     ai_strengths: Optional[str]
     ai_improvements: Optional[str]
-    requires_review: bool
+    requires_review: bool = Field(default=False)
     reviewed_by: Optional[int]
     manual_score: Optional[float]
     manual_feedback: Optional[str]
@@ -354,6 +374,16 @@ class AISubmissionOut(BaseModel):
 
     class Config:
         from_attributes = True
+    
+    @validator('ai_processed', pre=True, always=True)
+    def validate_ai_processed(cls, v):
+        """Ensure ai_processed is never None"""
+        return v if v is not None else False
+    
+    @validator('requires_review', pre=True, always=True)
+    def validate_requires_review(cls, v):
+        """Ensure requires_review is never None"""
+        return v if v is not None else False
 
 # ===============================
 # STUDENT PROGRESS SCHEMAS
