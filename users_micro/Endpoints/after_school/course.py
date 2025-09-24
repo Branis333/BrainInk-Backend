@@ -821,46 +821,60 @@ async def get_student_dashboard(
     Get student dashboard with courses and progress
     """
     user_id = current_user["user_id"]
-    
-    # Get active courses the student is enrolled in (through study sessions)
-    active_course_ids = db.query(StudySession.course_id).filter(
-        StudySession.user_id == user_id
-    ).distinct().all()
-    
+
+    # ------------------------------
+    # Multi-source course aggregation
+    # ------------------------------
+    # Collect course IDs from: study sessions, student assignments, student progress
+    session_course_ids = [cid for (cid,) in db.query(StudySession.course_id).filter(StudySession.user_id == user_id).distinct().all()]
+    assignment_course_ids = [cid for (cid,) in db.query(StudentAssignment.course_id).filter(StudentAssignment.user_id == user_id).distinct().all()]
+    progress_course_ids = [cid for (cid,) in db.query(StudentProgress.course_id).filter(StudentProgress.user_id == user_id).distinct().all()]
+
+    aggregated_ids_set = set(session_course_ids) | set(assignment_course_ids) | set(progress_course_ids)
+
+    # Fetch active courses for all collected IDs
     active_courses = []
-    if active_course_ids:
-        course_ids = [course_id[0] for course_id in active_course_ids]
+    if aggregated_ids_set:
         active_courses = db.query(Course).filter(
             and_(
-                Course.id.in_(course_ids),
-                Course.is_active == True
+                Course.id.in_(aggregated_ids_set),
+                Course.is_active == True  # noqa: E712
             )
-        ).all()
-    
-    # Get recent study sessions (last 10)
+        ).order_by(desc(Course.created_at)).all()
+
+    # Recent study sessions (limit 10) - still strictly from StudySession
     recent_sessions = db.query(StudySession).filter(
         StudySession.user_id == user_id
     ).order_by(StudySession.started_at.desc()).limit(10).all()
-    
-    # Get progress summary
+
+    # Progress summary (all progress rows for user)
     progress_summary = db.query(StudentProgress).filter(
         StudentProgress.user_id == user_id
     ).all()
-    
-    # Calculate total study time and average score
+
+    # Total study time & average score calculations
     all_sessions = db.query(StudySession).filter(
         and_(
             StudySession.user_id == user_id,
             StudySession.duration_minutes.isnot(None)
         )
     ).all()
-    
-    total_study_time = sum(session.duration_minutes or 0 for session in all_sessions)
-    
+    total_study_time = sum((s.duration_minutes or 0) for s in all_sessions)
     scored_sessions = [s for s in all_sessions if s.ai_score is not None]
-    average_score = None
-    if scored_sessions:
-        average_score = sum(s.ai_score for s in scored_sessions) / len(scored_sessions)
+    average_score = (sum(s.ai_score for s in scored_sessions) / len(scored_sessions)) if scored_sessions else None
+
+    # Debug logging to verify aggregation sources
+    print(
+        "📊 Dashboard aggregation:",
+        {
+            "user_id": user_id,
+            "sessions_courses": session_course_ids,
+            "assignments_courses": assignment_course_ids,
+            "progress_courses": progress_course_ids,
+            "aggregated_unique_ids": list(aggregated_ids_set),
+            "active_courses_returned": [c.id for c in active_courses]
+        }
+    )
 
     return StudentDashboard(
         user_id=user_id,

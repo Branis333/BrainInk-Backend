@@ -132,12 +132,27 @@ async def start_study_session(
         db.flush()  # obtain PK before progress update
 
         debug_context["stage"] = "progress_lookup"
-        progress = db.query(StudentProgress).filter(
-            and_(
-                StudentProgress.user_id == user_id,
-                StudentProgress.course_id == session_data.course_id
-            )
-        ).with_for_update(nowait=False).first()
+        # Attempt row-level lock; fallback gracefully if unsupported (e.g., SQLite)
+        progress = None
+        try:
+            progress = db.query(StudentProgress).filter(
+                and_(
+                    StudentProgress.user_id == user_id,
+                    StudentProgress.course_id == session_data.course_id
+                )
+            ).with_for_update(nowait=False).first()
+            debug_context["progress_lock"] = "acquired"
+        except Exception as lock_err:  # Broad: dialect differences
+            db.rollback()  # rollback possible partial state from failed FOR UPDATE
+            debug_context["progress_lock"] = f"lock_failed:{type(lock_err).__name__}"
+            # Retry without FOR UPDATE in a fresh transaction
+            progress = db.query(StudentProgress).filter(
+                and_(
+                    StudentProgress.user_id == user_id,
+                    StudentProgress.course_id == session_data.course_id
+                )
+            ).first()
+            debug_context["progress_lock_fallback"] = True
 
         if not progress:
             debug_context["stage"] = "progress_seed"
@@ -163,7 +178,19 @@ async def start_study_session(
         else:
             progress.sessions_count += 1
             progress.last_activity = datetime.utcnow()
-        db.commit()
+        try:
+            db.commit()
+        except Exception as commit_err:
+            debug_context["stage"] = "commit_failure"
+            debug_context["commit_error_type"] = type(commit_err).__name__
+            debug_context["commit_error"] = str(commit_err)[:200]
+            print("❌ StudySession commit failure", debug_context)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # Re-raise to outer handler
+            raise
         db.refresh(new_session)
 
         target_info = lesson.title if lesson else (f"Block {block.week}.{block.block_number}: {block.title}" if block else "Unknown")
@@ -173,16 +200,34 @@ async def start_study_session(
         db.rollback()
         raise
     except Exception as e:
+        # Attempt specific DB error classification
+        from sqlalchemy.exc import OperationalError, IntegrityError, ProgrammingError
+        internal_code = None
         try:
             db.rollback()
         except Exception:
             pass
-        debug_context["error_type"] = type(e).__name__
-        debug_context["error"] = str(e)
+        if isinstance(e, IntegrityError):
+            internal_code = "integrity_error"
+        elif isinstance(e, OperationalError):
+            internal_code = "operational_error"
+        elif isinstance(e, ProgrammingError):
+            internal_code = "programming_error"
+        else:
+            internal_code = type(e).__name__
+        debug_context["error_type"] = internal_code
+        debug_context["error_message"] = str(e)[:500]
         print("❌ StudySession start failure", debug_context)
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail="Database connection error")
+        # Surface a structured diagnostic while keeping 500 semantics
+        raise HTTPException(status_code=500, detail={
+            "message": "Study session start failed",
+            "code": internal_code,
+            "stage": debug_context.get("stage"),
+            "progress_lock": debug_context.get("progress_lock"),
+            "commit_error": debug_context.get("commit_error")
+        })
 
 @router.put("/{session_id}/end", response_model=StudySessionOut)
 async def end_study_session(
