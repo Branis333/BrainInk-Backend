@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, status, Query
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import and_, or_, desc, func
+from sqlalchemy import and_, or_, desc, func, inspect, text
 from typing import List, Optional
 from datetime import datetime, timedelta
 import json
@@ -119,6 +119,42 @@ async def start_study_session(
             debug_context["stage"] = "active_session_exists"
             print("ℹ️ StudySession start - active session already exists", debug_context)
             raise HTTPException(status_code=400, detail=f"You already have an active session for {session_target_type}: {target_name}")
+
+        # ---------------------------------------------
+        # Runtime schema self-healing for block sessions
+        # ---------------------------------------------
+        if session_target_type == "block" and session_data.block_id and not session_data.lesson_id:
+            try:
+                debug_context["stage"] = "schema_inspect"
+                insp = inspect(db.bind)
+                cols = {c['name']: c for c in insp.get_columns('as_study_sessions')}
+                changed = False
+                # Add block_id column if missing
+                if 'block_id' not in cols:
+                    print("🔧 Adding missing block_id column to as_study_sessions (runtime migration)")
+                    db.execute(text('ALTER TABLE as_study_sessions ADD COLUMN block_id INTEGER REFERENCES as_course_blocks(id)'))
+                    changed = True
+                # Drop NOT NULL from lesson_id if still enforced
+                if 'lesson_id' in cols and not cols['lesson_id'].get('nullable', True):
+                    print("🔧 Dropping NOT NULL constraint on lesson_id to allow block-based sessions")
+                    db.execute(text('ALTER TABLE as_study_sessions ALTER COLUMN lesson_id DROP NOT NULL'))
+                    changed = True
+                if changed:
+                    db.commit()  # finalize DDL
+                    debug_context["schema_auto_migrated"] = True
+                    # New transaction will begin automatically on next use
+                else:
+                    debug_context["schema_auto_migrated"] = False
+            except Exception as mig_err:
+                # Non-fatal: we surface a clearer error so user can run manual migration
+                debug_context["stage"] = "schema_migration_failed"
+                debug_context["schema_error"] = str(mig_err)[:400]
+                print("❌ Runtime schema migration failed", debug_context)
+                raise HTTPException(status_code=500, detail={
+                    "message": "Study session start failed: database schema incompatible (block sessions require nullable lesson_id & block_id column)",
+                    "code": "schema_incompatible",
+                    "schema_error": str(mig_err)[:400]
+                })
 
         debug_context["stage"] = "create_session"
         new_session = StudySession(
