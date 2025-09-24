@@ -116,9 +116,9 @@ async def start_study_session(
 
         if active_session:
             target_name = lesson.title if lesson else (block.title if block else "Unknown")
-            debug_context["stage"] = "active_session_exists"
-            print("ℹ️ StudySession start - active session already exists", debug_context)
-            raise HTTPException(status_code=400, detail=f"You already have an active session for {session_target_type}: {target_name}")
+            debug_context["stage"] = "active_session_exists_return"
+            print("↩️ Returning existing active session instead of error", debug_context)
+            return active_session
 
         # ---------------------------------------------
         # Runtime schema self-healing for block sessions
@@ -395,24 +395,23 @@ async def get_user_sessions(
     db: db_dependency,
     current_user: dict = user_dependency,
     course_id: Optional[int] = Query(None, description="Filter by course"),
+    block_id: Optional[int] = Query(None, description="Filter by block"),
+    lesson_id: Optional[int] = Query(None, description="Filter by lesson"),
     status: Optional[str] = Query(None, description="Filter by status"),
     limit: int = Query(50, ge=1, le=100, description="Limit results")
 ):
-    """
-    Get user's study sessions with filtering
-    """
+    """Get user's study sessions with richer filtering (course / block / lesson / status)."""
     user_id = current_user["user_id"]
-    
     query = db.query(StudySession).filter(StudySession.user_id == user_id)
-    
     if course_id:
         query = query.filter(StudySession.course_id == course_id)
-    
+    if block_id:
+        query = query.filter(StudySession.block_id == block_id)
+    if lesson_id:
+        query = query.filter(StudySession.lesson_id == lesson_id)
     if status:
         query = query.filter(StudySession.status == status)
-    
     sessions = query.order_by(desc(StudySession.started_at)).limit(limit).all()
-    
     return sessions
 
 # ===============================
