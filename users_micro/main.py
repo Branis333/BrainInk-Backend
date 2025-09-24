@@ -1,12 +1,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
-from Endpoints.after_school import course, grades as after_school_grades, uploads as after_school_uploads
+from Endpoints.after_school import course, grades as after_school_grades, uploads as after_school_uploads, reading_assistant
 from db.connection import engine
 from db.database import test_connection
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 import models.users_models as models
 import models.study_area_models as study_models
 import models.afterschool_models as afterschool_models
+import models.reading_assistant_models as reading_models
 from sqlalchemy import text
 
 app = FastAPI(
@@ -75,7 +80,8 @@ async def startup_event():
         print(f"✅ Loaded after_school course router with {len(course.router.routes)} endpoints")
         print(f"✅ Loaded after_school grades router with {len(after_school_grades.router.routes)} endpoints")
         print(f"✅ Loaded after_school uploads router with {len(after_school_uploads.router.routes)} endpoints")
-        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes) + len(reports.router.routes) + len(calendar.router.routes) + len(course.router.routes) + len(after_school_grades.router.routes) + len(after_school_uploads.router.routes)
+        print(f"✅ Loaded reading assistant router with {len(reading_assistant.router.routes)} endpoints")
+        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes) + len(reports.router.routes) + len(calendar.router.routes) + len(course.router.routes) + len(after_school_grades.router.routes) + len(after_school_uploads.router.routes) + len(reading_assistant.router.routes)
         print(f"🔄 Total endpoints: {total_endpoints}")
     except Exception as e:
         print(f"❌ Supabase connection failed: {e}")
@@ -84,6 +90,7 @@ async def startup_event():
 models.Base.metadata.create_all(bind=engine)
 study_models.Base.metadata.create_all(bind=engine)
 afterschool_models.Base.metadata.create_all(bind=engine)
+reading_models.Base.metadata.create_all(bind=engine)
 
 # Include routers
 app.include_router(auth.router)
@@ -103,6 +110,7 @@ app.include_router(calendar.router, prefix="/study-area/calendar")
 app.include_router(course.router)  # Already has prefix /after-school/courses
 app.include_router(after_school_grades.router)  # Already has prefix /after-school/sessions  
 app.include_router(after_school_uploads.router)  # Already has prefix /after-school/uploads
+app.include_router(reading_assistant.router)  # Already has prefix /after-school/reading-assistant
 
 @app.get("/")
 def root():

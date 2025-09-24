@@ -1250,5 +1250,214 @@ class GeminiService:
         
         return validation_result
 
+    # ===============================
+    # READING ASSISTANT AI METHODS
+    # ===============================
+    
+    async def generate_text(self, prompt: str, **kwargs) -> str:
+        """Generate text using Gemini AI - core method for reading assistant"""
+        try:
+            generation_config = genai.types.GenerationConfig(
+                temperature=kwargs.get('temperature', 0.7),
+                max_output_tokens=kwargs.get('max_tokens', 1024),
+                response_mime_type=kwargs.get('response_format', 'text/plain')
+            )
+            
+            response = await asyncio.to_thread(
+                self.config.model.generate_content,
+                prompt,
+                generation_config=generation_config
+            )
+            
+            return response.text
+            
+        except Exception as e:
+            print(f"❌ Gemini text generation error: {e}")
+            raise Exception(f"AI text generation failed: {str(e)}")
+    
+    async def generate_reading_content_ai(
+        self,
+        reading_level: str,
+        difficulty_level: str,
+        content_type: str,
+        topic: str = None,
+        word_count: int = 20,
+        phonics_focus: List[str] = None
+    ) -> Dict[str, Any]:
+        """Generate age-appropriate reading content for students"""
+        
+        phonics_focus = phonics_focus or ["basic phonics"]
+        topic = topic or "everyday activities"
+        
+        prompt = f"""
+        Create engaging reading content for early learners.
+        
+        SPECIFICATIONS:
+        - Reading Level: {reading_level}
+        - Difficulty: {difficulty_level}  
+        - Content Type: {content_type}
+        - Topic: {topic}
+        - Target Word Count: {word_count}
+        - Phonics Focus: {', '.join(phonics_focus)}
+        
+        REQUIREMENTS:
+        1. Use age-appropriate vocabulary and sentence structure
+        2. Include repetitive patterns for building confidence
+        3. Focus on sight words and phonics patterns specified
+        4. Make content engaging and relatable to children
+        5. Ensure proper punctuation for reading practice
+        
+        READING LEVEL GUIDELINES:
+        - KINDERGARTEN: 3-8 words per sentence, simple CVC words
+        - GRADE_1: 5-12 words per sentence, basic compound words  
+        - GRADE_2: 8-18 words per sentence, more complex vocabulary
+        - GRADE_3: 10-25 words per sentence, chapter-like content
+        
+        Return ONLY a JSON object with this exact structure:
+        {{
+            "title": "Content title",
+            "content": "The reading text content", 
+            "vocabulary_words": {{"word1": "definition1", "word2": "definition2"}},
+            "learning_objectives": ["objective1", "objective2"],
+            "phonics_focus": {phonics_focus},
+            "word_count": {word_count},
+            "estimated_reading_time": 60
+        }}
+        """
+        
+        try:
+            response = await self.generate_text(
+                prompt, 
+                response_format="application/json",
+                temperature=0.8
+            )
+            
+            # Clean and parse JSON response
+            json_text = response.strip()
+            if json_text.startswith('```json'):
+                json_text = json_text[7:-3].strip()
+            elif json_text.startswith('```'):
+                json_text = json_text[3:-3].strip()
+                
+            return json.loads(json_text)
+            
+        except Exception as e:
+            print(f"❌ Reading content generation failed: {e}")
+            raise Exception(f"Failed to generate reading content: {str(e)}")
+    
+    async def analyze_speech_performance(
+        self,
+        expected_text: str,
+        transcribed_text: str,
+        reading_level: str
+    ) -> Dict[str, Any]:
+        """Analyze student's reading performance and provide feedback"""
+        
+        prompt = f"""
+        Analyze a student's reading performance and provide educational feedback.
+        
+        STUDENT READING DETAILS:
+        - Reading Level: {reading_level}
+        - Expected Text: "{expected_text}"
+        - What Student Said: "{transcribed_text}"
+        
+        ANALYSIS REQUIREMENTS:
+        1. Calculate accuracy score (0.0 to 1.0)
+        2. Identify mispronounced words
+        3. Provide encouraging, age-appropriate feedback
+        4. Suggest specific pronunciation improvements
+        5. Highlight words that were read correctly
+        
+        Return ONLY a JSON object:
+        {{
+            "accuracy_score": 0.85,
+            "overall_feedback": "Great job reading! You pronounced most words clearly.",
+            "word_feedback": [
+                {{"word": "cat", "expected": "cat", "said": "cat", "pronunciation_score": 1.0, "feedback": "Perfect!"}},
+                {{"word": "big", "expected": "big", "said": "bag", "pronunciation_score": 0.7, "feedback": "Try the 'i' sound like 'ih'"}}
+            ],
+            "suggestions": ["Practice short 'i' sounds", "Try reading a bit slower"],
+            "correctly_read_words": ["cat", "the", "is"],
+            "needs_practice_words": ["big"],
+            "encouragement": "You're doing great! Keep practicing those short vowel sounds."
+        }}
+        """
+        
+        try:
+            response = await self.generate_text(
+                prompt,
+                response_format="application/json",
+                temperature=0.6
+            )
+            
+            # Clean and parse JSON response
+            json_text = response.strip()
+            if json_text.startswith('```json'):
+                json_text = json_text[7:-3].strip()
+            elif json_text.startswith('```'):
+                json_text = json_text[3:-3].strip()
+                
+            return json.loads(json_text)
+            
+        except Exception as e:
+            print(f"❌ Speech analysis failed: {e}")
+            raise Exception(f"Failed to analyze speech performance: {str(e)}")
+    
+    async def generate_personalized_recommendations(
+        self,
+        student_profile: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """Generate personalized reading content recommendations"""
+        
+        prompt = f"""
+        Generate personalized reading recommendations for a student.
+        
+        STUDENT PROFILE:
+        - Reading Level: {student_profile.get('reading_level', 'KINDERGARTEN')}
+        - Current Accuracy: {student_profile.get('current_accuracy', 0.8)}
+        - Struggle Areas: {student_profile.get('struggle_areas', [])}
+        - Interests: {student_profile.get('interests', [])}
+        - Recently Completed: {len(student_profile.get('completed_content_ids', []))} items
+        
+        Create 3-5 content recommendations that:
+        1. Match the student's reading level
+        2. Address their struggle areas
+        3. Incorporate their interests
+        4. Provide appropriate challenge level
+        5. Build on their strengths
+        
+        Return ONLY a JSON array:
+        [
+            {{
+                "title": "Content Title",
+                "content_type": "story",
+                "topic": "animals",
+                "difficulty_justification": "Perfect for practicing short vowels",
+                "why_recommended": "Based on your interest in animals and need to practice CVC words",
+                "expected_benefit": "Will help improve pronunciation of short vowel sounds"
+            }}
+        ]
+        """
+        
+        try:
+            response = await self.generate_text(
+                prompt,
+                response_format="application/json", 
+                temperature=0.7
+            )
+            
+            # Clean and parse JSON response
+            json_text = response.strip()
+            if json_text.startswith('```json'):
+                json_text = json_text[7:-3].strip()
+            elif json_text.startswith('```'):
+                json_text = json_text[3:-3].strip()
+                
+            return json.loads(json_text)
+            
+        except Exception as e:
+            print(f"❌ Recommendation generation failed: {e}")
+            return []  # Return empty list as fallback
+
 # Singleton instance
 gemini_service = GeminiService()
