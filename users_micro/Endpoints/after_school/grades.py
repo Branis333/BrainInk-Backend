@@ -46,136 +46,143 @@ async def start_study_session(
     """
     user_id = current_user["user_id"]
     
-    # Verify course exists
-    course = db.query(Course).filter(Course.id == session_data.course_id).first()
-    if not course:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Course not found"
-        )
-    
-    lesson = None
-    block = None
-    session_target_id = None
-    session_target_type = None
-    
-    # Handle lesson-based sessions (legacy support)
-    if session_data.lesson_id:
-        lesson = db.query(CourseLesson).filter(
-            and_(
-                CourseLesson.id == session_data.lesson_id,
-                CourseLesson.course_id == session_data.course_id,
-                CourseLesson.is_active == True
-            )
-        ).first()
-        if not lesson:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Lesson not found or inactive"
-            )
-        session_target_id = session_data.lesson_id
-        session_target_type = "lesson"
-        
-        # Check if user has an active session for this lesson
-        active_session = db.query(StudySession).filter(
-            and_(
-                StudySession.user_id == user_id,
-                StudySession.lesson_id == session_data.lesson_id,
-                StudySession.status == "in_progress"
-            )
-        ).first()
-    
-    # Handle block-based sessions (AI-generated courses)
-    elif session_data.block_id:
-        block = db.query(CourseBlock).filter(
-            and_(
-                CourseBlock.id == session_data.block_id,
-                CourseBlock.course_id == session_data.course_id,
-                CourseBlock.is_active == True
-            )
-        ).first()
-        if not block:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Course block not found or inactive"
-            )
-        session_target_id = session_data.block_id
-        session_target_type = "block"
-        
-        # Check if user has an active session for this block
-        active_session = db.query(StudySession).filter(
-            and_(
-                StudySession.user_id == user_id,
-                StudySession.block_id == session_data.block_id,
-                StudySession.status == "in_progress"
-            )
-        ).first()
-    
-    if active_session:
-        target_name = lesson.title if lesson else (block.title if block else "Unknown")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"You already have an active session for {session_target_type}: {target_name}"
-        )
-    
-    # Create new study session
-    new_session = StudySession(
-        user_id=user_id,
-        course_id=session_data.course_id,
-        lesson_id=session_data.lesson_id,
-        block_id=session_data.block_id,
-        status="in_progress"
-    )
-    
-    db.add(new_session)
-    db.commit()
-    db.refresh(new_session)
-    
-    # Update or create student progress (enhanced for both lessons and blocks)
-    progress = db.query(StudentProgress).filter(
-        and_(
-            StudentProgress.user_id == user_id,
-            StudentProgress.course_id == session_data.course_id
-        )
-    ).first()
-    
-    if not progress:
-        # Count both lessons and blocks for total content items
-        total_lessons = db.query(CourseLesson).filter(
-            and_(
-                CourseLesson.course_id == session_data.course_id,
-                CourseLesson.is_active == True
-            )
-        ).count()
-        
-        total_blocks = db.query(CourseBlock).filter(
-            and_(
-                CourseBlock.course_id == session_data.course_id,
-                CourseBlock.is_active == True
-            )
-        ).count()
-        
-        # Use blocks for AI-generated courses, lessons for traditional courses
-        total_content_items = total_blocks if total_blocks > 0 else total_lessons
-        
-        progress = StudentProgress(
+    # Diagnostic logging container
+    debug_context = {
+        "user_id": current_user.get("user_id"),
+        "course_id": session_data.course_id,
+        "lesson_id": session_data.lesson_id,
+        "block_id": session_data.block_id,
+        "stage": "init"
+    }
+    try:
+        debug_context["stage"] = "course_lookup"
+        course = db.query(Course).filter(Course.id == session_data.course_id).first()
+        if not course:
+            debug_context["error"] = "course_not_found"
+            print("❌ StudySession start - course not found", debug_context)
+            raise HTTPException(status_code=404, detail="Course not found")
+
+        lesson = None
+        block = None
+        session_target_type = None
+        active_session = None
+
+        if session_data.lesson_id:
+            debug_context["stage"] = "lesson_lookup"
+            lesson = db.query(CourseLesson).filter(
+                and_(
+                    CourseLesson.id == session_data.lesson_id,
+                    CourseLesson.course_id == session_data.course_id,
+                    CourseLesson.is_active == True
+                )
+            ).first()
+            if not lesson:
+                debug_context["error"] = "lesson_not_found"
+                print("❌ StudySession start - lesson not found", debug_context)
+                raise HTTPException(status_code=404, detail="Lesson not found or inactive")
+            session_target_type = "lesson"
+            active_session = db.query(StudySession).filter(
+                and_(
+                    StudySession.user_id == user_id,
+                    StudySession.lesson_id == session_data.lesson_id,
+                    StudySession.status == "in_progress"
+                )
+            ).first()
+        elif session_data.block_id:
+            debug_context["stage"] = "block_lookup"
+            block = db.query(CourseBlock).filter(
+                and_(
+                    CourseBlock.id == session_data.block_id,
+                    CourseBlock.course_id == session_data.course_id,
+                    CourseBlock.is_active == True
+                )
+            ).first()
+            if not block:
+                debug_context["error"] = "block_not_found"
+                print("❌ StudySession start - block not found", debug_context)
+                raise HTTPException(status_code=404, detail="Course block not found or inactive")
+            session_target_type = "block"
+            active_session = db.query(StudySession).filter(
+                and_(
+                    StudySession.user_id == user_id,
+                    StudySession.block_id == session_data.block_id,
+                    StudySession.status == "in_progress"
+                )
+            ).first()
+        else:
+            debug_context["error"] = "missing_target"
+            print("❌ StudySession start - neither lesson_id nor block_id provided", debug_context)
+            raise HTTPException(status_code=400, detail="Either lesson_id or block_id must be provided")
+
+        if active_session:
+            target_name = lesson.title if lesson else (block.title if block else "Unknown")
+            debug_context["stage"] = "active_session_exists"
+            print("ℹ️ StudySession start - active session already exists", debug_context)
+            raise HTTPException(status_code=400, detail=f"You already have an active session for {session_target_type}: {target_name}")
+
+        debug_context["stage"] = "create_session"
+        new_session = StudySession(
             user_id=user_id,
             course_id=session_data.course_id,
-            total_lessons=total_content_items,
-            sessions_count=1
+            lesson_id=session_data.lesson_id,
+            block_id=session_data.block_id,
+            status="in_progress"
         )
-        db.add(progress)
-    else:
-        progress.sessions_count += 1
-    
-    progress.last_activity = datetime.utcnow()
-    
-    db.commit()
-    
-    target_info = lesson.title if lesson else (f"Block {block.week}.{block.block_number}: {block.title}" if block else "Unknown")
-    print(f"📚 Started {session_target_type} session: '{target_info}' for user {user_id}")
-    
-    return new_session
+        db.add(new_session)
+        db.flush()  # obtain PK before progress update
+
+        debug_context["stage"] = "progress_lookup"
+        progress = db.query(StudentProgress).filter(
+            and_(
+                StudentProgress.user_id == user_id,
+                StudentProgress.course_id == session_data.course_id
+            )
+        ).with_for_update(nowait=False).first()
+
+        if not progress:
+            debug_context["stage"] = "progress_seed"
+            total_lessons = db.query(CourseLesson).filter(
+                and_(CourseLesson.course_id == session_data.course_id, CourseLesson.is_active == True)
+            ).count()
+            total_blocks = db.query(CourseBlock).filter(
+                and_(CourseBlock.course_id == session_data.course_id, CourseBlock.is_active == True)
+            ).count()
+            total_content_items = total_blocks if total_blocks > 0 else total_lessons
+            progress = StudentProgress(
+                user_id=user_id,
+                course_id=session_data.course_id,
+                total_lessons=total_content_items or 0,
+                lessons_completed=0,
+                completion_percentage=0.0,
+                sessions_count=1,
+                total_study_time=0,
+                started_at=datetime.utcnow(),
+                last_activity=datetime.utcnow()
+            )
+            db.add(progress)
+        else:
+            progress.sessions_count += 1
+            progress.last_activity = datetime.utcnow()
+        db.commit()
+        db.refresh(new_session)
+
+        target_info = lesson.title if lesson else (f"Block {block.week}.{block.block_number}: {block.title}" if block else "Unknown")
+        print(f"📚 Started {session_target_type} session: '{target_info}' for user {user_id} (session_id={new_session.id})")
+        return new_session
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        debug_context["error_type"] = type(e).__name__
+        debug_context["error"] = str(e)
+        print("❌ StudySession start failure", debug_context)
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail="Database connection error")
 
 @router.put("/{session_id}/end", response_model=StudySessionOut)
 async def end_study_session(
