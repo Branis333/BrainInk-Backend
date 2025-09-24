@@ -726,6 +726,13 @@ async def enroll_in_course(
                 CourseAssignment.is_active == True
             )
         ).all()
+
+        print("📝 Enrollment pre-check", {
+            "user_id": user_id,
+            "course_id": course_id,
+            "course_title": course.title,
+            "assignment_def_count": len(course_assignments)
+        })
         
         if not course_assignments:
             raise HTTPException(
@@ -780,7 +787,34 @@ async def enroll_in_course(
                 last_activity=enrollment_date
             )
             db.add(progress)
-        db.commit()
+        try:
+            db.commit()
+        except Exception as commit_err:
+            print("❌ Enrollment commit failure", {
+                "user_id": user_id,
+                "course_id": course_id,
+                "error_type": type(commit_err).__name__,
+                "error": str(commit_err)[:500]
+            })
+            raise
+
+        # Post-commit verification
+        persisted_count = db.query(StudentAssignment.id).filter(
+            and_(StudentAssignment.user_id == user_id, StudentAssignment.course_id == course_id)
+        ).count()
+        if persisted_count != len(created_assignments):
+            print("⚠️ Enrollment mismatch after commit", {
+                "expected_created": len(created_assignments),
+                "persisted_count": persisted_count,
+                "user_id": user_id,
+                "course_id": course_id
+            })
+        else:
+            print("✅ Enrollment assignments persisted", {
+                "count": persisted_count,
+                "user_id": user_id,
+                "course_id": course_id
+            })
         
         # Refresh to get IDs
         for assignment in created_assignments:

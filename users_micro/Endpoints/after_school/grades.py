@@ -129,7 +129,22 @@ async def start_study_session(
             status="in_progress"
         )
         db.add(new_session)
-        db.flush()  # obtain PK before progress update
+        # Flush separately so we can surface raw integrity errors (e.g., FK / unique constraint)
+        try:
+            db.flush()  # obtain PK before progress update
+        except Exception as flush_err:
+            from sqlalchemy.exc import IntegrityError
+            debug_context["stage"] = "create_session_flush_error"
+            debug_context["flush_error_type"] = type(flush_err).__name__
+            debug_context["flush_error_message"] = str(flush_err)[:500]
+            if isinstance(flush_err, IntegrityError):
+                # Attempt to capture underlying DB error / constraint name
+                orig = getattr(flush_err, 'orig', None)
+                if orig:
+                    debug_context["flush_error_orig"] = str(orig)[:500]
+            print("❌ StudySession flush failure", debug_context)
+            # Re-raise so outer handler classifies
+            raise
 
         debug_context["stage"] = "progress_lookup"
         # Attempt row-level lock; fallback gracefully if unsupported (e.g., SQLite)
@@ -226,7 +241,12 @@ async def start_study_session(
             "code": internal_code,
             "stage": debug_context.get("stage"),
             "progress_lock": debug_context.get("progress_lock"),
-            "commit_error": debug_context.get("commit_error")
+            "commit_error": debug_context.get("commit_error"),
+            # Additional diagnostic exposure
+            "error_message": debug_context.get("error_message"),
+            "flush_error_type": debug_context.get("flush_error_type"),
+            "flush_error_message": debug_context.get("flush_error_message"),
+            "flush_error_orig": debug_context.get("flush_error_orig")
         })
 
 @router.put("/{session_id}/end", response_model=StudySessionOut)
