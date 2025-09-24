@@ -18,18 +18,21 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # DBNAME = os.getenv("DB_NAME", "postgres")
 # DATABASE_URL = f"postgresql://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
 
-# Create engine with Supabase-optimized settings
+# Create engine with Render/Supabase-optimized settings
 engine = create_engine(
     DATABASE_URL,
-    pool_size=int(os.getenv("DB_POOL_SIZE", 10)),
-    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", 20)),
+    pool_size=int(os.getenv("DB_POOL_SIZE", 5)),  # Reduced for Render's free tier
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", 10)),  # Reduced for better stability
     pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", 30)),
-    pool_recycle=int(os.getenv("DB_POOL_RECYCLE", 3600)),
+    pool_recycle=int(os.getenv("DB_POOL_RECYCLE", 1800)),  # 30 minutes instead of 1 hour
+    pool_pre_ping=True,  # Test connections before use
     echo=False,  # Set to True for debugging
-    # Add SSL settings for Supabase
+    # Enhanced SSL and connection settings for Render
     connect_args={
         "sslmode": "require",
-        "options": "-c timezone=utc"
+        "options": "-c timezone=utc",
+        "connect_timeout": 10,  # Connection timeout
+        "application_name": "BrainInk-Backend"
     }
 )
 

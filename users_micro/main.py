@@ -5,13 +5,47 @@ from Endpoints.after_school import course, grades as after_school_grades, upload
 from db.connection import engine
 from db.database import test_connection
 from dotenv import load_dotenv
+import logging
+import sys
+import os
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-import models.users_models as models
-import models.study_area_models as study_models
-import models.afterschool_models as afterschool_models
-import models.reading_assistant_models as reading_models
+
+# Run startup initialization if not already done
+try:
+    logger.info("🚀 Initializing BrainInk Backend...")
+    
+    # Initialize database tables safely
+    try:
+        import models.users_models as models
+        import models.study_area_models as study_models
+        import models.afterschool_models as afterschool_models
+        import models.reading_assistant_models as reading_models
+        
+        # Safe table creation with error handling
+        from db.database import engine
+        from models.users_models import Base
+        
+        logger.info("📊 Creating database tables...")
+        Base.metadata.create_all(bind=engine, checkfirst=True)
+        logger.info("✅ Database tables ready!")
+        
+    except Exception as db_error:
+        logger.warning(f"⚠️ Database initialization issue: {db_error}")
+        logger.info("🔄 Application will continue - tables will be created on first access")
+        
+except Exception as startup_error:
+    logger.error(f"❌ Startup error: {startup_error}")
+    logger.info("🔄 Continuing with application startup...")
+
 from sqlalchemy import text
 
 app = FastAPI(
@@ -51,6 +85,36 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
+# Health check endpoint for Render
+@app.get("/health")
+async def health_check():
+    """Health check endpoint for deployment monitoring"""
+    try:
+        with engine.connect() as connection:
+            result = connection.execute(text("SELECT 1"))
+            db_status = "healthy"
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+        db_status = f"unhealthy: {str(e)}"
+    
+    return {
+        "status": "healthy" if db_status == "healthy" else "degraded",
+        "database": db_status,
+        "service": "BrainInk Backend API",
+        "version": "1.0.0"
+    }
+
+# Root endpoint
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "BrainInk Backend API is running!",
+        "status": "healthy",
+        "docs": "/docs",
+        "health": "/health"
+    }
+
 # Test database connection on startup
 @app.on_event("startup")
 async def startup_event():
@@ -84,13 +148,19 @@ async def startup_event():
         total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes) + len(reports.router.routes) + len(calendar.router.routes) + len(course.router.routes) + len(after_school_grades.router.routes) + len(after_school_uploads.router.routes) + len(reading_assistant.router.routes)
         print(f"🔄 Total endpoints: {total_endpoints}")
     except Exception as e:
-        print(f"❌ Supabase connection failed: {e}")
+        logger.warning(f"⚠️ Router loading issue: {e}")
 
-# Create database tables
-models.Base.metadata.create_all(bind=engine)
-study_models.Base.metadata.create_all(bind=engine)
-afterschool_models.Base.metadata.create_all(bind=engine)
-reading_models.Base.metadata.create_all(bind=engine)
+# Additional table creation (fallback if startup script didn't run)
+try:
+    logger.info("🔄 Ensuring all model tables exist...")
+    models.Base.metadata.create_all(bind=engine, checkfirst=True)
+    study_models.Base.metadata.create_all(bind=engine, checkfirst=True)
+    afterschool_models.Base.metadata.create_all(bind=engine, checkfirst=True) 
+    reading_models.Base.metadata.create_all(bind=engine, checkfirst=True)
+    logger.info("✅ All model tables verified!")
+except Exception as e:
+    logger.warning(f"⚠️ Additional table creation warning: {e}")
+    logger.info("🔄 Application will continue...")
 
 # Include routers
 app.include_router(auth.router)

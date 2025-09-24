@@ -1,33 +1,33 @@
-fastapi
-#for pandatic
-pydantic[email]
-uvicorn[standing]
-#fo authentication
-python-multipart
-python-jose[cryptography]
-passlib[bcrypt]
-#end or auth
-#for db
-sqlalchemy
-psycopg2-binary
-#end db
-#env file
-python-dotenv
-requests
-pycryptodome
-google-auth
-python-dotenv 
-psycopg2
-dotenv
-aiofiles
-httpx
-# for bulk image to PDF conversion
-pillow
-reportlab
+# FastAPI Core
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic[email]==2.5.0
 
-# for Gemini AI integration with native file processing
+# Authentication & Security
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Environment & Configuration
+python-dotenv==1.0.0
+
+# HTTP & File Operations
+requests==2.31.0
+httpx==0.25.2
+aiofiles==23.2.1
+
+# Cryptography & Auth
+pycryptodome==3.19.0
+google-auth==2.25.2
+
+# AI Integration
 google-generativeai>=0.3.0
 
-# Note: PyPDF2 and python-docx are no longer needed - 
-# Gemini handles all file processing natively
-alembic
+# Image & PDF Processing
+pillow==10.1.0
+reportlab==4.0.7
