@@ -19,18 +19,31 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 # DATABASE_URL = f"postgresql://{USER}:{PASSWORD}@{HOST}:{PORT}/{DBNAME}"
 
 # Create engine with Supabase-optimized settings
+connect_args = {
+    "sslmode": "require",
+    "options": "-c timezone=utc"
+}
+
+# Add keepalive options for more stable managed Postgres connections
+try:
+    connect_args.update({
+        "keepalives": 1,
+        "keepalives_idle": 30,
+        "keepalives_interval": 10,
+        "keepalives_count": 5,
+    })
+except Exception:
+    pass
+
 engine = create_engine(
     DATABASE_URL,
     pool_size=int(os.getenv("DB_POOL_SIZE", 10)),
     max_overflow=int(os.getenv("DB_MAX_OVERFLOW", 20)),
     pool_timeout=int(os.getenv("DB_POOL_TIMEOUT", 30)),
     pool_recycle=int(os.getenv("DB_POOL_RECYCLE", 3600)),
-    echo=False,  # Set to True for debugging
-    # Add SSL settings for Supabase
-    connect_args={
-        "sslmode": "require",
-        "options": "-c timezone=utc"
-    }
+    pool_pre_ping=True,  # proactively validate connections
+    echo=False,
+    connect_args=connect_args
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
