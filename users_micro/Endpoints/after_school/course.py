@@ -676,6 +676,38 @@ async def list_courses(
 # STUDENT DASHBOARD ENDPOINTS (must be before /{course_id} route)
 # ===============================
 
+@router.get("/{course_id}/blocks", response_model=List[CourseBlockOut])
+async def list_course_blocks(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    active_only: bool = Query(True, description="Return only active blocks")
+):
+    """List blocks for a course (supports AI-generated course structure)."""
+    course = db.query(Course).filter(Course.id == course_id).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+    query = db.query(CourseBlock).filter(CourseBlock.course_id == course_id)
+    if active_only:
+        query = query.filter(CourseBlock.is_active == True)  # noqa: E712
+    blocks = query.order_by(CourseBlock.week, CourseBlock.block_number).all()
+    return blocks
+
+@router.get("/{course_id}/blocks/{block_id}", response_model=CourseBlockOut)
+async def get_course_block(
+    course_id: int,
+    block_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """Return a single course block detail."""
+    block = db.query(CourseBlock).filter(
+        and_(CourseBlock.id == block_id, CourseBlock.course_id == course_id)
+    ).first()
+    if not block:
+        raise HTTPException(status_code=404, detail="Block not found")
+    return block
+
 @router.post("/{course_id}/enroll")
 async def enroll_in_course(
     course_id: int,

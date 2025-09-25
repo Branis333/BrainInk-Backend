@@ -2,9 +2,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
 from Endpoints.after_school import course, grades as after_school_grades, uploads as after_school_uploads, reading_assistant
-from db.connection import engine
-from db.database import test_connection
+from db.database import get_engine, test_connection
 from dotenv import load_dotenv
+import logging
+
+# Logger setup
+logger = logging.getLogger("brainink.main")
+logging.basicConfig(level=logging.INFO)
 
 # Load environment variables
 load_dotenv()
@@ -54,43 +58,32 @@ app.add_middleware(
 # Test database connection on startup
 @app.on_event("startup")
 async def startup_event():
-    print("Testing Supabase connection...")
+    print("Testing database connection (lazy engine)...")
     try:
-        # Test connection directly here
+        engine = get_engine()
         with engine.connect() as connection:
-            result = connection.execute(text("SELECT NOW() as current_time, version() as db_version;"))
+            result = connection.execute(text("SELECT NOW() as current_time"))
             row = result.fetchone()
-            print(f"✅ Supabase connection successful!")
-            print(f"Database time: {row[0]}")
-            print(f"Database version: {row[1]}")
-            
-        # Verify all routers are loaded
-        print(f"✅ Loaded auth router with {len(auth.router.routes)} endpoints")
-        print(f"✅ Loaded school_management router with {len(school_management.router.routes)} endpoints")
-        print(f"✅ Loaded academic_management router with {len(academic_management.router.routes)} endpoints")
-        print(f"✅ Loaded grades router with {len(grades.router.routes)} endpoints")
-        print(f"✅ Loaded school_invitations router with {len(school_invitations.router.routes)} endpoints")
-        print(f"✅ Loaded class_room router with {len(class_room.router.routes)} endpoints")
-        print(f"✅ Loaded modules router with {len(modules.router.routes)} endpoints")
-        print(f"✅ Loaded syllabus router with {len(syllabus.router.routes)} endpoints")
-        print(f"✅ Loaded upload router with {len(upload.router.routes)} endpoints")
-        print(f"✅ Loaded kana_service router with {len(kana_service.router.routes)} endpoints")
-        print(f"✅ Loaded reports router with {len(reports.router.routes)} endpoints")
-        print(f"✅ Loaded calendar router with {len(calendar.router.routes)} endpoints")
-        print(f"✅ Loaded after_school course router with {len(course.router.routes)} endpoints")
-        print(f"✅ Loaded after_school grades router with {len(after_school_grades.router.routes)} endpoints")
-        print(f"✅ Loaded after_school uploads router with {len(after_school_uploads.router.routes)} endpoints")
-        print(f"✅ Loaded reading assistant router with {len(reading_assistant.router.routes)} endpoints")
-        total_endpoints = len(auth.router.routes) + len(school_management.router.routes) + len(academic_management.router.routes) + len(grades.router.routes) + len(school_invitations.router.routes) + len(class_room.router.routes) + len(modules.router.routes) + len(syllabus.router.routes) + len(upload.router.routes) + len(kana_service.router.routes) + len(reports.router.routes) + len(calendar.router.routes) + len(course.router.routes) + len(after_school_grades.router.routes) + len(after_school_uploads.router.routes) + len(reading_assistant.router.routes)
-        print(f"🔄 Total endpoints: {total_endpoints}")
+            print(f"✅ Database connection OK. Time: {row[0]}")
     except Exception as e:
-        print(f"❌ Supabase connection failed: {e}")
+        print(f"⚠️ Database not available at startup: {e}")
+    # Log routers (no DB dependency)
+    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router])
+    print(f"🔄 Total endpoints loaded: {total_endpoints}")
 
-# Create database tables
-models.Base.metadata.create_all(bind=engine)
-study_models.Base.metadata.create_all(bind=engine)
-afterschool_models.Base.metadata.create_all(bind=engine)
-reading_models.Base.metadata.create_all(bind=engine)
+"""Remove eager table creation; handled in startup_event with lazy engine."""
+
+# Defer table creation to startup to avoid engine None issues
+
+@app.on_event("startup")
+async def create_tables_startup():
+    try:
+        engine = get_engine()
+        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base]:
+            base.metadata.create_all(bind=engine, checkfirst=True)
+        logger.info("✅ Tables ensured (lazy engine)")
+    except Exception as e:
+        logger.warning(f"⚠️ Table ensure failed: {e}")
 
 # Include routers
 app.include_router(auth.router)
@@ -120,6 +113,7 @@ def root():
 def health_check():
     """Health check endpoint with database status"""
     try:
+        engine = get_engine()
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
             db_status = "connected"
