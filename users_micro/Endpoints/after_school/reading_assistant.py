@@ -137,6 +137,7 @@ async def get_reading_content(
     reading_level: Optional[ReadingLevel] = None,
     difficulty_level: Optional[DifficultyLevel] = None,
     content_type: Optional[str] = None,
+    grade_level: Optional[str] = Query(None, description="Mobile app compatibility: K, 1, 2, 3"),
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=50)
 ):
@@ -144,6 +145,16 @@ async def get_reading_content(
     
     try:
         query = db.query(ReadingContent).filter(ReadingContent.is_active == True)
+        
+        # Handle mobile app grade_level parameter for backwards compatibility
+        if grade_level and not reading_level:
+            grade_map = {
+                'K': ReadingLevel.KINDERGARTEN,
+                '1': ReadingLevel.GRADE_1,
+                '2': ReadingLevel.GRADE_2,  
+                '3': ReadingLevel.GRADE_3
+            }
+            reading_level = grade_map.get(grade_level.upper())
         
         # Apply filters
         if reading_level:
