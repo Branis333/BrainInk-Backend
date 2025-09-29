@@ -32,7 +32,14 @@ SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 
 # Password and token setup
-bcrypt_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use bcrypt_sha256 to transparently hash long passwords via SHA-256 prior to bcrypt,
+# avoiding bcrypt's 72-byte input limit while remaining compatible.
+# Keep 'bcrypt' as a secondary scheme to verify legacy hashes.
+bcrypt_context = CryptContext(
+    schemes=["bcrypt_sha256", "bcrypt"],
+    deprecated="auto",
+    bcrypt__truncate_error=False  # do not raise on >72 bytes; bcrypt_sha256 handles prehashing
+)
 oauth2_bearer = OAuth2PasswordBearer(tokenUrl="login")
 
 class UserResponse(BaseModel):
@@ -77,7 +84,15 @@ def authenticate_user(username: str, password: str, db):
     )
     if not user:
         return False
-    if not bcrypt_context.verify(password, user.password_hash):
+    # Verify password; catch backend issues (e.g., bcrypt backend not loaded, length errors)
+    try:
+        if not bcrypt_context.verify(password, user.password_hash):
+            return False
+    except ValueError:
+        # bcrypt may raise on very long passwords if not using bcrypt_sha256; treat as invalid creds
+        return False
+    except Exception:
+        # Avoid leaking backend errors; treat as invalid credentials
         return False
     return user
 
