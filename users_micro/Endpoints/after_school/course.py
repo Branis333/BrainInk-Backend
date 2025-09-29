@@ -1003,6 +1003,17 @@ async def get_my_assignments(
         # Format response with comprehensive information
         assignments_data = []
         for sa in student_assignments:
+            # Provide minimal nested assignment details to help clients anchor sessions
+            nested_assignment = None
+            if sa.assignment:
+                nested_assignment = {
+                    "id": sa.assignment.id,
+                    "course_id": sa.assignment.course_id,
+                    "title": sa.assignment.title,
+                    "assignment_type": sa.assignment.assignment_type,
+                    "block_id": getattr(sa.assignment, 'block_id', None)
+                }
+
             assignment_info = {
                 "student_assignment_id": sa.id,
                 "assignment_id": sa.assignment_id,
@@ -1021,6 +1032,10 @@ async def get_my_assignments(
                 "ai_grade": sa.ai_grade,
                 "manual_grade": sa.manual_grade,
                 "feedback": sa.feedback,
+                # surface block_id for anchor resolution even if frontend doesn't parse nested assignment
+                "block_id": getattr(sa.assignment, 'block_id', None),
+                # also include a minimal nested assignment object
+                "assignment": nested_assignment,
                 "days_until_due": (sa.due_date - current_time).days if sa.due_date > current_time else 0,
                 "is_overdue": sa.due_date < current_time and sa.status in ["assigned", "overdue"]
             }

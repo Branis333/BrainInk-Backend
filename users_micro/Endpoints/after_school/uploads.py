@@ -1,6 +1,6 @@
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
 from pathlib import Path
@@ -16,7 +16,7 @@ import hashlib
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
-    Course, CourseLesson, StudySession, AISubmission
+    Course, CourseLesson, CourseBlock, StudySession, AISubmission
 )
 from schemas.afterschool_schema import (
     AISubmissionCreate, AISubmissionOut, AIGradingResponse, MessageResponse
@@ -246,7 +246,8 @@ async def bulk_upload_images_to_pdf_session(
         # Get and validate study session
         session = db.query(StudySession).options(
             joinedload(StudySession.course),
-            joinedload(StudySession.lesson)
+            joinedload(StudySession.lesson),
+            joinedload(StudySession.block)
         ).filter(
             StudySession.id == session_id,
             StudySession.user_id == user_id
@@ -301,11 +302,16 @@ async def bulk_upload_images_to_pdf_session(
             except Exception:
                 pass
         
-        # Generate PDF filename
+        # Generate PDF filename (support lesson- or block-anchored sessions)
         course_title = session.course.title.replace(" ", "_").replace("/", "_")
-        lesson_title = session.lesson.title.replace(" ", "_").replace("/", "_")
+        if session.lesson is not None:
+            anchor_title = session.lesson.title.replace(" ", "_").replace("/", "_")
+        elif getattr(session, 'block', None) is not None:
+            anchor_title = f"week{session.block.week}_block{session.block.block_number}_" + session.block.title.replace(" ", "_").replace("/", "_")
+        else:
+            anchor_title = "session"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_filename = f"session_{session_id}_{course_title}_{lesson_title}_{timestamp}.pdf"
+        pdf_filename = f"session_{session_id}_{course_title}_{anchor_title}_{timestamp}.pdf"
         
         # Create PDF from images (returns bytes and hash)
         try:
@@ -344,6 +350,7 @@ async def bulk_upload_images_to_pdf_session(
             user_id=user_id,
             course_id=session.course_id,
             lesson_id=session.lesson_id,
+            block_id=session.block_id,
             session_id=session_id,
             submission_type=submission_type,
             original_filename=pdf_filename,
@@ -357,8 +364,13 @@ async def bulk_upload_images_to_pdf_session(
         db.refresh(submission)
         
         # Process with AI (simulate)
-        lesson_content = session.lesson.content or ""
-        ai_results = simulate_ai_processing(str(file_path), submission_type, lesson_content)
+        # Use lesson content if available; otherwise fall back to block content
+        content_for_ai = ""
+        if session.lesson is not None and getattr(session.lesson, 'content', None):
+            content_for_ai = session.lesson.content or ""
+        elif getattr(session, 'block', None) is not None and getattr(session.block, 'content', None):
+            content_for_ai = session.block.content or ""
+        ai_results = simulate_ai_processing(str(file_path), submission_type, content_for_ai)
         
         # Update submission with AI results
         submission.ai_processed = True
@@ -377,20 +389,17 @@ async def bulk_upload_images_to_pdf_session(
         
         db.commit()
         
-        # Return the PDF file directly from memory
-        return Response(
-            content=pdf_bytes,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": f"attachment; filename={pdf_filename}",
-                "Content-Length": str(pdf_size),
-                "X-Total-Images": str(len(valid_files)),
-                "X-Course-Title": session.course.title,
-                "X-Lesson-Title": session.lesson.title,
-                "X-Submission-ID": str(submission.id),
-                "X-Content-Hash": content_hash
-            }
-        )
+        # Return JSON summary instead of raw PDF content to better support mobile clients
+        return JSONResponse({
+            "success": True,
+            "message": "PDF created and AI processed",
+            "submission_id": submission.id,
+            "pdf_filename": pdf_filename,
+            "pdf_size": pdf_size,
+            "content_hash": content_hash,
+            "total_images": len(valid_files),
+            "ai_processing_results": ai_results
+        })
         
     except HTTPException:
         raise
@@ -475,10 +484,17 @@ async def get_session_submissions_summary(
         if scores:
             average_score = sum(scores) / len(scores)
     
+    # Determine anchor title depending on session type
+    anchor_title = None
+    if getattr(session, 'lesson', None) is not None:
+        anchor_title = session.lesson.title
+    elif getattr(session, 'block', None) is not None:
+        anchor_title = session.block.title
+
     return {
         "session_id": session_id,
         "course_title": session.course.title,
-        "lesson_title": session.lesson.title,
+        "lesson_title": anchor_title or "",
         "total_submissions": total_submissions,
         "processed_submissions": processed_submissions,
         "pending_submissions": total_submissions - processed_submissions,
