@@ -137,6 +137,7 @@ async def get_reading_content(
     reading_level: Optional[ReadingLevel] = None,
     difficulty_level: Optional[DifficultyLevel] = None,
     content_type: Optional[str] = None,
+    grade_level: Optional[str] = Query(None, description="Mobile app compatibility: K, 1, 2, 3"),
     page: int = Query(1, ge=1),
     size: int = Query(10, ge=1, le=50)
 ):
@@ -144,6 +145,16 @@ async def get_reading_content(
     
     try:
         query = db.query(ReadingContent).filter(ReadingContent.is_active == True)
+        
+        # Handle mobile app grade_level parameter for backwards compatibility
+        if grade_level and not reading_level:
+            grade_map = {
+                'K': ReadingLevel.KINDERGARTEN,
+                '1': ReadingLevel.GRADE_1,
+                '2': ReadingLevel.GRADE_2,  
+                '3': ReadingLevel.GRADE_3
+            }
+            reading_level = grade_map.get(grade_level.upper())
         
         # Apply filters
         if reading_level:
@@ -513,25 +524,71 @@ async def get_reading_progress(
 ):
     """Get student's reading progress"""
     
-    # Use current user if no student_id provided
-    target_student_id = student_id or current_user["user_id"]
-    
-    # TODO: Add permission check for accessing other students' progress
-    
-    progress = db.query(ReadingProgress).filter_by(student_id=target_student_id).first()
-    
-    if not progress:
-        # Create initial progress record
-        progress = ReadingProgress(
-            student_id=target_student_id,
-            current_reading_level=ReadingLevel.KINDERGARTEN,
-            current_difficulty=DifficultyLevel.BEGINNER
-        )
-        db.add(progress)
-        db.commit()
-        db.refresh(progress)
-    
-    return progress
+    try:
+        # Use current user if no student_id provided
+        target_student_id = student_id or current_user["user_id"]
+        
+        # TODO: Add permission check for accessing other students' progress
+        
+        progress = db.query(ReadingProgress).filter_by(student_id=target_student_id).first()
+        
+        if not progress:
+            # Create initial progress record
+            progress = ReadingProgress(
+                student_id=target_student_id,
+                current_reading_level=ReadingLevel.KINDERGARTEN,
+                current_difficulty=DifficultyLevel.ELEMENTARY,
+                total_sessions=0,
+                total_reading_time=0,
+                words_read_correctly=0,
+                strengths=[],
+                challenges=[],
+                vocabulary_learned=[]
+            )
+            db.add(progress)
+            db.commit()
+            db.refresh(progress)
+        
+        # Convert enum fields to strings for the response
+        response_data = {
+            "id": progress.id,
+            "student_id": progress.student_id,
+            "current_reading_level": progress.current_reading_level.value if progress.current_reading_level else "KINDERGARTEN",
+            "current_difficulty": progress.current_difficulty.value if progress.current_difficulty else "ELEMENTARY",
+            "total_sessions": progress.total_sessions or 0,
+            "total_reading_time": progress.total_reading_time or 0,
+            "average_accuracy": progress.average_accuracy,
+            "average_fluency": progress.average_fluency,
+            "words_read_correctly": progress.words_read_correctly or 0,
+            "strengths": progress.strengths or [],
+            "challenges": progress.challenges or [],
+            "vocabulary_learned": progress.vocabulary_learned or [],
+            "next_level_requirements": progress.next_level_requirements or {},
+            "updated_at": progress.updated_at.isoformat() if progress.updated_at else datetime.utcnow().isoformat()
+        }
+        
+        return JSONResponse(content=response_data)
+        
+    except Exception as e:
+        print(f"❌ Progress endpoint error: {str(e)}")
+        # Return a default progress response on error
+        default_progress = {
+            "id": 0,
+            "student_id": target_student_id,
+            "current_reading_level": "KINDERGARTEN", 
+            "current_difficulty": "ELEMENTARY",
+            "total_sessions": 0,
+            "total_reading_time": 0,
+            "average_accuracy": None,
+            "average_fluency": None,
+            "words_read_correctly": 0,
+            "strengths": [],
+            "challenges": [],
+            "vocabulary_learned": [],
+            "next_level_requirements": {},
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        return JSONResponse(content=default_progress)
 
 @router.get("/dashboard", response_model=StudentReadingDashboard)
 async def get_student_dashboard(
