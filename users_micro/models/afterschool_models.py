@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float, UniqueConstraint, JSON
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float, UniqueConstraint, CheckConstraint, JSON
 from sqlalchemy.orm import relationship
 from db.database import Base
 
@@ -223,6 +223,12 @@ class AISubmission(Base):
     lesson = relationship("CourseLesson", back_populates="ai_submissions")
     block = relationship("CourseBlock", back_populates="ai_submissions")
     session = relationship("StudySession", back_populates="ai_submissions")
+
+    # Table arguments to ensure at least one of lesson_id or block_id is provided
+    __table_args__ = (
+        CheckConstraint('(lesson_id IS NOT NULL) OR (block_id IS NOT NULL)',
+                       name='ck_as_ai_submissions_lesson_or_block'),
+    )
 
 class StudentProgress(Base):
     __tablename__ = "as_student_progress"

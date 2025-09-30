@@ -2,6 +2,7 @@ from logging.config import fileConfig
 import os
 from sqlalchemy import engine_from_config, pool
 from alembic import context
+from dotenv import load_dotenv
 
 # Import Base metadata for autogenerate
 from db.database import Base  # assumes db/database.py defines Base
@@ -10,6 +11,9 @@ from models import afterschool_models  # noqa: F401 ensure models are imported
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
+
+# Load environment variables from .env so Alembic can access DATABASE_URL
+load_dotenv()
 
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
@@ -28,6 +32,24 @@ target_metadata = Base.metadata
 # ... etc.
 
 
+def _resolve_db_url() -> str:
+    """Resolve the database URL, preferring env var over alembic.ini.
+
+    Also guard against placeholder values like 'driver://user:pass@localhost/dbname'.
+    """
+    env_url = os.getenv("DATABASE_URL")
+    if env_url:
+        return env_url
+
+    ini_url = config.get_main_option("sqlalchemy.url")
+    # Treat missing or placeholder as invalid
+    if not ini_url or ini_url.startswith("driver://"):
+        raise RuntimeError(
+            "DATABASE_URL environment variable not set and alembic.ini has no valid sqlalchemy.url"
+        )
+    return ini_url
+
+
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.
 
@@ -40,12 +62,7 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
-    if not url:
-        env_url = os.getenv("DATABASE_URL")
-        if not env_url:
-            raise RuntimeError("DATABASE_URL environment variable not set and no sqlalchemy.url in alembic.ini")
-        url = env_url
+    url = _resolve_db_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -64,12 +81,9 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # Allow env var override if alembic.ini doesn't include URL
-    if not config.get_main_option("sqlalchemy.url"):
-        env_url = os.getenv("DATABASE_URL")
-        if not env_url:
-            raise RuntimeError("DATABASE_URL environment variable not set and no sqlalchemy.url in alembic.ini")
-        config.set_main_option("sqlalchemy.url", env_url)
+    # Always resolve URL (env var preferred) and set into config
+    resolved_url = _resolve_db_url()
+    config.set_main_option("sqlalchemy.url", resolved_url)
 
     connectable = engine_from_config(
         config.get_section(config.config_ini_section, {}),

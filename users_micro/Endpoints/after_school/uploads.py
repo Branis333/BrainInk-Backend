@@ -220,6 +220,11 @@ async def bulk_upload_images_to_pdf_session(
     session_id: int = Form(..., description="Study session ID"),
     submission_type: str = Form("homework", description="Type of submission"),
     files: List[UploadFile] = File(..., description="Multiple image files to combine into PDF"),
+    # New contextual metadata
+    course_id: Optional[int] = Form(None, description="Course ID (optional, can be derived from session)"),
+    lesson_id: Optional[int] = Form(None, description="Lesson ID (optional, can be derived from session)"),
+    block_id: Optional[int] = Form(None, description="Block ID (optional, can be derived from session)"),
+    assignment_id: Optional[int] = Form(None, description="Assignment ID (optional)"),
     storage_mode: str = Form("database", description="Storage mode: 'database' (default)"),
     skip_db: bool = Form(False, description="If true, only generate PDF and return; do not persist (debug)")
 ):
@@ -346,12 +351,18 @@ async def bulk_upload_images_to_pdf_session(
             raise HTTPException(status_code=500, detail=f"Failed to save PDF file: {save_err}")
         
         # Create AI submission record
+        # Use provided parameters or fall back to session values
+        final_course_id = course_id if course_id is not None else session.course_id
+        final_lesson_id = lesson_id if lesson_id is not None else session.lesson_id
+        final_block_id = block_id if block_id is not None else session.block_id
+        
         submission = AISubmission(
             user_id=user_id,
-            course_id=session.course_id,
-            lesson_id=session.lesson_id,
-            block_id=session.block_id,
+            course_id=final_course_id,
+            lesson_id=final_lesson_id,
+            block_id=final_block_id,
             session_id=session_id,
+            assignment_id=assignment_id,
             submission_type=submission_type,
             original_filename=pdf_filename,
             file_path=str(file_path),
