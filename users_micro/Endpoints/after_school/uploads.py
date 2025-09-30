@@ -75,6 +75,69 @@ async def save_uploaded_file(file: UploadFile, file_path: Path) -> bool:
 
 # Removed simulation; real grading is performed via services.gemini_service
 
+# Normalize Gemini grading payload to our AISubmission fields
+def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
+    """Normalize Gemini grading payload to our AISubmission fields and types.
+
+    - ai_score: float 0-100 if available
+    - ai_feedback: string
+    - ai_strengths/improvements/corrections: strings (bullet-joined if list)
+    """
+    if not isinstance(grading, dict):
+        return {"error": "Invalid grading payload"}
+
+    # Prefer explicit percentage; otherwise compute from score/max_points
+    percentage = grading.get("percentage")
+    score = grading.get("score")
+    ai_score: Optional[float] = None
+    try:
+        if isinstance(percentage, (int, float)):
+            ai_score = float(percentage)
+        elif isinstance(score, (int, float)) and isinstance(max_points, (int, float)) and max_points > 0:
+            ai_score = (float(score) / float(max_points)) * 100
+        # Clamp and round
+        if ai_score is not None:
+            ai_score = max(0.0, min(100.0, round(ai_score, 2)))
+    except Exception:
+        ai_score = None
+
+    # Compose feedback fields
+    overall_feedback = grading.get("overall_feedback") or grading.get("detailed_feedback") or grading.get("feedback")
+
+    def to_text(value) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            # Join list items as bullets
+            try:
+                items = [str(v).strip() for v in value if v is not None]
+                items = [i for i in items if i]
+                return "\n".join([f"- {i}" for i in items]) if items else None
+            except Exception:
+                return "\n".join(map(str, value))
+        # Fallback string conversion for dict/other types
+        try:
+            import json as _json
+            return _json.dumps(value, ensure_ascii=False)
+        except Exception:
+            return str(value)
+
+    strengths_raw = grading.get("strengths") or []
+    improvements_raw = grading.get("improvements") or grading.get("recommendations") or []
+    corrections_raw = grading.get("corrections") or []
+
+    normalized = {
+        "ai_score": ai_score,
+        "ai_feedback": to_text(overall_feedback),
+        "ai_strengths": to_text(strengths_raw),
+        "ai_improvements": to_text(improvements_raw),
+        "ai_corrections": to_text(corrections_raw),
+        "raw": grading,
+    }
+    return normalized
+
 def resize_image_for_pdf(image: Image.Image, max_width: float, max_height: float) -> tuple:
     """
     Resize image to fit within PDF page dimensions while maintaining aspect ratio
@@ -340,14 +403,10 @@ async def bulk_upload_images_to_pdf_session(
                     rubric = getattr(assignment, 'rubric', '') or ''
                     max_points = getattr(assignment, 'points', 100) or 100
 
-            # Extract text from the generated PDF bytes using Gemini service
-            # We already have pdf_bytes in memory
-            pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
-            extracted_text = await gemini_service.extract_text_from_pdf_content(pdf_b64)
-
-            # Grade the extracted text
-            grading = await gemini_service.grade_submission(
-                submission_content=extracted_text,
+            # Grade using Gemini's native file processing (handles OCR for scanned/image PDFs)
+            grading = await gemini_service.grade_submission_from_file(
+                file_bytes=pdf_bytes,
+                filename=pdf_filename,
                 assignment_title=assignment_title,
                 assignment_description=assignment_description,
                 rubric=rubric,
@@ -355,16 +414,17 @@ async def bulk_upload_images_to_pdf_session(
                 submission_type=submission_type
             )
 
-            # Update submission with AI results
+            # Normalize and update submission with AI results
+            normalized = normalize_ai_grading(grading, max_points=max_points)
             submission.ai_processed = True
-            submission.ai_score = grading.get("ai_score")
-            submission.ai_feedback = grading.get("ai_feedback")
-            submission.ai_strengths = grading.get("ai_strengths")
-            submission.ai_improvements = grading.get("ai_improvements")
-            submission.ai_corrections = grading.get("ai_corrections")
+            submission.ai_score = normalized.get("ai_score")
+            submission.ai_feedback = normalized.get("ai_feedback")
+            submission.ai_strengths = normalized.get("ai_strengths")
+            submission.ai_improvements = normalized.get("ai_improvements")
+            submission.ai_corrections = normalized.get("ai_corrections")
             submission.processed_at = datetime.utcnow()
             db.commit()
-            ai_results = grading
+            ai_results = normalized
         except Exception as ai_err:
             # Don't fail the whole request if AI grading has an issue
             print(f"AI grading error: {ai_err}")
@@ -663,7 +723,6 @@ async def reprocess_submission_by_id(
             detail="Original file no longer exists, cannot reprocess"
         )
     
-    # Reprocess with AI
     # Reprocess with AI (real grading via Gemini)
     try:
         # Read the file bytes
@@ -683,10 +742,10 @@ async def reprocess_submission_by_id(
                 rubric = getattr(assignment, 'rubric', '') or ''
                 max_points = getattr(assignment, 'points', 100) or 100
 
-        pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
-        extracted_text = await gemini_service.extract_text_from_pdf_content(pdf_b64)
-        grading = await gemini_service.grade_submission(
-            submission_content=extracted_text,
+        # Always use native file grading to avoid misinterpreting base64 as text
+        grading = await gemini_service.grade_submission_from_file(
+            file_bytes=pdf_bytes,
+            filename=submission.original_filename or "submission.pdf",
             assignment_title=assignment_title,
             assignment_description=assignment_description,
             rubric=rubric,
@@ -694,16 +753,17 @@ async def reprocess_submission_by_id(
             submission_type=submission.submission_type
         )
 
-        # Update submission
-        submission.ai_score = grading.get("ai_score")
-        submission.ai_feedback = grading.get("ai_feedback")
-        submission.ai_strengths = grading.get("ai_strengths")
-        submission.ai_improvements = grading.get("ai_improvements")
-        submission.ai_corrections = grading.get("ai_corrections")
+        # Normalize and update submission
+        normalized = normalize_ai_grading(grading, max_points=max_points)
+        submission.ai_score = normalized.get("ai_score")
+        submission.ai_feedback = normalized.get("ai_feedback")
+        submission.ai_strengths = normalized.get("ai_strengths")
+        submission.ai_improvements = normalized.get("ai_improvements")
+        submission.ai_corrections = normalized.get("ai_corrections")
         submission.processed_at = datetime.utcnow()
         submission.ai_processed = True
         db.commit()
-        ai_results = grading
+        ai_results = normalized
     except Exception as ai_err:
         raise HTTPException(status_code=500, detail=f"AI grading error: {ai_err}")
     
@@ -720,8 +780,8 @@ async def reprocess_submission_by_id(
     
     return AIGradingResponse(
         submission_id=submission.id,
-        ai_score=submission.ai_score,
-        ai_feedback=submission.ai_feedback,
+        ai_score=submission.ai_score if submission.ai_score is not None else 0.0,
+        ai_feedback=submission.ai_feedback or "",
         ai_corrections=submission.ai_corrections,
         ai_strengths=submission.ai_strengths,
         ai_improvements=submission.ai_improvements,
@@ -877,7 +937,7 @@ async def after_school_upload_health_check():
         "features": [
             "Image validation and resizing",
             "PDF generation from multiple images",
-            "AI processing simulation",
+            "AI grading via Gemini (file-based with OCR)",
             "Study session integration",
             "Automatic grading and feedback"
         ]

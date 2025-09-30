@@ -1021,6 +1021,99 @@ class GeminiService:
             "processed_at": datetime.utcnow().isoformat()
         }
 
+    async def grade_submission_from_file(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        assignment_title: str,
+        assignment_description: str,
+        rubric: str,
+        max_points: int = 100,
+        submission_type: str = "homework",
+    ) -> Dict[str, Any]:
+        """
+        Grade a student submission by uploading the PDF/image document directly to Gemini.
+
+        This uses Gemini's native file processing (incl. OCR for image-based PDFs) and applies
+        the same grading rubric used by grade_submission(). Returns a normalized JSON payload.
+        """
+        try:
+            # Upload file and get Gemini file URI
+            gemini_file_uri = await self.upload_file_to_gemini(file_bytes, filename)
+            uploaded_file = genai.get_file(gemini_file_uri)
+
+            grading_prompt = f"""
+            You are an expert educational assessor. Read the attached submission file in full
+            (including running OCR on any images/scanned pages) and grade it with detailed analysis.
+
+            ASSIGNMENT DETAILS:
+            Title: {assignment_title}
+            Description: {assignment_description}
+            Type: {submission_type}
+            Maximum Points: {max_points}
+
+            GRADING RUBRIC:
+            {rubric}
+
+            Provide a comprehensive assessment in JSON format with these keys:
+            {{
+                "score": 85,
+                "percentage": 85.0,
+                "grade_letter": "B+",
+                "overall_feedback": "Overall feedback text",
+                "detailed_feedback": "Detailed analysis text",
+                "strengths": ["..."],
+                "improvements": ["..."],
+                "corrections": ["..."],
+                "recommendations": ["..."],
+                "rubric_breakdown": {{"criteria_1": {{"score": 20, "max": 25, "feedback": "..."}}}}
+            }}
+            """
+
+            response = await asyncio.to_thread(
+                self.config.model.generate_content,
+                [uploaded_file, grading_prompt],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.3,
+                    max_output_tokens=2048,
+                    response_mime_type="application/json",
+                ),
+            )
+
+            grade_result = json.loads(response.text)
+
+            # Normalize score fields
+            if "percentage" not in grade_result and "score" in grade_result:
+                try:
+                    score_val = float(grade_result.get("score", 0))
+                    grade_result["percentage"] = (score_val / max_points) * 100 if max_points else score_val
+                except Exception:
+                    grade_result["percentage"] = None
+
+            grade_result["graded_by"] = "Gemini AI"
+            grade_result["graded_at"] = datetime.utcnow().isoformat()
+            grade_result["max_points"] = max_points
+
+            return grade_result
+
+        except Exception as e:
+            # Fallback payload to avoid blowing up the caller
+            return {
+                "score": None,
+                "percentage": None,
+                "grade_letter": None,
+                "overall_feedback": None,
+                "detailed_feedback": None,
+                "strengths": [],
+                "improvements": [],
+                "corrections": [],
+                "recommendations": [],
+                "graded_by": "Gemini AI",
+                "graded_at": datetime.utcnow().isoformat(),
+                "max_points": max_points,
+                "error": str(e),
+            }
+
     async def extract_text_from_pdf_content(self, pdf_content: str) -> str:
         """
         Extract and process text content from PDF for grading
