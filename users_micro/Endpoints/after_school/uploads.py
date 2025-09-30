@@ -370,10 +370,12 @@ async def bulk_upload_images_to_pdf_session(
             print(f"AI grading error: {ai_err}")
             ai_results = {"error": str(ai_err)}
         
-        # Update study session with latest score and feedback
-        session.ai_score = ai_results["ai_score"]
-        session.ai_feedback = ai_results["ai_feedback"]
-        session.ai_recommendations = ai_results["ai_improvements"]
+        # Update study session with latest score and feedback (only if grading succeeded)
+        if isinstance(ai_results, dict) and "ai_score" in ai_results:
+            session.ai_score = ai_results.get("ai_score")
+            session.ai_feedback = ai_results.get("ai_feedback")
+            session.ai_recommendations = ai_results.get("ai_improvements")
+        # Always bump updated_at
         session.updated_at = datetime.utcnow()
         
         db.commit()
@@ -708,9 +710,10 @@ async def reprocess_submission_by_id(
     # Update associated study session
     session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
     if session:
-        session.ai_score = ai_results["ai_score"]
-        session.ai_feedback = ai_results["ai_feedback"]
-        session.ai_recommendations = ai_results["ai_improvements"]
+        if isinstance(ai_results, dict) and "ai_score" in ai_results:
+            session.ai_score = ai_results.get("ai_score")
+            session.ai_feedback = ai_results.get("ai_feedback")
+            session.ai_recommendations = ai_results.get("ai_improvements")
         session.updated_at = datetime.utcnow()
     
     db.commit()
