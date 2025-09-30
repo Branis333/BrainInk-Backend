@@ -156,9 +156,22 @@ def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
     improvements_raw = grading.get("improvements") or grading.get("recommendations") or []
     corrections_raw = grading.get("corrections") or []
 
+    # If no feedback present, derive an explanatory message (especially helpful when score is 0)
+    feedback_text = to_text(overall_feedback)
+    if not feedback_text:
+        if grading.get("error"):
+            feedback_text = f"AI processing issue: {grading.get('error')}"
+        elif ai_score == 0:
+            feedback_text = (
+                "The AI returned a score of 0. This often happens when the document has low readable content, "
+                "blurry images, or content unrelated to the assignment. Please ensure photos are clear and the work is visible."
+            )
+        else:
+            feedback_text = "AI processed the submission but did not return detailed feedback."
+
     normalized = {
         "ai_score": ai_score,
-        "ai_feedback": to_text(overall_feedback),
+        "ai_feedback": feedback_text,
         "ai_strengths": to_text(strengths_raw),
         "ai_improvements": to_text(improvements_raw),
         "ai_corrections": to_text(corrections_raw),
@@ -460,10 +473,14 @@ async def bulk_upload_images_to_pdf_session(
         
         # Update study session with latest score and feedback (only if grading succeeded)
         ai_score_value = ai_results.get("ai_score") if isinstance(ai_results, dict) else None
+        ai_feedback_val = ai_results.get("ai_feedback") if isinstance(ai_results, dict) else None
+        ai_impr_val = ai_results.get("ai_improvements") if isinstance(ai_results, dict) else None
         if ai_score_value is not None:
             session.ai_score = ai_score_value
-            session.ai_feedback = ai_results.get("ai_feedback")
-            session.ai_recommendations = ai_results.get("ai_improvements")
+        if ai_feedback_val:
+            session.ai_feedback = ai_feedback_val
+        if ai_impr_val:
+            session.ai_recommendations = ai_impr_val
         # Always bump updated_at
         session.updated_at = datetime.utcnow()
         
