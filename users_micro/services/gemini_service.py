@@ -18,13 +18,76 @@ class GeminiConfig:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")
         
-        # Use gemini-1.5-flash for free tier, allow override with GEMINI_MODEL
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-        
+        # Use gemini-1.5-flash-latest by default, allow override with GEMINI_MODEL
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+
         print(f"🔑 Configuring Gemini AI with API key: {self.api_key[:10]}...{self.api_key[-4:]}")
-        print(f"🤖 Using model: {self.model_name} (free tier optimized)")
+        print(f"🤖 Requested model: {self.model_name}")
         genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel(self.model_name)
+
+        # Try constructing the requested model; if not available for this API version/region,
+        # gracefully fall back to a supported alternative that has generateContent capability.
+        try:
+            self.model = genai.GenerativeModel(self.model_name)
+            # Probe capabilities quickly by calling the models endpoint to ensure existence
+            # (some SDKs defer validation until first use)
+            _ = next((m for m in genai.list_models() if getattr(m, 'name', '').endswith(self.model_name) or getattr(m, 'name', '') == f"models/{self.model_name}"), None)
+            if _ is None:
+                raise ValueError(f"Model {self.model_name} not found in list_models(); attempting fallback")
+        except Exception as e:
+            print(f"⚠️ Could not initialize requested model '{self.model_name}': {e}")
+            fallback = self._choose_supported_model(preferred_first=self.model_name)
+            print(f"🔁 Falling back to model: {fallback}")
+            self.model_name = fallback
+            self.model = genai.GenerativeModel(self.model_name)
+
+    def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
+        """Pick a supported model that can handle generateContent (multimodal if possible).
+        Order of preference:
+          1) preferred_first (env override) if available
+          2) gemini-1.5-flash-latest
+          3) gemini-1.5-flash-8b
+          4) gemini-1.5-pro-latest
+          5) gemini-1.0-pro-vision-latest
+          6) gemini-pro-vision
+        If none are available, choose the first model that supports generateContent.
+        """
+        try:
+            models = list(genai.list_models())
+        except Exception as e:
+            # As a last resort, return a commonly available default
+            print(f"⚠️ list_models() failed: {e}; using default 'gemini-1.5-flash-latest'")
+            return "gemini-1.5-flash-latest"
+
+        def normalize(name: str) -> str:
+            return name.replace("models/", "") if name else name
+
+        def supports_generate(model_obj) -> bool:
+            methods = getattr(model_obj, 'supported_generation_methods', None) or getattr(model_obj, 'generation_methods', None) or []
+            # Prefer new API method name if present; otherwise accept any generate* method
+            return any("generate" in str(m).lower() for m in methods)
+
+        available = {normalize(getattr(m, 'name', '')): m for m in models if supports_generate(m)}
+
+        # Preferred order list
+        preferred = [p for p in [preferred_first, os.getenv("GEMINI_MODEL"),
+                                 "gemini-1.5-flash-latest", "gemini-1.5-flash-8b",
+                                 "gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest",
+                                 "gemini-pro-vision"] if p]
+
+        for name in preferred:
+            if name in available:
+                return name
+            # Also check for names missing the models/ prefix in the list
+            if f"models/{name}" in (getattr(m, 'name', '') for m in models):
+                return name
+
+        # If none of our preferred are available, fall back to the first available
+        if available:
+            return next(iter(available.keys()))
+
+        # Ultimate fallback
+        return "gemini-1.5-flash-latest"
 
 # Data structures for course generation
 class CourseBlock(BaseModel):
