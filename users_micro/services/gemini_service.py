@@ -17,9 +17,9 @@ class GeminiConfig:
         self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")
-        
-        # Use gemini-1.5-flash-latest (free-tier) by default, allow override with GEMINI_MODEL
-        self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+
+        # Prefer Gemini 2.5 Flash by default; allow override via GEMINI_MODEL
+        self.model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-latest")
         # Allow opting into paid models explicitly; default to free-only
         self.allow_paid = os.getenv("ALLOW_PAID_MODELS", "false").lower() in ("1", "true", "yes")
 
@@ -27,34 +27,24 @@ class GeminiConfig:
         print(f"🤖 Requested model: {self.model_name} | allow_paid={self.allow_paid}")
         genai.configure(api_key=self.api_key)
 
-        # Try constructing the requested model; if not available for this API version/region,
-        # gracefully fall back to a supported alternative that has generateContent capability.
-        try:
-            self.model = genai.GenerativeModel(self.model_name)
-            # Probe capabilities quickly by calling the models endpoint to ensure existence
-            # (some SDKs defer validation until first use)
-            _ = next((m for m in genai.list_models() if getattr(m, 'name', '').endswith(self.model_name) or getattr(m, 'name', '') == f"models/{self.model_name}"), None)
-            if _ is None:
-                raise ValueError(f"Model {self.model_name} not found in list_models(); attempting fallback")
-        except Exception as e:
-            print(f"⚠️ Could not initialize requested model '{self.model_name}': {e}")
-            fallback = self._choose_supported_model(preferred_first=self.model_name)
-            print(f"🔁 Falling back to model: {fallback}")
-            self.model_name = fallback
-            self.model = genai.GenerativeModel(self.model_name)
+        # Choose a supported model (respecting free-only unless ALLOW_PAID_MODELS=true)
+        chosen = self._choose_supported_model(preferred_first=self.model_name)
+        if chosen != self.model_name:
+            print(f"🔁 Using fallback model: {chosen}")
+        self.model_name = chosen
+        self.model = genai.GenerativeModel(self.model_name)
 
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
-                Enforce free-only models unless ALLOW_PAID_MODELS=true.
-                Free-preferred order:
-                    1) preferred_first (if allowed by policy)
-                    2) gemini-1.5-flash-latest
-                    3) gemini-1.5-flash-8b
-                If paid models are allowed, extend with:
-                    4) gemini-1.5-pro-latest
-                    5) gemini-1.0-pro-vision-latest
-                    6) gemini-pro-vision
-                If none are available, choose the first model that supports generateContent.
+        Enforce free-only models unless ALLOW_PAID_MODELS=true.
+        Free-preferred order:
+          1) preferred_first (if allowed by policy)
+          2) gemini-2.5-flash-latest, gemini-2.5-flash
+          3) gemini-2.0-flash-latest, gemini-2.0-flash
+          4) gemini-1.5-flash-latest, gemini-1.5-flash, gemini-1.5-flash-8b
+        If paid models are allowed, extend with:
+          - gemini-1.5-pro-latest, gemini-1.0-pro-vision-latest, gemini-pro-vision
+        If none are available, choose the first model that supports generateContent.
         """
         try:
             models = list(genai.list_models())
@@ -74,7 +64,11 @@ class GeminiConfig:
         available = {normalize(getattr(m, 'name', '')): m for m in models if supports_generate(m)}
 
         # Define allowed sets
-        free_allowed = {"gemini-1.5-flash-latest", "gemini-1.5-flash-8b"}
+        free_allowed = {
+            "gemini-2.5-flash-latest", "gemini-2.5-flash",
+            "gemini-2.0-flash-latest", "gemini-2.0-flash",
+            "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+        }
         paid_allowed = {"gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest", "gemini-pro-vision"}
 
         # Filter availability if paid models aren't allowed
@@ -82,8 +76,13 @@ class GeminiConfig:
             available = {k: v for k, v in available.items() if k in free_allowed}
 
         # Preferred order list
-        preferred = [p for p in [preferred_first, os.getenv("GEMINI_MODEL"),
-                                 "gemini-1.5-flash-latest", "gemini-1.5-flash-8b"] if p]
+        preferred = [p for p in [
+            preferred_first,
+            os.getenv("GEMINI_MODEL"),
+            "gemini-2.5-flash-latest", "gemini-2.5-flash",
+            "gemini-2.0-flash-latest", "gemini-2.0-flash",
+            "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+        ] if p]
         if self.allow_paid:
             preferred.extend(["gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest", "gemini-pro-vision"])
 
