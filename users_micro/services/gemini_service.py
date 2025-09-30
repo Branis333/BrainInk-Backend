@@ -18,11 +18,13 @@ class GeminiConfig:
         if not self.api_key:
             raise ValueError("GEMINI_API_KEY or GOOGLE_API_KEY environment variable not set")
         
-        # Use gemini-1.5-flash-latest by default, allow override with GEMINI_MODEL
+        # Use gemini-1.5-flash-latest (free-tier) by default, allow override with GEMINI_MODEL
         self.model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-flash-latest")
+        # Allow opting into paid models explicitly; default to free-only
+        self.allow_paid = os.getenv("ALLOW_PAID_MODELS", "false").lower() in ("1", "true", "yes")
 
         print(f"🔑 Configuring Gemini AI with API key: {self.api_key[:10]}...{self.api_key[-4:]}")
-        print(f"🤖 Requested model: {self.model_name}")
+        print(f"🤖 Requested model: {self.model_name} | allow_paid={self.allow_paid}")
         genai.configure(api_key=self.api_key)
 
         # Try constructing the requested model; if not available for this API version/region,
@@ -43,14 +45,16 @@ class GeminiConfig:
 
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
-        Order of preference:
-          1) preferred_first (env override) if available
-          2) gemini-1.5-flash-latest
-          3) gemini-1.5-flash-8b
-          4) gemini-1.5-pro-latest
-          5) gemini-1.0-pro-vision-latest
-          6) gemini-pro-vision
-        If none are available, choose the first model that supports generateContent.
+                Enforce free-only models unless ALLOW_PAID_MODELS=true.
+                Free-preferred order:
+                    1) preferred_first (if allowed by policy)
+                    2) gemini-1.5-flash-latest
+                    3) gemini-1.5-flash-8b
+                If paid models are allowed, extend with:
+                    4) gemini-1.5-pro-latest
+                    5) gemini-1.0-pro-vision-latest
+                    6) gemini-pro-vision
+                If none are available, choose the first model that supports generateContent.
         """
         try:
             models = list(genai.list_models())
@@ -69,11 +73,19 @@ class GeminiConfig:
 
         available = {normalize(getattr(m, 'name', '')): m for m in models if supports_generate(m)}
 
+        # Define allowed sets
+        free_allowed = {"gemini-1.5-flash-latest", "gemini-1.5-flash-8b"}
+        paid_allowed = {"gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest", "gemini-pro-vision"}
+
+        # Filter availability if paid models aren't allowed
+        if not self.allow_paid:
+            available = {k: v for k, v in available.items() if k in free_allowed}
+
         # Preferred order list
         preferred = [p for p in [preferred_first, os.getenv("GEMINI_MODEL"),
-                                 "gemini-1.5-flash-latest", "gemini-1.5-flash-8b",
-                                 "gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest",
-                                 "gemini-pro-vision"] if p]
+                                 "gemini-1.5-flash-latest", "gemini-1.5-flash-8b"] if p]
+        if self.allow_paid:
+            preferred.extend(["gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest", "gemini-pro-vision"])
 
         for name in preferred:
             if name in available:
@@ -88,6 +100,11 @@ class GeminiConfig:
 
         # Ultimate fallback
         return "gemini-1.5-flash-latest"
+
+    @staticmethod
+    def is_quota_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return ("quota" in text) or ("429" in text) or ("rate limit" in text)
 
 # Data structures for course generation
 class CourseBlock(BaseModel):
