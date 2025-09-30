@@ -16,11 +16,13 @@ import hashlib
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
-    Course, CourseLesson, CourseBlock, StudySession, AISubmission
+    Course, CourseLesson, CourseBlock, StudySession, AISubmission, CourseAssignment
 )
 from schemas.afterschool_schema import (
     AISubmissionCreate, AISubmissionOut, AIGradingResponse, MessageResponse
 )
+from services.gemini_service import gemini_service
+import base64
 
 router = APIRouter(prefix="/after-school/uploads", tags=["After-School File Uploads"])
 
@@ -71,58 +73,7 @@ async def save_uploaded_file(file: UploadFile, file_path: Path) -> bool:
         print(f"Error saving file: {e}")
         return False
 
-def simulate_ai_processing(file_path: str, submission_type: str, lesson_content: str = "") -> dict:
-    """
-    Simulate AI processing of uploaded file
-    In production, this would integrate with actual AI services for:
-    - OCR for handwritten text
-    - Content analysis
-    - Automatic grading
-    - Feedback generation
-    """
-    import random
-    
-    # Simulate processing based on file type
-    file_ext = Path(file_path).suffix.lower()
-    
-    if file_ext in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']:
-        # Image processing simulation
-        processing_results = {
-            "content_extracted": "Sample handwritten math equations detected: 2+2=4, 5x3=15",
-            "ai_score": random.randint(70, 95),
-            "ai_feedback": "Good handwriting! Your calculations are correct.",
-            "ai_strengths": "Clear presentation, accurate calculations",
-            "ai_improvements": "Try to show more working steps",
-            "ai_corrections": "None needed - excellent work!"
-        }
-    elif file_ext == '.pdf':
-        # PDF processing simulation
-        processing_results = {
-            "content_extracted": "PDF document with multiple pages of science notes",
-            "ai_score": random.randint(75, 90),
-            "ai_feedback": "Comprehensive notes with good organization.",
-            "ai_strengths": "Well-structured content, good use of diagrams",
-            "ai_improvements": "Add more examples for complex concepts",
-            "ai_corrections": "Check spelling on page 2"
-        }
-    else:
-        # Text file processing simulation
-        processing_results = {
-            "content_extracted": "Text document with essay content",
-            "ai_score": random.randint(65, 85),
-            "ai_feedback": "Good effort in expressing ideas.",
-            "ai_strengths": "Clear arguments, good vocabulary",
-            "ai_improvements": "Work on paragraph structure",
-            "ai_corrections": "Fix grammar in paragraph 3"
-        }
-    
-    # Adjust score based on submission type
-    if submission_type == "assessment":
-        processing_results["ai_score"] = min(processing_results["ai_score"], 85)
-    elif submission_type == "practice":
-        processing_results["ai_score"] += 5  # Encourage practice
-    
-    return processing_results
+# Removed simulation; real grading is performed via services.gemini_service
 
 def resize_image_for_pdf(image: Image.Image, max_width: float, max_height: float) -> tuple:
     """
@@ -374,23 +325,50 @@ async def bulk_upload_images_to_pdf_session(
         db.commit()
         db.refresh(submission)
         
-        # Process with AI (simulate)
-        # Use lesson content if available; otherwise fall back to block content
-        content_for_ai = ""
-        if session.lesson is not None and getattr(session.lesson, 'content', None):
-            content_for_ai = session.lesson.content or ""
-        elif getattr(session, 'block', None) is not None and getattr(session.block, 'content', None):
-            content_for_ai = session.block.content or ""
-        ai_results = simulate_ai_processing(str(file_path), submission_type, content_for_ai)
-        
-        # Update submission with AI results
-        submission.ai_processed = True
-        submission.ai_score = ai_results["ai_score"]
-        submission.ai_feedback = ai_results["ai_feedback"]
-        submission.ai_strengths = ai_results["ai_strengths"]
-        submission.ai_improvements = ai_results["ai_improvements"]
-        submission.ai_corrections = ai_results["ai_corrections"]
-        submission.processed_at = datetime.utcnow()
+        # Process with AI (real grading via Gemini)
+        try:
+            # Prepare assignment context if available
+            assignment_title = f"{submission_type.capitalize()} Submission"
+            assignment_description = ""
+            rubric = ""
+            max_points = 100
+            if assignment_id:
+                assignment: Optional[CourseAssignment] = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+                if assignment:
+                    assignment_title = assignment.title or assignment_title
+                    assignment_description = assignment.description or ""
+                    rubric = getattr(assignment, 'rubric', '') or ''
+                    max_points = getattr(assignment, 'points', 100) or 100
+
+            # Extract text from the generated PDF bytes using Gemini service
+            # We already have pdf_bytes in memory
+            pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+            extracted_text = await gemini_service.extract_text_from_pdf_content(pdf_b64)
+
+            # Grade the extracted text
+            grading = await gemini_service.grade_submission(
+                submission_content=extracted_text,
+                assignment_title=assignment_title,
+                assignment_description=assignment_description,
+                rubric=rubric,
+                max_points=max_points,
+                submission_type=submission_type
+            )
+
+            # Update submission with AI results
+            submission.ai_processed = True
+            submission.ai_score = grading.get("ai_score")
+            submission.ai_feedback = grading.get("ai_feedback")
+            submission.ai_strengths = grading.get("ai_strengths")
+            submission.ai_improvements = grading.get("ai_improvements")
+            submission.ai_corrections = grading.get("ai_corrections")
+            submission.processed_at = datetime.utcnow()
+            db.commit()
+            ai_results = grading
+        except Exception as ai_err:
+            # Don't fail the whole request if AI grading has an issue
+            print(f"AI grading error: {ai_err}")
+            ai_results = {"error": str(ai_err)}
         
         # Update study session with latest score and feedback
         session.ai_score = ai_results["ai_score"]
@@ -684,19 +662,48 @@ async def reprocess_submission_by_id(
         )
     
     # Reprocess with AI
-    ai_results = simulate_ai_processing(
-        submission.file_path, 
-        submission.submission_type
-    )
-    
-    # Update submission
-    submission.ai_score = ai_results["ai_score"]
-    submission.ai_feedback = ai_results["ai_feedback"]
-    submission.ai_strengths = ai_results["ai_strengths"]
-    submission.ai_improvements = ai_results["ai_improvements"]
-    submission.ai_corrections = ai_results["ai_corrections"]
-    submission.processed_at = datetime.utcnow()
-    submission.ai_processed = True
+    # Reprocess with AI (real grading via Gemini)
+    try:
+        # Read the file bytes
+        with open(submission.file_path, 'rb') as f:
+            pdf_bytes = f.read()
+
+        # Assignment context if available
+        assignment_title = f"{submission.submission_type.capitalize()} Submission"
+        assignment_description = ""
+        rubric = ""
+        max_points = 100
+        if submission.assignment_id:
+            assignment: Optional[CourseAssignment] = db.query(CourseAssignment).filter(CourseAssignment.id == submission.assignment_id).first()
+            if assignment:
+                assignment_title = assignment.title or assignment_title
+                assignment_description = assignment.description or ""
+                rubric = getattr(assignment, 'rubric', '') or ''
+                max_points = getattr(assignment, 'points', 100) or 100
+
+        pdf_b64 = base64.b64encode(pdf_bytes).decode('utf-8')
+        extracted_text = await gemini_service.extract_text_from_pdf_content(pdf_b64)
+        grading = await gemini_service.grade_submission(
+            submission_content=extracted_text,
+            assignment_title=assignment_title,
+            assignment_description=assignment_description,
+            rubric=rubric,
+            max_points=max_points,
+            submission_type=submission.submission_type
+        )
+
+        # Update submission
+        submission.ai_score = grading.get("ai_score")
+        submission.ai_feedback = grading.get("ai_feedback")
+        submission.ai_strengths = grading.get("ai_strengths")
+        submission.ai_improvements = grading.get("ai_improvements")
+        submission.ai_corrections = grading.get("ai_corrections")
+        submission.processed_at = datetime.utcnow()
+        submission.ai_processed = True
+        db.commit()
+        ai_results = grading
+    except Exception as ai_err:
+        raise HTTPException(status_code=500, detail=f"AI grading error: {ai_err}")
     
     # Update associated study session
     session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
