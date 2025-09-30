@@ -236,18 +236,33 @@ class ReadingAssistantService:
         """
         
         try:
-            # Step 1: Transcribe audio using Gemini's speech capabilities
-            transcribed_text = await self._transcribe_audio_with_gemini(audio_file_path)
+            print(f"🎤 DEBUG: Processing audio file: {audio_file_path}")
+            print(f"🎯 DEBUG: Target text: '{target_text}'")
             
-            # Step 2: Perform detailed analysis
-            print(f"🔍 DEBUG: About to analyze - Target: '{target_text}', Transcribed: '{transcribed_text}'")
-            analysis_result = await self._analyze_reading_performance(
-                target_text=target_text,
-                transcribed_text=transcribed_text,
-                reading_level=reading_level,
-                audio_file_path=audio_file_path
-            )
-            print(f"🔍 DEBUG: Analysis result accuracy: {analysis_result.get('accuracy_percentage', 'MISSING')}")
+            # Step 1: Transcribe audio using Gemini's speech capabilities
+            try:
+                transcribed_text = await self._transcribe_audio_with_gemini(audio_file_path)
+                print(f"✅ Transcription successful: '{transcribed_text}'")
+                transcription_successful = True
+            except Exception as e:
+                print(f"❌ Transcription failed: {e}")
+                transcribed_text = "Transcription not available - please try again"
+                transcription_successful = False
+            
+            # Step 2: Only do analysis if transcription was successful
+            if transcription_successful:
+                print(f"🔍 DEBUG: Running AI analysis...")
+                analysis_result = await self._analyze_reading_performance(
+                    target_text=target_text,
+                    transcribed_text=transcribed_text,
+                    reading_level=reading_level,
+                    audio_file_path=audio_file_path
+                )
+                print(f"✅ AI analysis completed")
+            else:
+                print(f"⚠️ Skipping AI analysis due to transcription failure")
+                # Generate neutral analysis when transcription fails
+                analysis_result = self._generate_neutral_analysis(target_text)
             
             # Step 3: Generate personalized feedback
             feedback = await self._generate_reading_feedback(
@@ -287,26 +302,51 @@ class ReadingAssistantService:
         """Use Gemini to transcribe audio file"""
         
         try:
-            # Upload audio file to Gemini
-            uploaded_file = genai.upload_file(path=audio_file_path, display_name="reading_audio")
+            print(f"🎤 DEBUG: Starting transcription for: {audio_file_path}")
             
-            # Wait for processing
+            # Check if file exists and has content
+            if not os.path.exists(audio_file_path):
+                print(f"❌ Audio file not found: {audio_file_path}")
+                raise Exception("Audio file not found")
+            
+            file_size = os.path.getsize(audio_file_path)
+            if file_size == 0:
+                print(f"❌ Empty audio file: {audio_file_path}")
+                raise Exception("Empty audio file")
+            
+            print(f"📄 Audio file size: {file_size} bytes")
+            
+            # Upload audio file to Gemini
+            print("🔄 Uploading to Gemini...")
+            uploaded_file = genai.upload_file(path=audio_file_path, display_name="reading_audio")
+            print(f"✅ File uploaded to Gemini: {uploaded_file.name}")
+            
+            # Wait for processing with timeout
             import time
+            max_wait_time = 30  # 30 seconds timeout
+            start_time = time.time()
+            
             while uploaded_file.state.name == "PROCESSING":
+                if time.time() - start_time > max_wait_time:
+                    print("❌ Gemini processing timeout")
+                    raise Exception("Gemini processing timeout")
                 time.sleep(2)
                 uploaded_file = genai.get_file(uploaded_file.name)
+                print(f"🔄 Gemini processing status: {uploaded_file.state.name}")
             
             if uploaded_file.state.name == "FAILED":
-                raise Exception("Audio file processing failed")
+                print("❌ Gemini processing failed")
+                raise Exception("Gemini audio processing failed")
             
             # Generate transcription
             transcription_prompt = """
             Please transcribe this audio recording of a child reading. 
-            Focus on accuracy and include any mispronunciations or unclear words.
-            Return only the transcribed text, preserving the child's actual pronunciation.
-            If a word is unclear or mispronounced, still include what you hear.
+            Return only the transcribed text exactly as you hear it.
+            If you cannot understand the audio clearly, return exactly: "TRANSCRIPTION_FAILED"
+            Do not add any explanations or comments, just the transcribed text.
             """
             
+            print("🤖 Requesting transcription from Gemini...")
             response = await asyncio.to_thread(
                 self.gemini_service.config.model.generate_content,
                 [uploaded_file, transcription_prompt],
@@ -316,12 +356,61 @@ class ReadingAssistantService:
                 )
             )
             
-            return response.text.strip()
+            transcribed_text = response.text.strip()
+            print(f"🎯 Gemini transcription result: '{transcribed_text}'")
+            
+            # Cleanup uploaded file
+            try:
+                genai.delete_file(uploaded_file.name)
+                print("🧹 Cleaned up Gemini file")
+            except:
+                pass
+            
+            # Check if transcription actually worked
+            if transcribed_text == "TRANSCRIPTION_FAILED" or len(transcribed_text) < 2:
+                print("❌ Transcription failed or empty")
+                raise Exception("Transcription failed")
+            
+            return transcribed_text
             
         except Exception as e:
-            # Fallback to basic transcription
-            return "Transcription not available - please try again"
+            print(f"❌ Critical error in transcription: {e}")
+            raise Exception(f"Audio transcription failed: {str(e)}")
     
+    def _generate_neutral_analysis(self, target_text: str) -> Dict[str, Any]:
+        """Generate neutral analysis when transcription fails"""
+        
+        target_words = target_text.lower().split()
+        word_accuracy = []
+        
+        for i, word in enumerate(target_words):
+            # Clean punctuation from word
+            clean_word = word.strip('.,!?;:')
+            word_accuracy.append({
+                "target_word": clean_word,
+                "spoken_word": "analysis_not_available",
+                "is_correct": False,  # Set to False since no analysis available
+                "pronunciation_accuracy": 50,  # Neutral score
+                "word_position": i + 1,
+                "phonetic_errors": [],
+                "pronunciation_tip": ""
+            })
+        
+        return {
+            "word_accuracy": word_accuracy,
+            "pronunciation_errors": [],
+            "reading_speed": 32.0,  # Default reading speed
+            "pauses_analysis": {"total_pauses": 0, "fluency_impact": "unknown"},
+            "accuracy_percentage": 0.0,  # 0% since no real analysis
+            "fluency_score": 60.0,  # Default neutral score
+            "pronunciation_score": 0.0,  # 0% since no real analysis
+            "overall_assessment": {
+                "strengths": ["Audio recording completed"],
+                "areas_for_improvement": ["Try recording again in a quiet environment"],
+                "specific_recommendations": ["Ensure microphone is working", "Speak clearly and loudly"]
+            }
+        }
+
     async def _analyze_reading_performance(
         self,
         target_text: str,
