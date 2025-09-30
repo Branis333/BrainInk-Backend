@@ -54,6 +54,42 @@ class GeneratedCourse(BaseModel):
 class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
+    
+    def _safe_parse_json(self, text: str) -> Dict[str, Any]:
+        """Parse JSON from Gemini response text robustly.
+        - Strips ```json fences
+        - Attempts direct json.loads
+        - Falls back to slicing first {...} block
+        Returns a dict or raises ValueError.
+        """
+        import json as _json
+        if text is None:
+            raise ValueError("Empty response text")
+        t = text.strip()
+        # Strip code fences if present
+        if t.startswith("```json") and t.endswith("```"):
+            t = t[7:-3].strip()
+        elif t.startswith("```") and t.endswith("```"):
+            t = t[3:-3].strip()
+        # Try direct parse
+        try:
+            return _json.loads(t)
+        except Exception:
+            pass
+        # Try to find the first JSON object substring
+        start = t.find('{')
+        end = t.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            candidate = t[start:end+1]
+            try:
+                return _json.loads(candidate)
+            except Exception:
+                pass
+        # As last resort, attempt to replace single quotes and parse
+        try:
+            return _json.loads(t.replace("'", '"'))
+        except Exception as e:
+            raise ValueError(f"Failed to parse JSON from response: {str(e)}")
         
     async def analyze_textbook_and_generate_course(
         self, 
@@ -882,12 +918,16 @@ class GeminiService:
                     response_mime_type="application/json"
                 )
             )
-            
-            grade_result = json.loads(response.text)
+            # Robust JSON parsing
+            grade_result = self._safe_parse_json(response.text)
             
             # Ensure score consistency
             if "score" in grade_result and "percentage" not in grade_result:
-                grade_result["percentage"] = (grade_result["score"] / max_points) * 100
+                try:
+                    score_val = float(grade_result.get("score", 0))
+                    grade_result["percentage"] = (score_val / max_points) * 100 if max_points else score_val
+                except Exception:
+                    grade_result["percentage"] = None
             
             # Add metadata
             grade_result["graded_by"] = "Gemini AI"
@@ -1080,7 +1120,8 @@ class GeminiService:
                 ),
             )
 
-            grade_result = json.loads(response.text)
+            # Robust JSON parsing
+            grade_result = self._safe_parse_json(response.text)
 
             # Normalize score fields
             if "percentage" not in grade_result and "score" in grade_result:

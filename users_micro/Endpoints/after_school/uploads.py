@@ -86,15 +86,43 @@ def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
     if not isinstance(grading, dict):
         return {"error": "Invalid grading payload"}
 
-    # Prefer explicit percentage; otherwise compute from score/max_points
-    percentage = grading.get("percentage")
+    # Prefer explicit percentage; otherwise compute from score/max_points or rubric breakdown
+    percent_candidates = [
+        grading.get("percentage"), grading.get("percent"), grading.get("score_percentage"), grading.get("score_percent"),
+    ]
     score = grading.get("score")
     ai_score: Optional[float] = None
     try:
-        if isinstance(percentage, (int, float)):
-            ai_score = float(percentage)
-        elif isinstance(score, (int, float)) and isinstance(max_points, (int, float)) and max_points > 0:
-            ai_score = (float(score) / float(max_points)) * 100
+        # Check direct numeric percentage
+        for p in percent_candidates:
+            if isinstance(p, (int, float)):
+                ai_score = float(p)
+                break
+            if isinstance(p, str):
+                ps = p.strip().replace('%', '')
+                if ps.replace('.', '', 1).isdigit():
+                    ai_score = float(ps)
+                    break
+        # If percentage missing, compute from score/max_points
+        if ai_score is None and isinstance(score, (int, float)):
+            if isinstance(max_points, (int, float)) and max_points > 0:
+                ai_score = (float(score) / float(max_points)) * 100
+        # If still missing, try rubric_breakdown aggregation
+        if ai_score is None and isinstance(grading.get("rubric_breakdown"), dict):
+            rb = grading.get("rubric_breakdown")
+            try:
+                total_scored = 0.0
+                total_max = 0.0
+                for _, crit in rb.items():
+                    s = crit.get("score") if isinstance(crit, dict) else None
+                    m = crit.get("max") if isinstance(crit, dict) else None
+                    if isinstance(s, (int, float)) and isinstance(m, (int, float)) and m > 0:
+                        total_scored += float(s)
+                        total_max += float(m)
+                if total_max > 0:
+                    ai_score = (total_scored / total_max) * 100.0
+            except Exception:
+                pass
         # Clamp and round
         if ai_score is not None:
             ai_score = max(0.0, min(100.0, round(ai_score, 2)))
@@ -431,8 +459,9 @@ async def bulk_upload_images_to_pdf_session(
             ai_results = {"error": str(ai_err)}
         
         # Update study session with latest score and feedback (only if grading succeeded)
-        if isinstance(ai_results, dict) and "ai_score" in ai_results:
-            session.ai_score = ai_results.get("ai_score")
+        ai_score_value = ai_results.get("ai_score") if isinstance(ai_results, dict) else None
+        if ai_score_value is not None:
+            session.ai_score = ai_score_value
             session.ai_feedback = ai_results.get("ai_feedback")
             session.ai_recommendations = ai_results.get("ai_improvements")
         # Always bump updated_at
