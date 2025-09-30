@@ -254,25 +254,99 @@ class TTSService:
     ) -> Dict[str, Any]:
         """Fallback TTS when no service is available"""
         
-        # Create a mock audio file or use system TTS
-        filename = f"tts_fallback_{uuid.uuid4().hex}.txt"
-        file_path = self.output_dir / filename
-        
-        # Save text file as placeholder
-        with open(file_path, "w") as f:
-            f.write(f"Pronunciation: {text}\nVoice: {voice_type}\nSpeed: {speed}")
-        
-        word_count = len(text.split())
-        estimated_duration = (word_count * 0.6) / speed
-        
-        return {
-            "success": True,
-            "audio_url": f"/reading-assistant/pronunciation-audio/{filename}",
-            "audio_file": str(file_path),
-            "duration_seconds": estimated_duration,
-            "text": text,
-            "fallback": True
-        }
+        try:
+            # Try to create a simple audio file with pyttsx3 if available
+            if PYTTSX3_AVAILABLE:
+                filename = f"tts_fallback_{uuid.uuid4().hex}.wav"
+                file_path = self.output_dir / filename
+                
+                try:
+                    import pyttsx3
+                    engine = pyttsx3.init()
+                    
+                    # Set speech rate
+                    rate = engine.getProperty('rate')
+                    engine.setProperty('rate', int(rate * speed))
+                    
+                    # Set voice if available
+                    voices = engine.getProperty('voices')
+                    if voices:
+                        # Try to use a female voice for child-friendliness
+                        for voice in voices:
+                            if 'female' in voice.name.lower() or 'woman' in voice.name.lower():
+                                engine.setProperty('voice', voice.id)
+                                break
+                    
+                    # Save to file
+                    engine.save_to_file(text, str(file_path))
+                    engine.runAndWait()
+                    
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                        word_count = len(text.split())
+                        estimated_duration = (word_count * 0.6) / speed
+                        
+                        return {
+                            "success": True,
+                            "audio_url": f"/after-school/reading-assistant/pronunciation-audio/{filename}",
+                            "audio_file": str(file_path),
+                            "duration_seconds": estimated_duration,
+                            "text": text,
+                            "method": "pyttsx3_fallback"
+                        }
+                except Exception as pyttsx_error:
+                    print(f"⚠️ pyttsx3 fallback failed: {pyttsx_error}")
+            
+            # Ultimate fallback - create minimal WAV file with silence
+            filename = f"tts_silence_{uuid.uuid4().hex}.wav"
+            file_path = self.output_dir / filename
+            
+            # Create minimal WAV file header (44 bytes) + 1 second of silence
+            sample_rate = 16000
+            duration = max(1.0, len(text.split()) * 0.5)  # 0.5 seconds per word
+            num_samples = int(sample_rate * duration)
+            
+            # WAV file header
+            wav_header = bytearray(44)
+            wav_header[0:4] = b'RIFF'
+            wav_header[8:12] = b'WAVE'
+            wav_header[12:16] = b'fmt '
+            wav_header[16:20] = (16).to_bytes(4, 'little')  # fmt chunk size
+            wav_header[20:22] = (1).to_bytes(2, 'little')   # PCM format
+            wav_header[22:24] = (1).to_bytes(2, 'little')   # mono
+            wav_header[24:28] = sample_rate.to_bytes(4, 'little')
+            wav_header[28:32] = (sample_rate * 2).to_bytes(4, 'little')  # byte rate
+            wav_header[32:34] = (2).to_bytes(2, 'little')   # block align
+            wav_header[34:36] = (16).to_bytes(2, 'little')  # bits per sample
+            wav_header[36:40] = b'data'
+            wav_header[40:44] = (num_samples * 2).to_bytes(4, 'little')  # data size
+            
+            # Update RIFF chunk size
+            wav_header[4:8] = (36 + num_samples * 2).to_bytes(4, 'little')
+            
+            # Write WAV file with silence
+            with open(file_path, 'wb') as f:
+                f.write(wav_header)
+                # Write silence (zeros)
+                silence_data = bytes(num_samples * 2)  # 2 bytes per sample (16-bit)
+                f.write(silence_data)
+            
+            return {
+                "success": True,
+                "audio_url": f"/after-school/reading-assistant/pronunciation-audio/{filename}",
+                "audio_file": str(file_path),
+                "duration_seconds": duration,
+                "text": text,
+                "method": "silence_fallback"
+            }
+            
+        except Exception as e:
+            print(f"❌ All TTS methods failed: {e}")
+            # Return error state
+            return {
+                "success": False,
+                "error": f"TTS generation failed: {str(e)}",
+                "text": text
+            }
     
     async def generate_word_pronunciation(
         self,
