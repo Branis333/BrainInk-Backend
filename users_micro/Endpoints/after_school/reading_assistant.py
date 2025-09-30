@@ -756,12 +756,60 @@ async def get_content_recommendations(
 # TEXT-TO-SPEECH PRONUNCIATION ENDPOINTS
 # ===============================
 
+@router.get("/pronunciation/word")
+async def get_word_pronunciation_get(
+    word: str = Query(..., description="Word to pronounce"),
+    speed: str = Query("normal", description="Speed: slow, normal, fast"),
+    phonetic_hint: str = Query(None, description="Optional phonetic hint"),
+    context: str = Query(None, description="Optional context"),
+    current_user: dict = user_dependency
+):
+    """Get pronunciation audio for a specific word (GET method for mobile compatibility)"""
+    
+    try:
+        word = word.strip()
+        if not word:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Word parameter is required"
+            )
+        
+        # Generate TTS audio using the TTS service
+        result = await tts_service.generate_pronunciation_audio(
+            text=word,
+            voice_type="child_friendly",
+            speed=0.8 if speed == "slow" else 1.0 if speed == "normal" else 1.2
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "word": word,
+                "audio_url": result["audio_url"],
+                "duration_seconds": result["duration_seconds"],
+                "pronunciation_instructions": f"Tap to hear how to say '{word}' correctly",
+                "phonetic_hint": phonetic_hint,
+                "context": context
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not generate pronunciation for '{word}'"
+            )
+        
+    except Exception as e:
+        print(f"❌ Error generating pronunciation for '{word}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating pronunciation: {str(e)}"
+        )
+
 @router.post("/pronunciation/word")
-async def get_word_pronunciation(
+async def get_word_pronunciation_post(
     request: dict,
     current_user: dict = user_dependency
 ):
-    """Get pronunciation audio for a specific word"""
+    """Get pronunciation audio for a specific word (POST method)"""
     
     try:
         word = request.get("word", "").strip()
