@@ -1067,8 +1067,8 @@ async def health_check():
 
 @router.post("/admin/populate-reading-content")
 async def populate_reading_content_endpoint(
-    clear_existing: bool = Query(False, description="Delete all existing content before populating"),
-    db: db_dependency
+    db: db_dependency,
+    clear_existing: bool = Query(False, description="Delete all existing content before populating")
 ) -> Dict[str, Any]:
     """
     Admin endpoint to populate database with enhanced reading content (40+ passages)
@@ -1079,19 +1079,8 @@ async def populate_reading_content_endpoint(
     This adds diverse reading passages for all grade levels (K-3)
     """
     
-    # Import the enhanced content
-    import sys
-    from pathlib import Path
-    utils_path = Path(__file__).parent.parent.parent / "utils"
-    sys.path.insert(0, str(utils_path))
-    
-    try:
-        from populate_enhanced_reading_content import ENHANCED_CONTENT
-    except ImportError as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Could not import enhanced content: {str(e)}"
-        )
+    # Import the enhanced content inline to avoid import issues
+    from utils.populate_enhanced_reading_content import ENHANCED_CONTENT
     
     try:
         if clear_existing:
