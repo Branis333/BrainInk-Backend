@@ -575,15 +575,8 @@ class ReadingAssistantService:
                 said = word_data.get("said", word_data.get("word", ""))
                 feedback = word_data.get("feedback", "")
                 
-                # Make pronunciation tip more helpful - show what they should say
-                pronunciation_tip = feedback
-                if expected and said and expected != said:
-                    # Add clear "should say" instruction
-                    pronunciation_tip = f"🎯 You should say '{expected}' (you said '{said}'). {feedback}"
-                elif expected and not said:
-                    pronunciation_tip = f"⚠️ Missing word: You should say '{expected}'. {feedback}"
-                elif expected == said:
-                    pronunciation_tip = f"✅ Perfect! You said '{expected}' correctly."
+                # Use the phonics feedback directly - it already has all the context
+                pronunciation_tip = feedback if feedback else f"Practice saying '{expected}'"
                 
                 word_accuracy.append({
                     "target_word": expected,
