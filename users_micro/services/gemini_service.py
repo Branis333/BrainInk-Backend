@@ -1886,10 +1886,6 @@ Return a JSON object with this structure:
 
 Analyze word-by-word and be specific about pronunciation."""
         
-        TASK: Compare what the student said versus what they should have said.
-
-Analyze word-by-word and be specific about pronunciation."""
-        
         try:
             # Call AI with freedom to analyze
             response = await self.generate_text(
@@ -1914,9 +1910,6 @@ Analyze word-by-word and be specific about pronunciation."""
             print(f"⚠️ AI analysis failed: {e}. Using fallback.")
             # Fallback to local analysis if AI fails
             return self._local_word_analysis(expected_text, transcribed_text)
-            "encouragement": "You're doing great!"
-        }}
-        """
         
         try:
             response = await self.generate_text(
