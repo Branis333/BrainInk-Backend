@@ -400,25 +400,42 @@ class ReadingAssistantService:
             
             print("🤖 Requesting transcription from Gemini...")
             
-            # Configure safety settings to allow educational content (children's voices)
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
+            try:
+                response = await asyncio.to_thread(
+                    self.gemini_service.config.model.generate_content,
+                    [uploaded_file, transcription_prompt],
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.0,  # Maximum literal transcription
+                        max_output_tokens=512
+                    )
+                )
+                
+                transcribed_text = response.text.strip()
+                
+            except Exception as e:
+                if "finish_reason" in str(e) and "2" in str(e):
+                    # Safety filter blocked - try with minimal prompt
+                    print(f"⚠️ Detailed prompt blocked by safety filter. Retrying with simple prompt...")
+                    
+                    simple_prompt = """
+                    Transcribe this audio of a child reading aloud.
+                    Write exactly what you hear, including any mispronunciations.
+                    Do not correct errors. This is for educational assessment.
+                    Return only the transcribed text.
+                    """
+                    
+                    response = await asyncio.to_thread(
+                        self.gemini_service.config.model.generate_content,
+                        [uploaded_file, simple_prompt],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.0,
+                            max_output_tokens=512
+                        )
+                    )
+                    transcribed_text = response.text.strip()
+                else:
+                    raise e
             
-            response = await asyncio.to_thread(
-                self.gemini_service.config.model.generate_content,
-                [uploaded_file, transcription_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.0,  # Maximum literal transcription
-                    max_output_tokens=512
-                ),
-                safety_settings=safety_settings
-            )
-            
-            transcribed_text = response.text.strip()
             print(f"🎯 Gemini transcription result: '{transcribed_text}'")
             
             # Cleanup uploaded file
