@@ -1810,84 +1810,70 @@ class GeminiService:
     ) -> Dict[str, Any]:
         """Analyze student's reading performance with STRICT pronunciation analysis"""
         
-        prompt = f"""
-        You are a reading pronunciation specialist. Analyze what the student ACTUALLY said versus what they SHOULD have said.
-
-        CRITICAL RULES - DO NOT INFER OR ASSUME:
-        1. Compare EXACTLY what was said vs what was expected
-        2. DO NOT infer what the student "meant to say"
-        3. Mark as INCORRECT if pronunciation doesn't match, even if close
-        4. Be STRICT but EDUCATIONAL in your analysis
-        5. Analyze EVERY SINGLE WORD individually
+        # Quick check: If texts are identical, student read perfectly!
+        if expected_text.strip().lower() == transcribed_text.strip().lower():
+            print("🎉 Perfect reading detected - texts match exactly!")
+            expected_words = expected_text.strip().split()
+            return {
+                "accuracy_score": 1.0,
+                "overall_feedback": "Perfect! You read every word correctly!",
+                "word_feedback": [
+                    {
+                        "word": word,
+                        "expected": word,
+                        "said": word,
+                        "pronunciation_score": 1.0,
+                        "sound_errors": [],
+                        "feedback": f"Perfect! You said '{word}' correctly."
+                    }
+                    for word in expected_words
+                ],
+                "suggestions": ["Keep up the great work!", "Try reading more challenging content"],
+                "correctly_read_words": expected_words,
+                "incorrectly_read_words": [],
+                "needs_practice_words": [],
+                "encouragement": f"Excellent work! You got all {len(expected_words)} words correct!"
+            }
         
-        OBJECTIVE COMPARISON:
-        - Expected Text (Target): "{expected_text}"
-        - Actually Said (Transcribed): "{transcribed_text}"
+        prompt = f"""
+        You are a reading pronunciation specialist analyzing a student's reading performance.
+
+        IMPORTANT: This is an EDUCATIONAL ANALYSIS for a young student learning to read.
+        
+        TASK: Compare what the student said versus what they should have said.
+        
+        TEXTS TO COMPARE:
+        - Expected (what should be read): "{expected_text}"
+        - Transcribed (what student said): "{transcribed_text}"
         - Reading Level: {reading_level}
         
-        ANALYSIS INSTRUCTIONS:
-        1. Split BOTH texts into individual words
-        2. Compare word-by-word in sequence
-        3. For EACH word position, check if spoken word matches expected word
-        4. Score pronunciation accuracy strictly:
-           - 1.0 = Perfect match (exactly correct)
-           - 0.8-0.9 = Very close (minor accent/speed variation)
-           - 0.5-0.7 = Partially correct (some sounds right)
-           - 0.0-0.4 = Incorrect (wrong word or mispronunciation)
-        5. Identify SPECIFIC sound errors (vowels, consonants, blends)
-        6. Provide OBJECTIVE feedback on what was wrong and how to fix it
+        ANALYSIS RULES:
+        1. Compare word-by-word
+        2. If words match exactly → score 1.0 (perfect)
+        3. If words are close → score 0.7-0.9 (minor differences)
+        4. If words are different → score 0.0-0.6 (needs practice)
+        5. Provide helpful educational feedback for each word
         
-        WORD-BY-WORD ANALYSIS:
-        - If student said a DIFFERENT word, mark it incorrect
-        - If student SKIPPED a word, mark it as missing (score 0.0)
-        - If student ADDED extra words, note them separately
-        - Compare sounds phonetically, not by meaning/intent
-        
-        Return ONLY a JSON object with EVERY word analyzed:
+        Return a JSON object analyzing each word:
         {{
-            "accuracy_score": 0.65,
-            "overall_feedback": "You read some words correctly but had trouble with several. Let's practice the ones you missed.",
+            "accuracy_score": 0.85,
+            "overall_feedback": "Great reading! Most words were correct.",
             "word_feedback": [
                 {{
-                    "word": "cat",
-                    "expected": "cat", 
-                    "said": "cat",
+                    "word": "example",
+                    "expected": "example", 
+                    "said": "example",
                     "pronunciation_score": 1.0,
                     "sound_errors": [],
-                    "feedback": "Perfect! You said 'cat' correctly."
-                }},
-                {{
-                    "word": "sits",
-                    "expected": "sits",
-                    "said": "sat", 
-                    "pronunciation_score": 0.4,
-                    "sound_errors": ["wrong_tense", "missing_s_ending", "wrong_vowel_i_vs_a"],
-                    "feedback": "You said 'sat' but the word is 'sits'. You got the beginning 's' sound and the 't' sound, but let's practice the 'i' sound in the middle and remember the 's' at the very end to make 'sits'."
-                }},
-                {{
-                    "word": "on",
-                    "expected": "on",
-                    "said": "",
-                    "pronunciation_score": 0.0,
-                    "sound_errors": ["word_skipped"],
-                    "feedback": "You skipped this word. Remember to read 'on'."
+                    "feedback": "Perfect!"
                 }}
             ],
-            "suggestions": [
-                "Practice words ending in 's' sound",
-                "Work on short 'i' vowel sounds",
-                "Read more slowly to catch all words"
-            ],
-            "correctly_read_words": ["cat", "the"],
-            "incorrectly_read_words": ["sits", "on"],
-            "needs_practice_words": ["sits", "on"],
-            "encouragement": "Keep practicing! You got 2 out of 4 words right."
+            "suggestions": ["Keep practicing!"],
+            "correctly_read_words": ["list", "of", "correct", "words"],
+            "incorrectly_read_words": ["words", "to", "practice"],
+            "needs_practice_words": ["specific", "problem", "words"],
+            "encouragement": "You're doing great!"
         }}
-        
-        IMPORTANT: 
-        - Analyze EVERY word. Do not skip any.
-        - Be objective and strict about pronunciation accuracy.
-        - In the encouragement message, count how many words were correct vs total words.
         """
         
         try:
