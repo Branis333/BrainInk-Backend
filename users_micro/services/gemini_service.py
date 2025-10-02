@@ -1973,10 +1973,50 @@ class GeminiService:
     def _local_word_analysis(self, expected_text: str, transcribed_text: str) -> Dict[str, Any]:
         """
         Perform local word-by-word analysis to avoid Gemini safety filter on near-perfect readings.
-        Uses phonics pattern analysis to provide educational feedback.
+        Uses phonics pattern analysis to provide educational feedback with pronunciation guides.
         """
         import re
         from difflib import SequenceMatcher
+        
+        def get_pronunciation_guide(word: str) -> str:
+            """Generate phonetic pronunciation guide for a word"""
+            word_lower = word.lower()
+            
+            # Common word pronunciations
+            pronunciation_map = {
+                'the': 'THUH (like "thuh")',
+                'sky': 'SKY (sounds like "skai")',
+                'leaf': 'LEEF (long "ee" sound)',
+                'see': 'SEE (sounds like the letter "E")',
+                'tree': 'TREE (sounds like "tree")',
+                'sun': 'SUN (rhymes with "fun")',
+                'run': 'RUN (rhymes with "sun")',
+                'big': 'BIG (sounds like "big")',
+                'slide': 'SLIDE (sounds like "slyde")',
+                'through': 'THROO (with "th" sound, like "threw")',
+                'play': 'PLAY (sounds like "plei")',
+                'say': 'SAY (sounds like "sei")',
+                'day': 'DAY (sounds like "dei")',
+                'eat': 'EET (long "ee" sound)',
+                'read': 'REED (long "ee" sound)',
+            }
+            
+            if word_lower in pronunciation_map:
+                return pronunciation_map[word_lower]
+            
+            # Pattern-based pronunciation
+            if 'ee' in word_lower:
+                return f'{word.upper()} (with long "ee" sound like "tree")'
+            elif 'ea' in word_lower:
+                return f'{word.upper()} (with long "e" sound like "eat")'
+            elif 'ay' in word_lower or 'ai' in word_lower:
+                return f'{word.upper()} (with long "a" sound like "play")'
+            elif 'oo' in word_lower:
+                return f'{word.upper()} (with "oo" sound like "moon")'
+            elif word_lower.endswith('y'):
+                return f'{word.upper()} (ends with "ee" sound like "happy")'
+            else:
+                return f'{word.upper()}'
         
         def analyze_phonics_error(expected_word: str, spoken_word: str) -> tuple[list, str]:
             """Analyze the phonetic/phonics difference between expected and spoken words"""
@@ -1984,67 +2024,38 @@ class GeminiService:
             sp_clean = spoken_word.lower()
             
             sound_errors = []
-            feedback = ""
             
-            # Common phonics patterns
-            phonics_patterns = {
-                'ee': ('long e sound', 'like the letter E'),
-                'ea': ('long e sound', 'like in "eat"'),
-                'oo': ('long o sound', 'like in "moon"'),
-                'ay': ('long a sound', 'like the letter A'),
-                'ai': ('long a sound', 'like in "rain"'),
-                'ow': ('ou sound', 'like in "cow"'),
-                'ou': ('ou sound', 'like in "out"'),
-                'igh': ('long i sound', 'like in "light"'),
-                'ie': ('long e or i sound', 'like in "pie"'),
-                'oa': ('long o sound', 'like in "boat"'),
-            }
+            # Get pronunciation guide for the correct word
+            pronunciation = get_pronunciation_guide(expected_word)
+            feedback = f"You said '{spoken_word}'. Say it like: {pronunciation}"
             
-            # Check if expected word has a phonics pattern
-            found_pattern = None
-            for pattern, (sound_name, example) in phonics_patterns.items():
-                if pattern in exp_clean:
-                    found_pattern = (pattern, sound_name, example)
-                    break
+            # Add specific phonics hints
+            if 'ee' in exp_clean:
+                sound_errors.append("vowel_pattern_ee")
+                feedback += f" - The 'ee' makes a long E sound."
+            elif 'ea' in exp_clean:
+                sound_errors.append("vowel_pattern_ea")
+                feedback += f" - The 'ea' makes a long E sound."
+            elif 'ay' in exp_clean:
+                sound_errors.append("vowel_pattern_ay")
+                feedback += f" - The 'ay' makes a long A sound."
+            elif 'ai' in exp_clean:
+                sound_errors.append("vowel_pattern_ai")
+                feedback += f" - The 'ai' makes a long A sound."
+            elif exp_clean.endswith('y') and len(exp_clean) > 2:
+                sound_errors.append("y_ending")
+                feedback += f" - Words ending in 'y' often sound like 'ee'."
             
-            # Detect vowel sound confusion
-            vowel_map = {
-                'a': 'short a (like "cat")',
-                'e': 'short e (like "bed")',
-                'i': 'short i (like "sit")',
-                'o': 'short o (like "hot")',
-                'u': 'short u (like "cup")',
-                'ee': 'long e (says its name: E)',
-                'ea': 'long e (like "eat")',
-                'ay': 'long a (says its name: A)',
-                'ai': 'long a (like "rain")',
-                'oo': 'long o (like "moon")',
-            }
-            
-            # If we have a phonics pattern, explain it
-            if found_pattern:
-                pattern, sound_name, example = found_pattern
-                sound_errors.append(f"vowel_pattern_{pattern}")
-                feedback = f"This word has '{pattern}' which makes the {sound_name} {example}. You said '{spoken_word}' with a different vowel sound. Practice: '{expected_word}' = {sound_name}."
-            else:
-                # Generic difference analysis
-                if len(exp_clean) == len(sp_clean):
-                    # Same length - analyze position differences
-                    for j, (exp_char, sp_char) in enumerate(zip(exp_clean, sp_clean)):
-                        if exp_char != sp_char:
-                            if exp_char in 'aeiou' and sp_char in 'aeiou':
-                                sound_errors.append(f"vowel_confusion_{exp_char}_vs_{sp_char}")
-                                feedback = f"You said '{spoken_word}' but the vowel sound is wrong. The word '{expected_word}' uses '{exp_char}', not '{sp_char}'. Try saying '{expected_word}' slowly."
-                            else:
-                                sound_errors.append(f"consonant_{exp_char}_vs_{sp_char}")
-                                feedback = f"You said '{spoken_word}' but check the '{exp_char}' sound. It should be '{expected_word}'."
-                            break
-                elif len(sp_clean) > len(exp_clean):
-                    sound_errors.append("added_letters")
-                    feedback = f"You said '{spoken_word}' but that has extra letters. The word is just '{expected_word}'. Say it shorter."
-                else:
-                    sound_errors.append("missing_letters")
-                    feedback = f"You said '{spoken_word}' but you're missing part of the word. It should be '{expected_word}'. Say the whole word."
+            # Check for missing consonants
+            if exp_clean.startswith('th') and not sp_clean.startswith('th'):
+                sound_errors.append("missing_th")
+                feedback += " - Don't forget the 'TH' sound at the start!"
+            elif len(sp_clean) > len(exp_clean):
+                sound_errors.append("added_letters")
+                feedback = f"You said '{spoken_word}' but the word is shorter. Say it like: {pronunciation}"
+            elif len(sp_clean) < len(exp_clean):
+                sound_errors.append("missing_letters")
+                feedback = f"You said '{spoken_word}' but you're missing part. Say it like: {pronunciation}"
             
             return sound_errors, feedback
         
@@ -2079,7 +2090,8 @@ class GeminiService:
                 score = 0.0
                 incorrect_words.append(expected_word)
                 needs_practice.append(expected_word)
-                feedback_text = f"⚠️ You skipped this word. The word is '{expected_word}' - try saying it slowly."
+                pronunciation = get_pronunciation_guide(expected_word)
+                feedback_text = f"⚠️ You skipped this word. Say it like: {pronunciation}"
                 sound_errors = ["word_skipped"]
             elif not expected_clean:
                 # Extra word spoken
@@ -2088,7 +2100,7 @@ class GeminiService:
                 sound_errors = ["extra_word"]
             else:
                 # Analyze phonics/pronunciation error
-                sound_errors, feedback_text = analyze_phonics_error(expected_clean, spoken_clean)
+                sound_errors, feedback_text = analyze_phonics_error(expected_word, spoken_word)
                 
                 # Calculate similarity score
                 word_similarity = SequenceMatcher(None, expected_clean, spoken_clean).ratio()
