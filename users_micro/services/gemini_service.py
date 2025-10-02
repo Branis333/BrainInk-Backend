@@ -1810,8 +1810,18 @@ class GeminiService:
     ) -> Dict[str, Any]:
         """Analyze student's reading performance with STRICT pronunciation analysis"""
         
+        import re
+        from difflib import SequenceMatcher
+        
+        # Normalize texts for comparison (remove punctuation, lowercase)
+        def normalize(text: str) -> str:
+            return re.sub(r'[^\w\s]', '', text.lower().strip())
+        
+        expected_normalized = normalize(expected_text)
+        transcribed_normalized = normalize(transcribed_text)
+        
         # Quick check: If texts are identical, student read perfectly!
-        if expected_text.strip().lower() == transcribed_text.strip().lower():
+        if expected_normalized == transcribed_normalized:
             print("🎉 Perfect reading detected - texts match exactly!")
             expected_words = expected_text.strip().split()
             return {
@@ -1834,6 +1844,15 @@ class GeminiService:
                 "needs_practice_words": [],
                 "encouragement": f"Excellent work! You got all {len(expected_words)} words correct!"
             }
+        
+        # Check similarity to avoid safety filter on near-perfect readings
+        similarity = SequenceMatcher(None, expected_normalized, transcribed_normalized).ratio()
+        print(f"📊 Text similarity: {similarity*100:.1f}%")
+        
+        # If very similar (>95%), do word-by-word comparison locally to avoid safety filter
+        if similarity > 0.95:
+            print("⚡ Using local analysis for near-perfect reading (avoiding safety filter)")
+            return self._local_word_analysis(expected_text, transcribed_text)
         
         prompt = f"""
         You are a reading pronunciation specialist analyzing a student's reading performance.
@@ -1951,6 +1970,90 @@ class GeminiService:
         except Exception as e:
             print(f"❌ Recommendation generation failed: {e}")
             return []  # Return empty list as fallback
+    
+    def _local_word_analysis(self, expected_text: str, transcribed_text: str) -> Dict[str, Any]:
+        """
+        Perform local word-by-word analysis to avoid Gemini safety filter on near-perfect readings.
+        This is used when texts are >95% similar to avoid API issues.
+        """
+        import re
+        from difflib import SequenceMatcher
+        
+        # Split into words (preserve punctuation context)
+        expected_words = expected_text.strip().split()
+        transcribed_words = transcribed_text.strip().split()
+        
+        word_feedback = []
+        correct_count = 0
+        incorrect_words = []
+        needs_practice = []
+        
+        max_len = max(len(expected_words), len(transcribed_words))
+        
+        for i in range(max_len):
+            expected_word = expected_words[i] if i < len(expected_words) else ""
+            spoken_word = transcribed_words[i] if i < len(transcribed_words) else ""
+            
+            # Normalize for comparison (remove punctuation)
+            expected_clean = re.sub(r'[^\w]', '', expected_word.lower())
+            spoken_clean = re.sub(r'[^\w]', '', spoken_word.lower())
+            
+            # Calculate word similarity
+            if expected_clean == spoken_clean:
+                # Perfect match
+                score = 1.0
+                correct_count += 1
+                feedback_text = f"✅ Perfect! You said '{expected_word}' correctly."
+            elif not spoken_clean:
+                # Word was skipped
+                score = 0.0
+                incorrect_words.append(expected_word)
+                needs_practice.append(expected_word)
+                feedback_text = f"⚠️ Missing word: You should say '{expected_word}'."
+            elif not expected_clean:
+                # Extra word spoken
+                score = 0.0
+                feedback_text = f"⚠️ Extra word: You said '{spoken_word}' but it's not in the text."
+            else:
+                # Calculate similarity for minor differences
+                word_similarity = SequenceMatcher(None, expected_clean, spoken_clean).ratio()
+                score = word_similarity
+                
+                if word_similarity > 0.7:
+                    # Close pronunciation (e.g., "Lily" vs "Liddy")
+                    feedback_text = f"🎯 Almost! You said '{spoken_word}' but the text says '{expected_word}'. Try again!"
+                    needs_practice.append(expected_word)
+                else:
+                    # Very different
+                    feedback_text = f"❌ You said '{spoken_word}' but it should be '{expected_word}'. Let's practice this word!"
+                    incorrect_words.append(expected_word)
+                    needs_practice.append(expected_word)
+            
+            word_feedback.append({
+                "word": expected_word,
+                "expected": expected_word,
+                "said": spoken_word,
+                "pronunciation_score": score,
+                "sound_errors": [] if score >= 0.7 else [f"Said '{spoken_word}' instead of '{expected_word}'"],
+                "feedback": feedback_text
+            })
+        
+        accuracy_score = correct_count / len(expected_words) if expected_words else 0.0
+        
+        print(f"📊 Local analysis: {correct_count}/{len(expected_words)} words correct ({accuracy_score*100:.1f}%)")
+        
+        return {
+            "accuracy_score": accuracy_score,
+            "overall_feedback": f"Good job! You got {correct_count} out of {len(expected_words)} words correct.",
+            "word_feedback": word_feedback,
+            "suggestions": [
+                f"Practice saying: {', '.join(needs_practice[:3])}" if needs_practice else "Keep reading aloud every day!"
+            ],
+            "correctly_read_words": [w["expected"] for w in word_feedback if w["pronunciation_score"] >= 0.8],
+            "incorrectly_read_words": incorrect_words,
+            "needs_practice_words": needs_practice,
+            "encouragement": "Great effort! Keep practicing and you'll get even better!"
+        }
 
 # Singleton instance
 gemini_service = GeminiService()
