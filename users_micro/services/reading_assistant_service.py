@@ -492,14 +492,28 @@ class ReadingAssistantService:
             word_accuracy = []
             
             for i, word_data in enumerate(word_feedback):
+                expected = word_data.get("expected", word_data.get("word", ""))
+                said = word_data.get("said", word_data.get("word", ""))
+                feedback = word_data.get("feedback", "")
+                
+                # Make pronunciation tip more helpful - show what they should say
+                pronunciation_tip = feedback
+                if expected and said and expected != said:
+                    # Add clear "should say" instruction
+                    pronunciation_tip = f"🎯 You should say '{expected}' (you said '{said}'). {feedback}"
+                elif expected and not said:
+                    pronunciation_tip = f"⚠️ Missing word: You should say '{expected}'. {feedback}"
+                elif expected == said:
+                    pronunciation_tip = f"✅ Perfect! You said '{expected}' correctly."
+                
                 word_accuracy.append({
-                    "target_word": word_data.get("expected", word_data.get("word", "")),
-                    "spoken_word": word_data.get("said", word_data.get("word", "")),
+                    "target_word": expected,
+                    "spoken_word": said,
                     "word_position": i + 1,
                     "is_correct": word_data.get("pronunciation_score", 0.0) >= 0.8,
                     "pronunciation_accuracy": word_data.get("pronunciation_score", 0.0) * 100,
-                    "phonetic_errors": [],
-                    "pronunciation_tip": word_data.get("feedback", "")
+                    "phonetic_errors": word_data.get("sound_errors", []),
+                    "pronunciation_tip": pronunciation_tip
                 })
             
             final_accuracy = analysis_result.get("accuracy_score", 0.8) * 100

@@ -1881,10 +1881,13 @@ class GeminiService:
             "correctly_read_words": ["cat", "the"],
             "incorrectly_read_words": ["sits", "on"],
             "needs_practice_words": ["sits", "on"],
-            "encouragement": "Keep practicing! You got {X} out of {Y} words right."
+            "encouragement": "Keep practicing! You got 2 out of 4 words right."
         }}
         
-        IMPORTANT: Analyze EVERY word. Do not skip any. Be objective and strict about pronunciation accuracy.
+        IMPORTANT: 
+        - Analyze EVERY word. Do not skip any.
+        - Be objective and strict about pronunciation accuracy.
+        - In the encouragement message, count how many words were correct vs total words.
         """
         
         try:
