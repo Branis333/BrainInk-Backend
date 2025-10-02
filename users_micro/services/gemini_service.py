@@ -1973,10 +1973,80 @@ class GeminiService:
     def _local_word_analysis(self, expected_text: str, transcribed_text: str) -> Dict[str, Any]:
         """
         Perform local word-by-word analysis to avoid Gemini safety filter on near-perfect readings.
-        This is used when texts are >95% similar to avoid API issues.
+        Uses phonics pattern analysis to provide educational feedback.
         """
         import re
         from difflib import SequenceMatcher
+        
+        def analyze_phonics_error(expected_word: str, spoken_word: str) -> tuple[list, str]:
+            """Analyze the phonetic/phonics difference between expected and spoken words"""
+            exp_clean = expected_word.lower()
+            sp_clean = spoken_word.lower()
+            
+            sound_errors = []
+            feedback = ""
+            
+            # Common phonics patterns
+            phonics_patterns = {
+                'ee': ('long e sound', 'like the letter E'),
+                'ea': ('long e sound', 'like in "eat"'),
+                'oo': ('long o sound', 'like in "moon"'),
+                'ay': ('long a sound', 'like the letter A'),
+                'ai': ('long a sound', 'like in "rain"'),
+                'ow': ('ou sound', 'like in "cow"'),
+                'ou': ('ou sound', 'like in "out"'),
+                'igh': ('long i sound', 'like in "light"'),
+                'ie': ('long e or i sound', 'like in "pie"'),
+                'oa': ('long o sound', 'like in "boat"'),
+            }
+            
+            # Check if expected word has a phonics pattern
+            found_pattern = None
+            for pattern, (sound_name, example) in phonics_patterns.items():
+                if pattern in exp_clean:
+                    found_pattern = (pattern, sound_name, example)
+                    break
+            
+            # Detect vowel sound confusion
+            vowel_map = {
+                'a': 'short a (like "cat")',
+                'e': 'short e (like "bed")',
+                'i': 'short i (like "sit")',
+                'o': 'short o (like "hot")',
+                'u': 'short u (like "cup")',
+                'ee': 'long e (says its name: E)',
+                'ea': 'long e (like "eat")',
+                'ay': 'long a (says its name: A)',
+                'ai': 'long a (like "rain")',
+                'oo': 'long o (like "moon")',
+            }
+            
+            # If we have a phonics pattern, explain it
+            if found_pattern:
+                pattern, sound_name, example = found_pattern
+                sound_errors.append(f"vowel_pattern_{pattern}")
+                feedback = f"This word has '{pattern}' which makes the {sound_name} {example}. You said '{spoken_word}' with a different vowel sound. Practice: '{expected_word}' = {sound_name}."
+            else:
+                # Generic difference analysis
+                if len(exp_clean) == len(sp_clean):
+                    # Same length - analyze position differences
+                    for j, (exp_char, sp_char) in enumerate(zip(exp_clean, sp_clean)):
+                        if exp_char != sp_char:
+                            if exp_char in 'aeiou' and sp_char in 'aeiou':
+                                sound_errors.append(f"vowel_confusion_{exp_char}_vs_{sp_char}")
+                                feedback = f"You said '{spoken_word}' but the vowel sound is wrong. The word '{expected_word}' uses '{exp_char}', not '{sp_char}'. Try saying '{expected_word}' slowly."
+                            else:
+                                sound_errors.append(f"consonant_{exp_char}_vs_{sp_char}")
+                                feedback = f"You said '{spoken_word}' but check the '{exp_char}' sound. It should be '{expected_word}'."
+                            break
+                elif len(sp_clean) > len(exp_clean):
+                    sound_errors.append("added_letters")
+                    feedback = f"You said '{spoken_word}' but that has extra letters. The word is just '{expected_word}'. Say it shorter."
+                else:
+                    sound_errors.append("missing_letters")
+                    feedback = f"You said '{spoken_word}' but you're missing part of the word. It should be '{expected_word}'. Say the whole word."
+            
+            return sound_errors, feedback
         
         # Split into words (preserve punctuation context)
         expected_words = expected_text.strip().split()
@@ -2017,50 +2087,25 @@ class GeminiService:
                 feedback_text = f"⚠️ This word isn't in the text. You added '{spoken_word}'."
                 sound_errors = ["extra_word"]
             else:
-                # Calculate similarity for minor differences
+                # Analyze phonics/pronunciation error
+                sound_errors, feedback_text = analyze_phonics_error(expected_clean, spoken_clean)
+                
+                # Calculate similarity score
                 word_similarity = SequenceMatcher(None, expected_clean, spoken_clean).ratio()
                 score = word_similarity
                 
-                # Analyze what's different
-                sound_errors = []
-                error_details = []
-                
-                # Check if it's a simple substitution
-                if len(expected_clean) == len(spoken_clean):
-                    # Same length - probably letter substitution
-                    for j, (exp_char, sp_char) in enumerate(zip(expected_clean, spoken_clean)):
-                        if exp_char != sp_char:
-                            sound_errors.append(f"Letter {j+1}: said '{sp_char}' instead of '{exp_char}'")
-                            error_details.append(f"'{sp_char}' sound (should be '{exp_char}')")
-                elif len(spoken_clean) < len(expected_clean):
-                    sound_errors.append("missed_letters")
-                    error_details.append("missing some letters")
-                else:
-                    sound_errors.append("added_letters")
-                    error_details.append("added extra letters")
-                
-                if word_similarity > 0.7:
-                    # Close pronunciation
-                    if error_details:
-                        feedback_text = f"🎯 Almost! You said '{spoken_word}' but check the {error_details[0]}. It should be '{expected_word}'."
-                    else:
-                        feedback_text = f"🎯 Very close! You said '{spoken_word}' but it's '{expected_word}'. Try again!"
+                # Add to practice list
+                if score < 1.0:
                     needs_practice.append(expected_word)
-                else:
-                    # Very different
-                    if error_details:
-                        feedback_text = f"❌ You said '{spoken_word}' but the word is '{expected_word}'. Pay attention to the {error_details[0]}."
-                    else:
-                        feedback_text = f"❌ You said '{spoken_word}' but it should be '{expected_word}'. Let's practice this word!"
-                    incorrect_words.append(expected_word)
-                    needs_practice.append(expected_word)
+                    if score < 0.7:
+                        incorrect_words.append(expected_word)
             
             word_feedback.append({
                 "word": expected_word,
                 "expected": expected_word,
                 "said": spoken_word,
                 "pronunciation_score": score,
-                "sound_errors": sound_errors if 'sound_errors' in locals() else [],
+                "sound_errors": sound_errors,
                 "feedback": feedback_text
             })
         
