@@ -338,12 +338,35 @@ class ReadingAssistantService:
                 print("❌ Gemini processing failed")
                 raise Exception("Gemini audio processing failed")
             
-            # Generate transcription
+            # Generate transcription with STRICT instructions
             transcription_prompt = """
-            Please transcribe this audio recording of a child reading. 
-            Return only the transcribed text exactly as you hear it.
-            If you cannot understand the audio clearly, return exactly: "TRANSCRIPTION_FAILED"
-            Do not add any explanations or comments, just the transcribed text.
+            CRITICAL INSTRUCTIONS FOR TRANSCRIBING CHILD READING:
+            
+            You are transcribing audio of a young student learning to read.
+            This is for pronunciation assessment - accuracy is ESSENTIAL.
+            
+            STRICT RULES:
+            1. Transcribe EXACTLY what you hear, including mispronunciations
+            2. DO NOT auto-correct words the child says wrong
+            3. DO NOT fix grammar or tense errors
+            4. DO NOT add words the child didn't say
+            5. DO NOT remove repeated or stuttered words
+            6. If the child says "sat" but you think they meant "sits", write "sat"
+            7. If the child skips a word, don't add it
+            8. Write EXACTLY what is spoken, not what should have been spoken
+            
+            EXAMPLES:
+            - If child says "The cat sat on mat" → Write: "The cat sat on mat" (not "The cat sits on a mat")
+            - If child says "I seen a dog" → Write: "I seen a dog" (not "I saw a dog")
+            - If child says "He run fast" → Write: "He run fast" (not "He runs fast")
+            
+            YOUR TASK:
+            Transcribe this audio recording EXACTLY as spoken.
+            Include pronunciation errors, grammar mistakes, and skipped words.
+            This is for educational assessment - be precise, not helpful.
+            
+            Return ONLY the transcribed text, nothing else.
+            If audio is unclear, return: "TRANSCRIPTION_FAILED"
             """
             
             print("🤖 Requesting transcription from Gemini...")
@@ -351,7 +374,7 @@ class ReadingAssistantService:
                 self.gemini_service.config.model.generate_content,
                 [uploaded_file, transcription_prompt],
                 generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,
+                    temperature=0.0,  # Maximum literal transcription
                     max_output_tokens=512
                 )
             )
