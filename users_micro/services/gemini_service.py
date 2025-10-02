@@ -1845,14 +1845,13 @@ class GeminiService:
                 "encouragement": f"Excellent work! You got all {len(expected_words)} words correct!"
             }
         
-        # Check similarity to avoid safety filter on near-perfect readings
+        # Check similarity to avoid safety filter
         similarity = SequenceMatcher(None, expected_normalized, transcribed_normalized).ratio()
         print(f"📊 Text similarity: {similarity*100:.1f}%")
         
-        # If very similar (>95%), do word-by-word comparison locally to avoid safety filter
-        if similarity > 0.95:
-            print("⚡ Using local analysis for near-perfect reading (avoiding safety filter)")
-            return self._local_word_analysis(expected_text, transcribed_text)
+        # Always use local analysis to avoid safety filter issues (Gemini blocks educational content)
+        print("⚡ Using local word-by-word analysis (avoiding Gemini safety filter)")
+        return self._local_word_analysis(expected_text, transcribed_text)
         
         prompt = f"""
         You are a reading pronunciation specialist analyzing a student's reading performance.
@@ -2003,29 +2002,56 @@ class GeminiService:
                 # Perfect match
                 score = 1.0
                 correct_count += 1
-                feedback_text = f"✅ Perfect! You said '{expected_word}' correctly."
+                feedback_text = f"✅ Perfect!"
+                sound_errors = []
             elif not spoken_clean:
                 # Word was skipped
                 score = 0.0
                 incorrect_words.append(expected_word)
                 needs_practice.append(expected_word)
-                feedback_text = f"⚠️ Missing word: You should say '{expected_word}'."
+                feedback_text = f"⚠️ You skipped this word. The word is '{expected_word}' - try saying it slowly."
+                sound_errors = ["word_skipped"]
             elif not expected_clean:
                 # Extra word spoken
                 score = 0.0
-                feedback_text = f"⚠️ Extra word: You said '{spoken_word}' but it's not in the text."
+                feedback_text = f"⚠️ This word isn't in the text. You added '{spoken_word}'."
+                sound_errors = ["extra_word"]
             else:
                 # Calculate similarity for minor differences
                 word_similarity = SequenceMatcher(None, expected_clean, spoken_clean).ratio()
                 score = word_similarity
                 
+                # Analyze what's different
+                sound_errors = []
+                error_details = []
+                
+                # Check if it's a simple substitution
+                if len(expected_clean) == len(spoken_clean):
+                    # Same length - probably letter substitution
+                    for j, (exp_char, sp_char) in enumerate(zip(expected_clean, spoken_clean)):
+                        if exp_char != sp_char:
+                            sound_errors.append(f"Letter {j+1}: said '{sp_char}' instead of '{exp_char}'")
+                            error_details.append(f"'{sp_char}' sound (should be '{exp_char}')")
+                elif len(spoken_clean) < len(expected_clean):
+                    sound_errors.append("missed_letters")
+                    error_details.append("missing some letters")
+                else:
+                    sound_errors.append("added_letters")
+                    error_details.append("added extra letters")
+                
                 if word_similarity > 0.7:
-                    # Close pronunciation (e.g., "Lily" vs "Liddy")
-                    feedback_text = f"🎯 Almost! You said '{spoken_word}' but the text says '{expected_word}'. Try again!"
+                    # Close pronunciation
+                    if error_details:
+                        feedback_text = f"🎯 Almost! You said '{spoken_word}' but check the {error_details[0]}. It should be '{expected_word}'."
+                    else:
+                        feedback_text = f"🎯 Very close! You said '{spoken_word}' but it's '{expected_word}'. Try again!"
                     needs_practice.append(expected_word)
                 else:
                     # Very different
-                    feedback_text = f"❌ You said '{spoken_word}' but it should be '{expected_word}'. Let's practice this word!"
+                    if error_details:
+                        feedback_text = f"❌ You said '{spoken_word}' but the word is '{expected_word}'. Pay attention to the {error_details[0]}."
+                    else:
+                        feedback_text = f"❌ You said '{spoken_word}' but it should be '{expected_word}'. Let's practice this word!"
                     incorrect_words.append(expected_word)
                     needs_practice.append(expected_word)
             
@@ -2034,7 +2060,7 @@ class GeminiService:
                 "expected": expected_word,
                 "said": spoken_word,
                 "pronunciation_score": score,
-                "sound_errors": [] if score >= 0.7 else [f"Said '{spoken_word}' instead of '{expected_word}'"],
+                "sound_errors": sound_errors if 'sound_errors' in locals() else [],
                 "feedback": feedback_text
             })
         
