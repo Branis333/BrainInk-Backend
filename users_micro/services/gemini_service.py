@@ -1808,36 +1808,83 @@ class GeminiService:
         transcribed_text: str,
         reading_level: str
     ) -> Dict[str, Any]:
-        """Analyze student's reading performance and provide feedback"""
+        """Analyze student's reading performance with STRICT pronunciation analysis"""
         
         prompt = f"""
-        Analyze a student's reading performance and provide educational feedback.
+        You are a reading pronunciation specialist. Analyze what the student ACTUALLY said versus what they SHOULD have said.
+
+        CRITICAL RULES - DO NOT INFER OR ASSUME:
+        1. Compare EXACTLY what was said vs what was expected
+        2. DO NOT infer what the student "meant to say"
+        3. Mark as INCORRECT if pronunciation doesn't match, even if close
+        4. Be STRICT but EDUCATIONAL in your analysis
+        5. Analyze EVERY SINGLE WORD individually
         
-        STUDENT READING DETAILS:
+        OBJECTIVE COMPARISON:
+        - Expected Text (Target): "{expected_text}"
+        - Actually Said (Transcribed): "{transcribed_text}"
         - Reading Level: {reading_level}
-        - Expected Text: "{expected_text}"
-        - What Student Said: "{transcribed_text}"
         
-        ANALYSIS REQUIREMENTS:
-        1. Calculate accuracy score (0.0 to 1.0)
-        2. Identify mispronounced words
-        3. Provide encouraging, age-appropriate feedback
-        4. Suggest specific pronunciation improvements
-        5. Highlight words that were read correctly
+        ANALYSIS INSTRUCTIONS:
+        1. Split BOTH texts into individual words
+        2. Compare word-by-word in sequence
+        3. For EACH word position, check if spoken word matches expected word
+        4. Score pronunciation accuracy strictly:
+           - 1.0 = Perfect match (exactly correct)
+           - 0.8-0.9 = Very close (minor accent/speed variation)
+           - 0.5-0.7 = Partially correct (some sounds right)
+           - 0.0-0.4 = Incorrect (wrong word or mispronunciation)
+        5. Identify SPECIFIC sound errors (vowels, consonants, blends)
+        6. Provide OBJECTIVE feedback on what was wrong and how to fix it
         
-        Return ONLY a JSON object:
+        WORD-BY-WORD ANALYSIS:
+        - If student said a DIFFERENT word, mark it incorrect
+        - If student SKIPPED a word, mark it as missing (score 0.0)
+        - If student ADDED extra words, note them separately
+        - Compare sounds phonetically, not by meaning/intent
+        
+        Return ONLY a JSON object with EVERY word analyzed:
         {{
-            "accuracy_score": 0.85,
-            "overall_feedback": "Great job reading! You pronounced most words clearly.",
+            "accuracy_score": 0.65,
+            "overall_feedback": "You read some words correctly but had trouble with several. Let's practice the ones you missed.",
             "word_feedback": [
-                {{"word": "cat", "expected": "cat", "said": "cat", "pronunciation_score": 1.0, "feedback": "Perfect!"}},
-                {{"word": "big", "expected": "big", "said": "bag", "pronunciation_score": 0.7, "feedback": "Try the 'i' sound like 'ih'"}}
+                {{
+                    "word": "cat",
+                    "expected": "cat", 
+                    "said": "cat",
+                    "pronunciation_score": 1.0,
+                    "sound_errors": [],
+                    "feedback": "Perfect! You said 'cat' correctly."
+                }},
+                {{
+                    "word": "sits",
+                    "expected": "sits",
+                    "said": "sat", 
+                    "pronunciation_score": 0.4,
+                    "sound_errors": ["wrong_tense", "missing_s_ending", "wrong_vowel_i_vs_a"],
+                    "feedback": "You said 'sat' but the word is 'sits'. You got the beginning 's' sound and the 't' sound, but let's practice the 'i' sound in the middle and remember the 's' at the very end to make 'sits'."
+                }},
+                {{
+                    "word": "on",
+                    "expected": "on",
+                    "said": "",
+                    "pronunciation_score": 0.0,
+                    "sound_errors": ["word_skipped"],
+                    "feedback": "You skipped this word. Remember to read 'on'."
+                }}
             ],
-            "suggestions": ["Practice short 'i' sounds", "Try reading a bit slower"],
-            "correctly_read_words": ["cat", "the", "is"],
-            "needs_practice_words": ["big"],
-            "encouragement": "You're doing great! Keep practicing those short vowel sounds."
+            "suggestions": [
+                "Practice words ending in 's' sound",
+                "Work on short 'i' vowel sounds",
+                "Read more slowly to catch all words"
+            ],
+            "correctly_read_words": ["cat", "the"],
+            "incorrectly_read_words": ["sits", "on"],
+            "needs_practice_words": ["sits", "on"],
+            "encouragement": "Keep practicing! You got {X} out of {Y} words right."
         }}
+        
+        IMPORTANT: Analyze EVERY word. Do not skip any. Be objective and strict about pronunciation accuracy.
         """
         
         try:

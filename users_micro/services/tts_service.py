@@ -48,7 +48,29 @@ class TTSService:
         """Detect which TTS method is available"""
         
         # Check for Google Cloud TTS (best quality)
-        if GOOGLE_TTS_AVAILABLE and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+        credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        
+        if GOOGLE_TTS_AVAILABLE and (credentials_json or credentials_path):
+            # If JSON is in environment variable, create temp file
+            if credentials_json and not credentials_path:
+                try:
+                    import json
+                    import tempfile
+                    
+                    # Create temporary credentials file
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                        json.dump(json.loads(credentials_json), f)
+                        temp_path = f.name
+                    
+                    # Set the credentials path for Google client
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_path
+                    print(f"✅ Created Google Cloud credentials file from environment variable")
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to create credentials file from env var: {e}")
+                    return "system_fallback"
+            
             return "google_cloud"
         
         # Check for Azure TTS

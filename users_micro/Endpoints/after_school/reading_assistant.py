@@ -1059,3 +1059,153 @@ async def health_check():
             "personalized_recommendations"
         ]
     }
+
+
+# ===============================
+# ADMIN - POPULATE READING CONTENT
+# ===============================
+
+@router.post("/admin/populate-reading-content")
+async def populate_reading_content_endpoint(
+    db: db_dependency,
+    clear_existing: bool = Query(False, description="Delete all existing content before populating")
+) -> Dict[str, Any]:
+    """
+    Admin endpoint to populate database with enhanced reading content (40+ passages)
+    
+    Query Parameters:
+    - clear_existing: If true, deletes all existing content first (default: false)
+    
+    This adds diverse reading passages for all grade levels (K-3)
+    """
+    
+    # Import the enhanced content inline to avoid import issues
+    from utils.populate_enhanced_reading_content import ENHANCED_CONTENT
+    
+    try:
+        if clear_existing:
+            deleted_count = db.query(ReadingContent).delete()
+            db.commit()
+            print(f"🗑️  Deleted {deleted_count} existing content items")
+        
+        content_count = 0
+        added_titles = []
+        skipped_titles = []
+        
+        for reading_level, difficulty_dict in ENHANCED_CONTENT.items():
+            for difficulty_level, content_list in difficulty_dict.items():
+                for content_data in content_list:
+                    
+                    # Check if this title already exists
+                    existing = db.query(ReadingContent).filter_by(
+                        title=content_data["title"]
+                    ).first()
+                    
+                    if existing and not clear_existing:
+                        print(f"⏭️  Skipping '{content_data['title']}' (already exists)")
+                        skipped_titles.append(content_data["title"])
+                        continue
+                    
+                    # Calculate metrics
+                    word_count = len(content_data["content"].split())
+                    estimated_time = word_count * 2  # 2 seconds per word
+                    
+                    # Calculate complexity score
+                    base_scores = {
+                        ReadingLevel.KINDERGARTEN: 20,
+                        ReadingLevel.GRADE_1: 40,
+                        ReadingLevel.GRADE_2: 60,
+                        ReadingLevel.GRADE_3: 80
+                    }
+                    difficulty_modifiers = {
+                        DifficultyLevel.ELEMENTARY: 0,
+                        DifficultyLevel.MIDDLE_SCHOOL: 10,
+                        DifficultyLevel.HIGH_SCHOOL: 20
+                    }
+                    complexity_score = min(
+                        base_scores[reading_level] + 
+                        difficulty_modifiers[difficulty_level] + 
+                        min(word_count / 10, 10),
+                        100
+                    )
+                    
+                    # Create content record
+                    new_content = ReadingContent(
+                        title=content_data["title"],
+                        content=content_data["content"],
+                        content_type=content_data["content_type"],
+                        reading_level=reading_level,
+                        difficulty_level=difficulty_level,
+                        vocabulary_words=content_data["vocabulary_words"],
+                        learning_objectives=content_data["learning_objectives"],
+                        phonics_focus=content_data["phonics_focus"],
+                        word_count=word_count,
+                        estimated_reading_time=estimated_time,
+                        complexity_score=complexity_score,
+                        created_by=1,  # System user
+                        is_active=True
+                    )
+                    
+                    db.add(new_content)
+                    content_count += 1
+                    added_titles.append(content_data["title"])
+        
+        db.commit()
+        
+        # Get summary by level
+        summary = {}
+        for reading_level in ReadingLevel:
+            count = db.query(ReadingContent).filter_by(reading_level=reading_level).count()
+            summary[reading_level.value] = count
+        
+        total = db.query(ReadingContent).count()
+        
+        return {
+            "success": True,
+            "message": f"Successfully added {content_count} new reading passages",
+            "added_count": content_count,
+            "skipped_count": len(skipped_titles),
+            "added_titles": added_titles,
+            "skipped_titles": skipped_titles,
+            "total_in_database": total,
+            "summary_by_level": summary
+        }
+        
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to populate content: {str(e)}"
+        )
+
+
+@router.get("/admin/reading-content-stats")
+async def get_content_stats(db: db_dependency) -> Dict[str, Any]:
+    """
+    Get statistics about reading content in database
+    
+    Returns counts by reading level and sample titles
+    """
+    
+    summary = {}
+    for reading_level in ReadingLevel:
+        count = db.query(ReadingContent).filter_by(reading_level=reading_level).count()
+        summary[reading_level.value] = count
+    
+    total = db.query(ReadingContent).count()
+    
+    # Get some sample titles per level
+    samples = {}
+    for reading_level in ReadingLevel:
+        content_items = db.query(ReadingContent).filter_by(
+            reading_level=reading_level
+        ).limit(5).all()
+        samples[reading_level.value] = [item.title for item in content_items]
+    
+    return {
+        "total_content_items": total,
+        "by_reading_level": summary,
+        "sample_titles_per_level": samples
+    }
