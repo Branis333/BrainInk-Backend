@@ -9,6 +9,8 @@ from datetime import datetime, timedelta
 import re
 import google.generativeai as genai
 from pydantic import BaseModel
+import httpx
+from urllib.parse import quote_plus, urlencode
 
 # Configuration for Gemini API
 class GeminiConfig:
@@ -218,12 +220,10 @@ class GeminiService:
                 
                 generated_blocks.append(block_data)
                 
-                # Add delay between blocks to avoid rate limiting (2 seconds)
+                # Add delay between blocks to avoid rate limiting
                 if block_num < total_blocks:
-                    await asyncio.sleep(2)
-                    print(f"⏳ Waiting 2 seconds before next block...")
-                    print(f"⏱️  Waiting 2 seconds before next block...")
-                    await asyncio.sleep(2)
+                    print(f"⏱️  Waiting 3 seconds before next block...")
+                    await asyncio.sleep(3)
             
             print(f"✅ All {len(generated_blocks)} blocks generated successfully!")
             
@@ -272,6 +272,14 @@ class GeminiService:
             structure_prompt = f"""
             Analyze the uploaded textbook file and create a high-level course structure outline.
             
+            **CRITICAL FILTERING INSTRUCTIONS:**
+            - SKIP any "Table of Contents", "Course Outline", "Syllabus", or "Index" pages
+            - SKIP any "Chapter Summary" or "Overview" sections
+            - SKIP any "Learning Outcomes" or "Objectives" lists that appear before actual content
+            - ONLY analyze the ACTUAL LESSON CONTENT pages (chapters, sections with substantive material)
+            - Look for the main body text, explanations, examples, and educational content
+            - Ignore preface, foreword, introduction pages, and appendices
+            
             COURSE REQUIREMENTS:
             - Title: {course_title}
             - Subject: {subject}
@@ -307,10 +315,11 @@ class GeminiService:
             }}
             
             INSTRUCTIONS:
-            - Identify main sections/chapters in the textbook
+            - Identify main sections/chapters in the textbook (CONTENT ONLY, not ToC)
             - Map content to the {total_weeks * blocks_per_week} blocks needed
             - Ensure logical progression through material
             - Keep response concise and focused on structure
+            - Remember: EXTRACT FROM ACTUAL CONTENT, NOT FROM TABLE OF CONTENTS
             """
             
             response = await asyncio.to_thread(
@@ -323,12 +332,43 @@ class GeminiService:
                 )
             )
         else:
-            # Handle direct text content
+            # Handle direct text content - filter out ToC and outline sections
+            # Try to detect and skip table of contents
+            filtered_content = textbook_content
+            
+            # Simple filtering: skip content that looks like a table of contents
+            toc_markers = [
+                "table of contents", "contents", "course outline", "syllabus",
+                "chapter 1.", "chapter 2.", "chapter 3.", "week 1", "week 2",
+                "learning outcomes", "overview"
+            ]
+            
+            lines = textbook_content.split('\n')
+            content_start_idx = 0
+            
+            # Look for where actual content begins (after ToC/outline)
+            for i, line in enumerate(lines[:100]):  # Check first 100 lines
+                line_lower = line.lower().strip()
+                # If we find dense paragraph text, assume content has started
+                if len(line) > 100 and not any(marker in line_lower for marker in toc_markers):
+                    content_start_idx = max(0, i - 5)  # Start a bit before
+                    break
+            
+            if content_start_idx > 0:
+                filtered_content = '\n'.join(lines[content_start_idx:])
+                print(f"📝 Filtered out first {content_start_idx} lines (likely ToC/outline)")
+            
             structure_prompt = f"""
             Analyze the following textbook content and create a high-level course structure outline.
             
+            **CRITICAL FILTERING INSTRUCTIONS:**
+            - This content may start with a Table of Contents or Course Outline - SKIP IT
+            - Look for and analyze only the ACTUAL LESSON CONTENT
+            - Ignore any chapter summaries or overview pages
+            - Focus on substantive educational material
+            
             TEXTBOOK CONTENT:
-            {textbook_content[:2000]}... # First 2000 chars for structure analysis
+            {filtered_content[:2000]}...
             
             COURSE REQUIREMENTS:
             - Title: {course_title}
@@ -337,7 +377,8 @@ class GeminiService:
             - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
             - Difficulty: {difficulty_level}
             
-            Create a JSON outline with the same structure as above...
+            Create a JSON outline with the same structure as above.
+            Remember: Extract structure from ACTUAL CONTENT, not from any table of contents.
             """
             
             response = await asyncio.to_thread(
@@ -374,6 +415,14 @@ class GeminiService:
             
             block_prompt = f"""
             Generate a detailed learning block based on the uploaded textbook content.
+            
+            **CRITICAL CONTENT FILTERING:**
+            - SKIP and IGNORE any "Table of Contents", "Course Outline", "Index", or "Syllabus" pages
+            - SKIP any "Chapter Overview", "Summary", or "Learning Outcomes" pages that come BEFORE actual content
+            - ONLY extract content from the ACTUAL LESSON PAGES (substantive educational material)
+            - Look for explanations, examples, diagrams, and main body text
+            - If you encounter outline/ToC content, skip ahead to find the real chapter content
+            - DO NOT include meta-information about the course structure in the lesson content
             
             BLOCK CONTEXT:
             - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
@@ -421,10 +470,11 @@ class GeminiService:
             
             IMPORTANT:
             - Focus ONLY on content for THIS specific block
-            - Extract relevant content from the textbook for this section
+            - Extract relevant ACTUAL LESSON CONTENT from the textbook (NOT outlines or ToC)
             - Ensure age-appropriate language and complexity
             - Build on previous blocks if this is not the first block
             - Make it comprehensive but focused
+            - VERIFY you're extracting from actual educational content, not meta-pages
             """
             
             response = await asyncio.to_thread(
@@ -473,6 +523,46 @@ class GeminiService:
         # Ensure correct week and block numbers
         block_data["week"] = week_num
         block_data["block_number"] = block_in_week
+        
+        # Replace placeholder URLs with actual URLs
+        if "resources" in block_data and block_data["resources"]:
+            print(f"🔗 Generating actual resource URLs for block {block_num}...")
+            enhanced_resources = []
+            
+            for resource in block_data["resources"]:
+                resource_type = resource.get("type", "article")
+                search_query = resource.get("search_query", resource.get("title", ""))
+                
+                if resource_type == "video":
+                    # Generate actual YouTube URL
+                    youtube_links = await self.generate_youtube_links(search_query, count=1)
+                    if youtube_links:
+                        enhanced_resources.append({
+                            "type": "video",
+                            "title": youtube_links[0].get("title", resource.get("title")),
+                            "url": youtube_links[0].get("url"),
+                            "search_query": search_query
+                        })
+                    else:
+                        enhanced_resources.append(resource)
+                else:
+                    # Generate actual article URL
+                    article_links = await self.generate_article_links(search_query, subject, count=1)
+                    if article_links:
+                        enhanced_resources.append({
+                            "type": "article",
+                            "title": article_links[0].get("title", resource.get("title")),
+                            "url": article_links[0].get("url"),
+                            "search_query": search_query
+                        })
+                    else:
+                        enhanced_resources.append(resource)
+                
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.5)
+            
+            block_data["resources"] = enhanced_resources
+            print(f"✅ Enhanced {len(enhanced_resources)} resources with actual URLs")
         
         return block_data
 
@@ -807,9 +897,13 @@ class GeminiService:
 
     async def generate_youtube_links(self, topic: str, count: int = 3) -> List[Dict[str, str]]:
         """
-        Generate YouTube search links for educational content
+        Generate actual YouTube video links for educational content using YouTube Data API or scraping
         """
-        search_variations = [
+        youtube_api_key = os.getenv("YOUTUBE_API_KEY")
+        links = []
+        
+        # Search variations for better coverage
+        search_queries = [
             f"{topic} educational tutorial",
             f"{topic} explained simply", 
             f"learn {topic} step by step",
@@ -817,37 +911,187 @@ class GeminiService:
             f"{topic} crash course"
         ]
         
-        links = []
-        for i, variation in enumerate(search_variations[:count]):
-            links.append({
-                "title": f"Educational Video: {topic} ({i+1})",
-                "url": f"https://www.youtube.com/results?search_query={variation.replace(' ', '+')}",
-                "type": "video",
-                "description": f"YouTube search for {variation}"
-            })
+        try:
+            if youtube_api_key:
+                # Use YouTube Data API v3 if available
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    for i, query in enumerate(search_queries[:count]):
+                        try:
+                            params = {
+                                "part": "snippet",
+                                "q": query,
+                                "type": "video",
+                                "maxResults": 1,
+                                "key": youtube_api_key,
+                                "videoEmbeddable": "true",
+                                "videoLicense": "any",
+                                "order": "relevance"
+                            }
+                            
+                            response = await client.get(
+                                "https://www.googleapis.com/youtube/v3/search",
+                                params=params
+                            )
+                            
+                            if response.status_code == 200:
+                                data = response.json()
+                                if data.get("items"):
+                                    item = data["items"][0]
+                                    video_id = item["id"]["videoId"]
+                                    snippet = item["snippet"]
+                                    
+                                    links.append({
+                                        "title": snippet.get("title", f"Educational Video: {topic}"),
+                                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                                        "type": "video",
+                                        "description": snippet.get("description", "")[:200],
+                                        "thumbnail": snippet.get("thumbnails", {}).get("default", {}).get("url", ""),
+                                        "channel": snippet.get("channelTitle", ""),
+                                        "search_query": query
+                                    })
+                        except Exception as e:
+                            print(f"⚠️ YouTube API error for query '{query}': {e}")
+                            continue
+            else:
+                # Fallback: Use YouTube search URLs that open directly to search results
+                # This still provides working links even without API
+                print("ℹ️ No YOUTUBE_API_KEY found, using search URLs")
+                for i, query in enumerate(search_queries[:count]):
+                    search_url = f"https://www.youtube.com/results?search_query={quote_plus(query)}"
+                    links.append({
+                        "title": f"🎥 {topic} - Educational Videos",
+                        "url": search_url,
+                        "type": "video_search",
+                        "description": f"Search results for: {query}",
+                        "search_query": query
+                    })
+            
+            # If we didn't get enough links, fill with search URLs
+            while len(links) < count and len(links) < len(search_queries):
+                query = search_queries[len(links)]
+                links.append({
+                    "title": f"🎥 {topic} - Video {len(links) + 1}",
+                    "url": f"https://www.youtube.com/results?search_query={quote_plus(query)}",
+                    "type": "video_search",
+                    "description": f"YouTube search: {query}",
+                    "search_query": query
+                })
         
-        return links
+        except Exception as e:
+            print(f"❌ Error generating YouTube links: {e}")
+            # Ultimate fallback
+            for i in range(count):
+                if i < len(search_queries):
+                    query = search_queries[i]
+                    links.append({
+                        "title": f"Educational Video: {topic} ({i+1})",
+                        "url": f"https://www.youtube.com/results?search_query={quote_plus(query)}",
+                        "type": "video",
+                        "description": f"YouTube search for {query}",
+                        "search_query": query
+                    })
+        
+        return links[:count]
 
     async def generate_article_links(self, topic: str, subject: str, count: int = 3) -> List[Dict[str, str]]:
         """
-        Generate educational article search links
+        Generate actual educational article links from reputable sources
         """
-        search_variations = [
-            f"{topic} {subject} educational article",
-            f"{topic} explained {subject}",
-            f"learn about {topic} {subject}"
+        links = []
+        
+        # Define educational sources with their search patterns
+        educational_sources = [
+            {
+                "name": "Wikipedia",
+                "search_url": "https://en.wikipedia.org/wiki/{}",
+                "direct_url": "https://en.wikipedia.org/wiki/Special:Search?search={}",
+                "icon": "📚"
+            },
+            {
+                "name": "Britannica",
+                "search_url": "https://www.britannica.com/search?query={}",
+                "direct_url": "https://www.britannica.com",
+                "icon": "📖"
+            },
+            {
+                "name": "National Geographic Education",
+                "search_url": "https://education.nationalgeographic.org/search/?q={}",
+                "direct_url": "https://education.nationalgeographic.org",
+                "icon": "🌍"
+            },
+            {
+                "name": "Academic Search",
+                "search_url": "https://scholar.google.com/scholar?q={}+education",
+                "direct_url": "https://scholar.google.com",
+                "icon": "🔬"
+            }
         ]
         
-        links = []
-        for i, variation in enumerate(search_variations[:count]):
-            links.append({
-                "title": f"Article: {topic} in {subject} ({i+1})",
-                "url": f"https://www.google.com/search?q={variation.replace(' ', '+')}",
-                "type": "article",
-                "description": f"Educational article search for {variation}"
-            })
+        try:
+            # Create search queries
+            search_terms = [
+                f"{topic} {subject}",
+                f"{topic} explained",
+                f"{topic} tutorial {subject}"
+            ]
+            
+            # Try to get actual URLs from educational sources
+            for i, search_term in enumerate(search_terms[:count]):
+                if i < len(educational_sources):
+                    source = educational_sources[i]
+                    # Format the search term for URL
+                    formatted_term = quote_plus(search_term)
+                    
+                    # For Wikipedia, try direct article link first
+                    if source["name"] == "Wikipedia":
+                        # Try direct article name
+                        article_name = topic.replace(" ", "_")
+                        url = f"https://en.wikipedia.org/wiki/{article_name}"
+                    else:
+                        url = source["search_url"].format(formatted_term)
+                    
+                    links.append({
+                        "title": f"{source['icon']} {topic} - {source['name']}",
+                        "url": url,
+                        "type": "article",
+                        "description": f"Educational resource from {source['name']}",
+                        "source": source["name"],
+                        "search_query": search_term
+                    })
+            
+            # Fill remaining slots with Google Scholar or general educational searches
+            while len(links) < count:
+                search_term = f"{topic} {subject} education"
+                formatted_term = quote_plus(search_term)
+                
+                links.append({
+                    "title": f"📄 {topic} - Educational Resources",
+                    "url": f"https://scholar.google.com/scholar?q={formatted_term}",
+                    "type": "article",
+                    "description": f"Academic articles and educational resources about {topic}",
+                    "source": "Google Scholar",
+                    "search_query": search_term
+                })
         
-        return links
+        except Exception as e:
+            print(f"❌ Error generating article links: {e}")
+            # Fallback to basic search links
+            search_variations = [
+                f"{topic} {subject} educational article",
+                f"{topic} explained {subject}",
+                f"learn about {topic} {subject}"
+            ]
+            
+            for i, variation in enumerate(search_variations[:count]):
+                links.append({
+                    "title": f"Article: {topic} in {subject} ({i+1})",
+                    "url": f"https://www.google.com/search?q={quote_plus(variation)}",
+                    "type": "article",
+                    "description": f"Educational article search for {variation}",
+                    "search_query": variation
+                })
+        
+        return links[:count]
 
     async def create_assignment_from_content(self, content: str, block_title: str, learning_objectives: List[str]) -> Dict[str, Any]:
         """
@@ -1417,8 +1661,8 @@ class GeminiService:
         Validate uploaded textbook file for Gemini native processing
         Supports documents, images, and multimodal content
         """
-        # File size limit (20MB for Gemini processing)
-        MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB (increased for native processing)
+        # File size limit (50MB for Gemini processing)
+        MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB (increased for native processing)
         
         # Allowed file types - expanded for Gemini's multimodal capabilities
         ALLOWED_EXTENSIONS = {
@@ -1442,7 +1686,7 @@ class GeminiService:
         # Check file size
         if file_size > MAX_FILE_SIZE:
             validation_result["valid"] = False
-            validation_result["errors"].append(f"File size ({validation_result['size_mb']}MB) exceeds maximum allowed size (20MB)")
+            validation_result["errors"].append(f"File size ({validation_result['size_mb']}MB) exceeds maximum allowed size (50MB)")
         
         # Check file extension
         if file_extension not in ALLOWED_EXTENSIONS:

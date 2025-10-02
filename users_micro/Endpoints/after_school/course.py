@@ -95,13 +95,13 @@ async def create_course_from_textbook(
     
     🔒 **Security Features:**
     - File type validation (documents and images)
-    - File size limits (max 20MB for native processing)
+    - File size limits (max 50MB for native processing)
     - Secure temporary file handling
     - Native Gemini processing eliminates security risks of manual extraction
     
     **Request Format:** multipart/form-data
     **File Types Supported:** .pdf, .txt, .doc, .docx, .png, .jpg, .jpeg, .gif, .webp
-    **Max File Size:** 20MB
+    **Max File Size:** 50MB
     
     Returns a complete course structure ready for student enrollment
     """
@@ -179,7 +179,7 @@ async def create_course_from_textbook(
         except Exception:
             # Connection is stale, create a fresh one
             db.close()
-            from db.database import SessionLocal
+            from db.connection import SessionLocal
             db = SessionLocal()
             print("🔄 Refreshed database connection after AI processing")
         
