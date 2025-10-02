@@ -1808,7 +1808,7 @@ class GeminiService:
         transcribed_text: str,
         reading_level: str
     ) -> Dict[str, Any]:
-        """Analyze student's reading performance with STRICT pronunciation analysis"""
+        """Analyze student's reading performance - let AI do its thing"""
         
         import re
         from difflib import SequenceMatcher
@@ -1834,7 +1834,7 @@ class GeminiService:
                         "said": word,
                         "pronunciation_score": 1.0,
                         "sound_errors": [],
-                        "feedback": f"Perfect! You said '{word}' correctly."
+                        "feedback": "✅ Perfect!"
                     }
                     for word in expected_words
                 ],
@@ -1845,51 +1845,75 @@ class GeminiService:
                 "encouragement": f"Excellent work! You got all {len(expected_words)} words correct!"
             }
         
-        # Check similarity to avoid safety filter
-        similarity = SequenceMatcher(None, expected_normalized, transcribed_normalized).ratio()
-        print(f"📊 Text similarity: {similarity*100:.1f}%")
+        # Let AI analyze with freedom
+        print("🤖 Letting AI analyze pronunciation freely...")
         
-        # Always use local analysis to avoid safety filter issues (Gemini blocks educational content)
-        print("⚡ Using local word-by-word analysis (avoiding Gemini safety filter)")
-        return self._local_word_analysis(expected_text, transcribed_text)
-        
-        prompt = f"""
-        You are a reading pronunciation specialist analyzing a student's reading performance.
+        prompt = f"""You are a reading teacher helping a {reading_level} student improve their pronunciation.
 
-        IMPORTANT: This is an EDUCATIONAL ANALYSIS for a young student learning to read.
+WHAT HAPPENED:
+- The student should have read: "{expected_text}"
+- The student actually said: "{transcribed_text}"
+
+YOUR JOB:
+Analyze each word and explain HOW to pronounce it correctly when the student got it wrong.
+
+For each word, provide:
+1. What they said vs what they should say
+2. HOW to pronounce it (phonetic guide like "sky sounds like 'skai'")
+3. Why it's pronounced that way (phonics patterns, silent letters, etc)
+
+Be encouraging but honest. Focus on teaching pronunciation, not just pointing out errors.
+
+Return a JSON object with this structure:
+{{
+    "accuracy_score": 0.85,
+    "overall_feedback": "Great effort! Let's work on a few words.",
+    "word_feedback": [
+        {{
+            "expected": "sky",
+            "said": "ski",
+            "pronunciation_score": 0.5,
+            "sound_errors": ["missing_y_sound"],
+            "feedback": "You said 'ski'. Say it like: SKY (sounds like 'skai'). Words ending in 'y' often make an 'ee' sound."
+        }}
+    ],
+    "correctly_read_words": ["the", "is"],
+    "incorrectly_read_words": ["sky", "beautiful"],
+    "needs_practice_words": ["sky", "beautiful"],
+    "suggestions": ["Practice words ending in 'y'", "Work on long vowel sounds"],
+    "encouragement": "You're making great progress!"
+}}
+
+Analyze word-by-word and be specific about pronunciation."""
         
         TASK: Compare what the student said versus what they should have said.
+
+Analyze word-by-word and be specific about pronunciation."""
         
-        TEXTS TO COMPARE:
-        - Expected (what should be read): "{expected_text}"
-        - Transcribed (what student said): "{transcribed_text}"
-        - Reading Level: {reading_level}
-        
-        ANALYSIS RULES:
-        1. Compare word-by-word
-        2. If words match exactly → score 1.0 (perfect)
-        3. If words are close → score 0.7-0.9 (minor differences)
-        4. If words are different → score 0.0-0.6 (needs practice)
-        5. Provide helpful educational feedback for each word
-        
-        Return a JSON object analyzing each word:
-        {{
-            "accuracy_score": 0.85,
-            "overall_feedback": "Great reading! Most words were correct.",
-            "word_feedback": [
-                {{
-                    "word": "example",
-                    "expected": "example", 
-                    "said": "example",
-                    "pronunciation_score": 1.0,
-                    "sound_errors": [],
-                    "feedback": "Perfect!"
-                }}
-            ],
-            "suggestions": ["Keep practicing!"],
-            "correctly_read_words": ["list", "of", "correct", "words"],
-            "incorrectly_read_words": ["words", "to", "practice"],
-            "needs_practice_words": ["specific", "problem", "words"],
+        try:
+            # Call AI with freedom to analyze
+            response = await self.generate_text(
+                prompt,
+                response_format="application/json",
+                temperature=0.3  # Slight creativity for helpful explanations
+            )
+            
+            # Parse JSON response
+            import json
+            json_text = response.strip()
+            if json_text.startswith('```json'):
+                json_text = json_text[7:-3].strip()
+            elif json_text.startswith('```'):
+                json_text = json_text[3:-3].strip()
+            
+            result = json.loads(json_text)
+            print(f"✅ AI analysis complete: {result.get('accuracy_score', 0)*100:.1f}% accuracy")
+            return result
+            
+        except Exception as e:
+            print(f"⚠️ AI analysis failed: {e}. Using fallback.")
+            # Fallback to local analysis if AI fails
+            return self._local_word_analysis(expected_text, transcribed_text)
             "encouragement": "You're doing great!"
         }}
         """
