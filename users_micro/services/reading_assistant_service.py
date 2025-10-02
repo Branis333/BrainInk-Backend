@@ -338,35 +338,64 @@ class ReadingAssistantService:
                 print("❌ Gemini processing failed")
                 raise Exception("Gemini audio processing failed")
             
-            # Generate transcription with STRICT instructions
+            # Generate transcription with STRICT PHONETIC instructions
             transcription_prompt = """
             CRITICAL INSTRUCTIONS FOR TRANSCRIBING CHILD READING:
             
             You are transcribing audio of a young student learning to read.
-            This is for pronunciation assessment - accuracy is ESSENTIAL.
+            This is for PRONUNCIATION ASSESSMENT - phonetic accuracy is ESSENTIAL.
             
-            STRICT RULES:
-            1. Transcribe EXACTLY what you hear, including mispronunciations
-            2. DO NOT auto-correct words the child says wrong
-            3. DO NOT fix grammar or tense errors
-            4. DO NOT add words the child didn't say
-            5. DO NOT remove repeated or stuttered words
-            6. If the child says "sat" but you think they meant "sits", write "sat"
-            7. If the child skips a word, don't add it
-            8. Write EXACTLY what is spoken, not what should have been spoken
+            STRICT PHONETIC TRANSCRIPTION RULES:
             
-            EXAMPLES:
-            - If child says "The cat sat on mat" → Write: "The cat sat on mat" (not "The cat sits on a mat")
-            - If child says "I seen a dog" → Write: "I seen a dog" (not "I saw a dog")
-            - If child says "He run fast" → Write: "He run fast" (not "He runs fast")
+            1. LISTEN TO ACTUAL SOUNDS - Write what you HEAR, not what you think they meant
+            2. CAPTURE MISPRONUNCIATIONS - If pronunciation is wrong, transcribe the wrong pronunciation
+            3. DO NOT AUTO-CORRECT - Do not fix words to their "correct" spelling
+            4. PHONETIC ERRORS MATTER - These examples show what we need:
+            
+            PHONETIC EXAMPLES (READ CAREFULLY):
+            
+            Example 1 - Vowel Sound Errors:
+            - Text says "leaf" (pronounced "leef")
+            - Child says "leh-aff" (wrong vowel sound)
+            - You write: "leff" or "laff" (NOT "leaf")
+            
+            Example 2 - Consonant Blend Errors:
+            - Text says "through" (pronounced "throo")  
+            - Child says "troo" (missing 'th' sound)
+            - You write: "troo" or "trew" (NOT "through")
+            
+            Example 3 - Long vs Short Vowels:
+            - Text says "see" (long e sound)
+            - Child says "seh" (short e sound)
+            - You write: "seh" (NOT "see")
+            
+            Example 4 - Missing Sounds:
+            - Text says "slide"
+            - Child says "slide" but drops the 'd' → "sly"
+            - You write: "sly" (NOT "slide")
+            
+            Example 5 - Added Sounds:
+            - Text says "run"
+            - Child adds extra sound → "runnin"
+            - You write: "runnin" (NOT "run")
+            
+            MORE RULES:
+            5. If child skips a word entirely, don't add it
+            6. If child repeats or stutters, include it once
+            7. If pronunciation is slightly off but recognizable, write phonetically what you heard
+            8. DO NOT fix grammar (write "I seen" not "I saw", write "he go" not "he goes")
+            
+            REMEMBER: This is pronunciation assessment. We NEED to know when sounds are wrong.
+            If the child mispronounces "leaf" as "leff", we must catch that error.
+            DO NOT help the student by correcting their pronunciation in the transcription.
             
             YOUR TASK:
-            Transcribe this audio recording EXACTLY as spoken.
-            Include pronunciation errors, grammar mistakes, and skipped words.
-            This is for educational assessment - be precise, not helpful.
+            Listen carefully to each word's ACTUAL PRONUNCIATION.
+            Transcribe what was SAID, not what should have been said.
+            Write phonetically if needed to capture mispronunciation.
             
             Return ONLY the transcribed text, nothing else.
-            If audio is unclear, return: "TRANSCRIPTION_FAILED"
+            If audio is completely unclear, return: "TRANSCRIPTION_FAILED"
             """
             
             print("🤖 Requesting transcription from Gemini...")
