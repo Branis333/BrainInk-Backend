@@ -30,7 +30,6 @@ phases:
         GoogleApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .GOOGLE_API_KEY) \
         CoreApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .CORE_API_KEY) \
         AgentApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .AGENT_API_KEY) \
-        DatabaseUrl="postgresql://postgres:$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .DB_PASSWORD)@prod-db.cdi20mcii7vt.eu-west-1.rds.amazonaws.com:6543/postgres" \
         && echo "SAM deploy completed successfully"
 
 artifacts:
