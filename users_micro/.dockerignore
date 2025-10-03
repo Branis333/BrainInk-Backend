@@ -40,8 +40,6 @@ Thumbs.db
 logs/
 hs_err_pid*.log
 
-# AWS SAM
-.aws-sam/
 
 # Development scripts
 start.sh
