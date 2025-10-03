@@ -562,35 +562,51 @@ class ReadingAssistantService:
     ) -> Dict[str, Any]:
         """
         Use Gemini AI as a reading teacher to analyze pronunciation.
-        Simple role-based prompt - let AI do what it does best.
+        CRITICALLY IMPORTANT: Compare EXACT phonetics word-by-word.
         """
         
-        prompt = f"""You are an experienced reading teacher for {reading_level.value.replace('_', ' ')} level.
+        prompt = f"""You are a reading teacher analyzing pronunciation for {reading_level.value.replace('_', ' ')} level.
 
-A student just read this text aloud:
-Expected: "{expected_text}"
-They said: "{transcribed_text}"
+TARGET TEXT (what should be said):
+"{expected_text}"
 
-Analyze their reading and provide feedback in this JSON format:
+ACTUAL TRANSCRIPTION (what was literally spoken, phonetically):
+"{transcribed_text}"
+
+CRITICAL INSTRUCTIONS:
+1. The transcription is LITERAL and PHONETIC - it captures exactly how words were pronounced
+2. Compare every single word position-by-position
+3. ANY difference between expected and transcribed = pronunciation error
+4. Do NOT auto-correct or assume intent - if transcription shows "re-ahdi", they did NOT say "ready"
+5. Mark words as incorrect even for small phonetic differences
+6. Provide specific feedback on WHAT sound/syllable was wrong and HOW to fix it
+
+ANALYSIS RULES:
+- If expected word ≠ transcribed word → pronunciation_score below 1.0
+- Identify specific sound errors: vowel mistakes, consonant mistakes, syllable issues, blending problems
+- Give actionable feedback: "You said X but it should be Y. The [vowel/consonant/pattern] sounds like..."
+- Only mark score as 1.0 if words match EXACTLY (case-insensitive, ignoring punctuation)
+
+Return JSON format:
 {{
-    "accuracy_score": 0.85,
+    "accuracy_score": 0.XX,
     "word_feedback": [
         {{
             "expected": "word",
-            "said": "word",
-            "pronunciation_score": 1.0,
-            "sound_errors": [],
-            "feedback": "Perfect!"
+            "said": "word_as_transcribed",
+            "pronunciation_score": 0.0 to 1.0,
+            "sound_errors": ["vowel_error", "consonant_blend_error", "syllable_mistake", etc],
+            "feedback": "Specific guidance on the pronunciation mistake"
         }}
     ],
-    "suggestions": ["Practice tip 1", "Practice tip 2"],
-    "correctly_read_words": ["word1", "word2"],
-    "incorrectly_read_words": ["word3"],
-    "needs_practice_words": ["word3"],
+    "suggestions": ["Overall practice recommendations"],
+    "correctly_read_words": ["list of perfect matches"],
+    "incorrectly_read_words": ["list of words with errors"],
+    "needs_practice_words": ["words to focus on"],
     "encouragement": "Positive message"
 }}
 
-Focus on pronunciation accuracy and provide helpful phonics tips."""
+ANALYZE EVERY WORD. Be strict but constructive."""
 
         try:
             response = await asyncio.to_thread(
@@ -654,6 +670,7 @@ Focus on pronunciation accuracy and provide helpful phonics tips."""
                 'bed': 'BED (short "e" sound)',
                 'teddy': 'TED-ee (short "e" then "ee")',
                 'bear': 'BAIR (sounds like "air" with B)',
+                'bears': 'BAIRS (sounds like "air" with B, then Z)',
                 'looked': 'LOOKT (sounds like "lukt")',
                 'found': 'FOWND (sounds like "ow" in "cow")',
                 'closet': 'CLOZ-it (soft "z" sound)',
@@ -672,6 +689,11 @@ Focus on pronunciation accuracy and provide helpful phonics tips."""
                 'now': 'NOW (sounds like "ow" in "cow")',
                 'have': 'HAV (short "a" sound)',
                 'sandwich': 'SAND-wich (short "a" sound)',
+                'ready': 'RED-ee (like the color RED + EE)',
+                'places': 'PLAY-ses (long A sound + ses)',
+                'squirrels': 'SKWIR-els (SKWIR like squirt + els)',
+                'winter': 'WIN-ter (short I + ter)',
+                'gather': 'GATH-er (like math + er)',
             }
             
             if word_lower in pronunciation_map:
@@ -700,32 +722,34 @@ Focus on pronunciation accuracy and provide helpful phonics tips."""
             
             # Get pronunciation guide for the correct word
             pronunciation = get_pronunciation_guide(expected_word)
-            feedback = f"You said '{spoken_word}'. Say it like: {pronunciation}"
             
-            # Add specific phonics hints based on patterns
-            if 'ee' in exp_clean and 'ee' not in sp_clean:
-                sound_errors.append("vowel_pattern_ee")
-                feedback += " - The 'ee' makes a long E sound."
-            elif 'ea' in exp_clean and 'ea' not in sp_clean:
-                sound_errors.append("vowel_pattern_ea")
-                feedback += " - The 'ea' makes a long E sound."
-            elif 'ay' in exp_clean or 'ai' in exp_clean:
-                sound_errors.append("vowel_pattern_ay_ai")
-                feedback += " - The 'ay'/'ai' makes a long A sound."
-            elif exp_clean.endswith('y') and len(exp_clean) > 2:
-                sound_errors.append("y_ending")
-                feedback += " - Words ending in 'y' often sound like 'ee'."
-            
-            # Check for missing consonants
-            if exp_clean.startswith('th') and not sp_clean.startswith('th'):
-                sound_errors.append("missing_th")
-                feedback += " - Don't forget the 'TH' sound at the start!"
-            elif len(sp_clean) > len(exp_clean):
-                sound_errors.append("added_letters")
-                feedback = f"You said '{spoken_word}' but the word is shorter. Say it like: {pronunciation}"
-            elif len(sp_clean) < len(exp_clean):
-                sound_errors.append("missing_letters")
-                feedback = f"You said '{spoken_word}' but you're missing part. Say it like: {pronunciation}"
+            # If words are different, provide SPECIFIC phonetic feedback
+            if exp_clean != sp_clean:
+                feedback = f"❌ You said '{spoken_word}' but the word is '{expected_word}'. Say it like: {pronunciation}"
+                
+                # Analyze specific sound differences
+                if len(sp_clean) > len(exp_clean):
+                    sound_errors.append("added_sounds")
+                    feedback += f" (You added extra sounds: '{spoken_word}' is longer than '{expected_word}')"
+                elif len(sp_clean) < len(exp_clean):
+                    sound_errors.append("missing_sounds")
+                    feedback += f" (You're missing sounds: '{spoken_word}' is shorter than '{expected_word}')"
+                
+                # Check vowel differences
+                exp_vowels = [c for c in exp_clean if c in 'aeiou']
+                sp_vowels = [c for c in sp_clean if c in 'aeiou']
+                if exp_vowels != sp_vowels:
+                    sound_errors.append("vowel_error")
+                    feedback += " - Focus on the vowel sounds!"
+                
+                # Check if consonants are different
+                exp_consonants = [c for c in exp_clean if c not in 'aeiou']
+                sp_consonants = [c for c in sp_clean if c not in 'aeiou']
+                if exp_consonants != sp_consonants:
+                    sound_errors.append("consonant_error")
+                    feedback += " - Check the consonant sounds!"
+            else:
+                feedback = f"✅ Perfect!"
             
             return sound_errors, feedback
         
