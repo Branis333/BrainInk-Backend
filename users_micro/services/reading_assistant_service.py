@@ -338,19 +338,26 @@ class ReadingAssistantService:
                 print("❌ Gemini processing failed")
                 raise Exception("Gemini audio processing failed")
             
-            # Simple transcription prompt - no mention of children
+            # ULTRA-LITERAL transcription prompt
             transcription_prompt = """
-            Transcribe this audio recording.
+            You are a phonetic transcription system. Write EXACTLY what you hear, sound-by-sound.
             
-            Write exactly what you hear, including:
-            - Mispronunciations (if someone says "laff" instead of "leaf", write "laff")
-            - Grammar errors (if they say "I seen", write "I seen")
-            - Missing words (don't add words that weren't spoken)
-            - Extra words (include any additions)
+            CRITICAL RULES:
+            1. DO NOT correct pronunciation - if you hear "Wino-sores" write "Winosores" NOT "Dinosaurs"
+            2. DO NOT fix grammar - if you hear "I seen" write "I seen" NOT "I saw"
+            3. DO NOT infer intent - if unclear, write what it sounds like phonetically
+            4. DO NOT add missing words - only transcribe what was actually spoken
+            5. DO NOT remove extra words - include everything said
+            6. DO NOT fix spelling - write words as they sound: "re-dee" not "ready"
             
-            Do not auto-correct or fix errors. Transcribe literally.
-            Do not include timestamps or time codes.
-            Return only the spoken words as plain text.
+            EXAMPLES OF CORRECT TRANSCRIPTION:
+            - Hear "Wino-sores" → Write "Winosores" (NOT "Dinosaurs")
+            - Hear "plahn-tins" → Write "plantins" (NOT "plantains")  
+            - Hear "beh-gist" → Write "begist" (NOT "biggest")
+            - Hear "mee-at" → Write "meat" (keep phonetic spelling)
+            
+            Your job: Capture pronunciation errors for educational analysis.
+            Write ONLY the transcribed text. No formatting, no timestamps, no explanations.
             """
             
             print("🤖 Requesting transcription from Gemini...")
@@ -512,12 +519,15 @@ class ReadingAssistantService:
                 # Use the phonics feedback directly - it already has all the context
                 pronunciation_tip = feedback if feedback else f"Practice saying '{expected}'"
                 
+                # STRICT: Only 1.0 (perfect match) counts as correct
+                pronunciation_score = word_data.get("pronunciation_score", 0.0)
+                
                 word_accuracy.append({
                     "target_word": expected,
                     "spoken_word": said,
                     "word_position": i + 1,
-                    "is_correct": word_data.get("pronunciation_score", 0.0) >= 0.8,
-                    "pronunciation_accuracy": word_data.get("pronunciation_score", 0.0) * 100,
+                    "is_correct": pronunciation_score >= 0.99,  # Must be nearly perfect (account for float rounding)
+                    "pronunciation_accuracy": pronunciation_score * 100,
                     "phonetic_errors": word_data.get("sound_errors", []),
                     "pronunciation_tip": pronunciation_tip
                 })
@@ -529,13 +539,13 @@ class ReadingAssistantService:
                 "word_accuracy": word_accuracy,
                 "pronunciation_errors": [
                     {
-                        "word": w["word"],
+                        "word": w["expected"],  # Fixed: use "expected" not "word"
                         "error_type": "pronunciation", 
                         "correction": w["feedback"],
                         "practice_tip": w["feedback"]
                     }
                     for w in word_feedback
-                    if w.get("pronunciation_score", 1.0) < 0.8
+                    if w.get("pronunciation_score", 1.0) < 0.99  # STRICT: anything under perfect is an error
                 ],
                 "reading_speed": 60.0,  # Default estimate
                 "pauses_analysis": {"total_pauses": 0, "long_pauses": 0, "pause_locations": [], "fluency_impact": "minimal"},
@@ -565,48 +575,57 @@ class ReadingAssistantService:
         CRITICALLY IMPORTANT: Compare EXACT phonetics word-by-word.
         """
         
-        prompt = f"""You are a reading teacher analyzing pronunciation for {reading_level.value.replace('_', ' ')} level.
+        prompt = f"""You are a STRICT reading pronunciation analyzer for {reading_level.value.replace('_', ' ')} level.
 
-TARGET TEXT (what should be said):
+TARGET TEXT (correct pronunciation):
 "{expected_text}"
 
-ACTUAL TRANSCRIPTION (what was literally spoken, phonetically):
+ACTUAL TRANSCRIPTION (literal phonetic recording):
 "{transcribed_text}"
 
-CRITICAL INSTRUCTIONS:
-1. The transcription is LITERAL and PHONETIC - it captures exactly how words were pronounced
-2. Compare every single word position-by-position
-3. ANY difference between expected and transcribed = pronunciation error
-4. Do NOT auto-correct or assume intent - if transcription shows "re-ahdi", they did NOT say "ready"
-5. Mark words as incorrect even for small phonetic differences
-6. Provide specific feedback on WHAT sound/syllable was wrong and HOW to fix it
+⚠️ ULTRA-STRICT COMPARISON RULES:
+1. Compare word-by-word at the SAME position in both texts
+2. Words must match EXACTLY (case-insensitive, punctuation ignored) to score 1.0
+3. Even 1 letter difference = pronunciation error = score < 1.0
+4. "Dinosaurs" vs "Winosores" = DIFFERENT = score 0.0
+5. "biggest" vs "begist" = DIFFERENT = score 0.0  
+6. "plantains" vs "plantins" = DIFFERENT = score 0.0
+7. "meat" vs "meet" = DIFFERENT = score 0.0
+8. DO NOT use "close enough" - either exact match or error
 
-ANALYSIS RULES:
-- If expected word ≠ transcribed word → pronunciation_score below 1.0
-- Identify specific sound errors: vowel mistakes, consonant mistakes, syllable issues, blending problems
-- Give actionable feedback: "You said X but it should be Y. The [vowel/consonant/pattern] sounds like..."
-- Only mark score as 1.0 if words match EXACTLY (case-insensitive, ignoring punctuation)
+WORD-BY-WORD COMPARISON:
+- Split both texts into word lists
+- Compare position 1 to position 1, position 2 to position 2, etc.
+- Remove punctuation from words before comparing: "big." → "big"
+- Case-insensitive comparison: "BIG" = "big" = "Big"
+- If word[i] in expected ≠ word[i] in transcribed → pronunciation_score = 0.0 to 0.8 (based on similarity)
 
-Return JSON format:
+SCORING STRICTNESS:
+- pronunciation_score = 1.0 ONLY if words are identical
+- pronunciation_score = 0.7-0.9 if words are similar (small typo difference)
+- pronunciation_score = 0.0-0.6 if words are very different
+- accuracy_score = (count of exact matches) / (total words in expected text)
+
+Return JSON:
 {{
     "accuracy_score": 0.XX,
     "word_feedback": [
         {{
-            "expected": "word",
-            "said": "word_as_transcribed",
-            "pronunciation_score": 0.0 to 1.0,
-            "sound_errors": ["vowel_error", "consonant_blend_error", "syllable_mistake", etc],
-            "feedback": "Specific guidance on the pronunciation mistake"
+            "expected": "Dinosaurs",
+            "said": "Winosores",
+            "pronunciation_score": 0.0,
+            "sound_errors": ["initial_consonant_error", "vowel_error"],
+            "feedback": "You said 'Winosores' but it's 'DY-no-sors'. Start with 'DY' sound."
         }}
     ],
-    "suggestions": ["Overall practice recommendations"],
-    "correctly_read_words": ["list of perfect matches"],
-    "incorrectly_read_words": ["list of words with errors"],
-    "needs_practice_words": ["words to focus on"],
+    "suggestions": ["Practice recommendations"],
+    "correctly_read_words": ["only exact matches"],
+    "incorrectly_read_words": ["any word with differences"],
+    "needs_practice_words": ["words with pronunciation_score < 0.8"],
     "encouragement": "Positive message"
 }}
 
-ANALYZE EVERY WORD. Be strict but constructive."""
+BE RUTHLESSLY STRICT. No partial credit for "close enough"."""
 
         try:
             response = await asyncio.to_thread(
@@ -858,7 +877,7 @@ ANALYZE EVERY WORD. Be strict but constructive."""
             "suggestions": [
                 f"Practice saying: {', '.join(needs_practice[:3])}" if needs_practice else "Keep reading aloud every day!"
             ],
-            "correctly_read_words": [w["expected"] for w in word_feedback if w["pronunciation_score"] >= 0.8],
+            "correctly_read_words": [w["expected"] for w in word_feedback if w["pronunciation_score"] >= 0.99],
             "incorrectly_read_words": incorrect_words,
             "needs_practice_words": needs_practice,
             "encouragement": "Great effort! Keep practicing and you'll get even better!"
