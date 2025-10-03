@@ -1,0 +1,215 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: BrainInk Backend Microservices
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 1024
+    LoggingConfig:
+      LogFormat: JSON
+
+Resources:
+  # Secrets Manager secret to store all environment variables
+  BrainInkSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: brainink-secret-prod
+      Description: Environment variables for BrainInk Backend
+      SecretString: !Sub |
+        {
+          "SECRET_KEY": "${SecretKey}",
+          "SECRET_KEY_DATA": "${SecretKeyData}",
+          "DB_PASSWORD": "${DbPassword}",
+          "BRAININK_PASSWORD": "${BraininkPassword}",
+          "OPENAI_API_KEY": "${OpenaiApiKey}",
+          "GOOGLE_API_KEY": "${GoogleApiKey}",
+          "CORE_API_KEY": "${CoreApiKey}",
+          "AGENT_API_KEY": "${AgentApiKey}"
+        }
+
+  # Users Microservice
+  UsersFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      PackageType: Image
+      MemorySize: 1024
+      Environment:
+        Variables:
+          SECRET_KEY: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:SECRET_KEY}}'
+          SECRET_KEY_DATA: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:SECRET_KEY_DATA}}'
+          ALGORITHM: !Ref Algorithm
+          ALGORITHM_DATA: !Ref AlgorithmData
+          DB_USER: !Ref DbUser
+          DB_PASSWORD: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:DB_PASSWORD}}'
+          DB_HOST: !Ref DbHost
+          DB_PORT: !Ref DbPort
+          DB_NAME: !Ref DbName
+          DATABASE_URL: !Ref DatabaseUrl
+          BRAININK_USERNAME: !Ref BraininkUsername
+          BRAININK_PASSWORD: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:BRAININK_PASSWORD}}'
+          BRAININK_SENDER_EMAIL: !Ref BraininkSenderEmail
+          ACCESS_TOKEN_EXPIRE_MINUTES: !Ref AccessTokenExpireMinutes
+          ENVIRONMENT: !Ref Environment
+          DEBUG: !Ref Debug
+          GOOGLE_CLIENT_ID: !Ref GoogleClientId
+          KANA_BASE_URL: !Ref KanaBaseUrl
+          VITE_GOOGLE_CLIENT_ID: !Ref ViteGoogleClientId
+          VITE_API_BASE_URL: !Ref ViteApiBaseUrl
+          VITE_OCR_SERVICE_URL: !Ref ViteOcrServiceUrl
+          VITE_KANA_API_BASE_URL: !Ref ViteKanaApiBaseUrl
+          KANA_API_URL: !Ref KanaApiUrl
+          OPENAI_API_KEY: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:OPENAI_API_KEY}}'
+          GOOGLE_API_KEY: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:GOOGLE_API_KEY}}'
+          CORE_API_KEY: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:CORE_API_KEY}}'
+          VITE_AGENT_API_BASE_URL: !Ref ViteAgentApiBaseUrl
+          AGENT_API_BASE_URL: !Ref AgentApiBaseUrl
+          AGENT_SYSTEM_ENABLED: !Ref AgentSystemEnabled
+          AGENT_API_KEY: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:AGENT_API_KEY}}'
+          VITE_AGENT_API_KEY: !Sub '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:AGENT_API_KEY}}'
+          BRAININK_AGENT_PORT: !Ref BraininkAgentPort
+          BRAININK_AGENT_URL: !Ref BraininkAgentUrl
+      Policies:
+        - SecretsManagerReadWrite
+      Events:
+        allRoutes:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+    Metadata:
+      Dockerfile: Dockerfile
+      DockerContext: .
+      DockerTag: python3.11-v1
+
+Parameters:
+  SecretKey:
+    Type: String
+    Description: Secret key for authentication
+    NoEcho: true
+  SecretKeyData:
+    Type: String
+    Description: Secret key for data encryption
+    NoEcho: true
+  Algorithm:
+    Type: String
+    Description: JWT Algorithm
+    Default: "HS256"
+  AlgorithmData:
+    Type: String
+    Description: Data encryption algorithm
+    Default: "HS256"
+  DbUser:
+    Type: String
+    Description: Database username
+    Default: "postgres"
+  DbPassword:
+    Type: String
+    Description: Database password
+    NoEcho: true
+  DbHost:
+    Type: String
+    Description: Database host
+  DbPort:
+    Type: String
+    Description: Database port
+    Default: "5432"
+  DbName:
+    Type: String
+    Description: Database name
+    Default: "postgres"
+  DatabaseUrl:
+    Type: String
+    Description: PostgreSQL database connection string
+  BraininkUsername:
+    Type: String
+    Description: BrainInk email username
+  BraininkPassword:
+    Type: String
+    Description: BrainInk email password
+    NoEcho: true
+  BraininkSenderEmail:
+    Type: String
+    Description: BrainInk sender email
+  AccessTokenExpireMinutes:
+    Type: String
+    Description: Access token expiration in minutes
+    Default: "1440"
+  Environment:
+    Type: String
+    Description: Application environment
+    Default: "Production"
+  Debug:
+    Type: String
+    Description: Debug mode
+    Default: "true"
+  GoogleClientId:
+    Type: String
+    Description: Google OAuth client ID
+  KanaBaseUrl:
+    Type: String
+    Description: KANA base URL
+    Default: "http://localhost:10000"
+  ViteGoogleClientId:
+    Type: String
+    Description: Vite Google client ID
+  ViteApiBaseUrl:
+    Type: String
+    Description: Vite API base URL
+    Default: "http://localhost:8000"
+  ViteOcrServiceUrl:
+    Type: String
+    Description: Vite OCR service URL
+    Default: "http://localhost:8001"
+  ViteKanaApiBaseUrl:
+    Type: String
+    Description: Vite KANA API base URL
+    Default: "https://kana-backend-app.onrender.com/api/kana"
+  KanaApiUrl:
+    Type: String
+    Description: KANA API URL
+    Default: "https://kana-backend-app.onrender.com"
+  OpenaiApiKey:
+    Type: String
+    Description: OpenAI API Key
+    NoEcho: true
+  GoogleApiKey:
+    Type: String
+    Description: Google API Key
+    NoEcho: true
+  CoreApiKey:
+    Type: String
+    Description: Core API Key
+    NoEcho: true
+  ViteAgentApiBaseUrl:
+    Type: String
+    Description: Vite Agent API base URL
+    Default: "https://brainink.onrender.com"
+  AgentApiBaseUrl:
+    Type: String
+    Description: Agent API base URL
+    Default: "https://kana-backend-app.onrender.com"
+  AgentSystemEnabled:
+    Type: String
+    Description: Agent system enabled flag
+    Default: "true"
+  AgentApiKey:
+    Type: String
+    Description: Agent API Key
+    NoEcho: true
+  BraininkAgentPort:
+    Type: String
+    Description: BrainInk agent port
+    Default: "443"
+  BraininkAgentUrl:
+    Type: String
+    Description: BrainInk agent URL
+    Default: "https://brainink.onrender.com"
+
+Outputs:
+  ApiUrl:
+    Description: API Gateway endpoint URL
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/"
+  SecretArn:
+    Description: ARN of the Secrets Manager secret
+    Value: !Ref BrainInkSecret

@@ -1,0 +1,29 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - echo Installing dependencies...
+      - pip install aws-sam-cli
+  pre_build:
+    commands:
+      - echo "pre_build phase"
+      - pwd
+      - ls -la
+      - cd $CODEBUILD_SRC_DIR/users_micro && ls -la && echo "Validating sam template..." && sam validate
+  build:
+    commands:
+      - echo Building the application...
+      - cd $CODEBUILD_SRC_DIR/users_micro && sam build && echo "SAM build completed successfully"
+  post_build:
+    commands:
+      - echo Starting deployment...
+      - cd $CODEBUILD_SRC_DIR/users_micro && sam deploy --config-env prod --no-confirm-changeset && echo "SAM deploy completed successfully"
+
+artifacts:
+  files:
+    - users_micro/template.yaml
+    - users_micro/samconfig.toml
+    - users_micro/.aws-sam/**/*
