@@ -349,7 +349,8 @@ class ReadingAssistantService:
             - Extra words (include any additions)
             
             Do not auto-correct or fix errors. Transcribe literally.
-            Return only the transcribed text.
+            Do not include timestamps or time codes.
+            Return only the spoken words as plain text.
             """
             
             print("🤖 Requesting transcription from Gemini...")
