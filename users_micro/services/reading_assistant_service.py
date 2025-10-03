@@ -355,54 +355,18 @@ class ReadingAssistantService:
             
             print("🤖 Requesting transcription from Gemini...")
             
-            # Explicitly disable ALL safety filters
-            safety_settings = [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
+            # Simple transcription - just one attempt
+            response = await asyncio.to_thread(
+                self.gemini_service.config.model.generate_content,
+                [uploaded_file, transcription_prompt],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.0,
+                    max_output_tokens=512
+                )
+            )
             
-            # Try progressively simpler prompts if safety filter blocks
-            prompts_to_try = [
-                transcription_prompt,  # Detailed phonetic prompt
-                "Transcribe this audio. Write exactly what you hear.",  # Simple
-                "Transcribe this audio file."  # Minimal
-            ]
-            
-            transcribed_text = None
-            for attempt, prompt_text in enumerate(prompts_to_try, 1):
-                try:
-                    if attempt > 1:
-                        print(f"⚠️ Attempt {attempt}: Trying simpler prompt...")
-                    
-                    response = await asyncio.to_thread(
-                        self.gemini_service.config.model.generate_content,
-                        [uploaded_file, prompt_text],
-                        generation_config=genai.types.GenerationConfig(
-                            temperature=0.0,
-                            max_output_tokens=512
-                        ),
-                        safety_settings=safety_settings
-                    )
-                    
-                    transcribed_text = response.text.strip()
-                    print(f"✅ Transcription successful with prompt attempt {attempt}")
-                    break
-                    
-                except Exception as e:
-                    if "finish_reason" in str(e) and "2" in str(e):
-                        if attempt < len(prompts_to_try):
-                            print(f"⚠️ Safety filter blocked attempt {attempt}. Trying next...")
-                            continue
-                        else:
-                            print(f"❌ All transcription attempts blocked by safety filter")
-                            raise Exception("Safety filter blocked all transcription attempts")
-                    else:
-                        raise e
-            
-            if not transcribed_text:
-                raise Exception("Transcription failed - no text generated")
+            transcribed_text = response.text.strip()
+            print(f"✅ Transcription successful")
             
             print(f"🎯 Gemini transcription result: '{transcribed_text}'")
             
@@ -524,14 +488,16 @@ class ReadingAssistantService:
         """
         
         try:
-            # Use the real Gemini AI service for speech performance analysis
-            print(f"🤖 DEBUG: Calling Gemini with target='{target_text}', transcribed='{transcribed_text}'")
-            analysis_result = await self.gemini_service.analyze_speech_performance(
-                expected_text=target_text,
-                transcribed_text=transcribed_text,
-                reading_level=reading_level.value
-            )
-            print(f"🤖 DEBUG: Gemini returned accuracy_score: {analysis_result.get('accuracy_score', 'MISSING')}")
+            # Try AI analysis first, fallback to local if it fails
+            print(f"🎯 Attempting AI analysis...")
+            try:
+                analysis_result = await self._analyze_with_gemini_ai(target_text, transcribed_text, reading_level)
+                print(f"✅ AI analysis succeeded")
+            except Exception as ai_error:
+                print(f"⚠️ AI analysis failed: {ai_error}. Using local analysis.")
+                analysis_result = self._analyze_pronunciation_locally(target_text, transcribed_text, reading_level)
+            
+            print(f"🤖 DEBUG: Analysis returned accuracy_score: {analysis_result.get('accuracy_score', 'MISSING')}")
             
             # Convert to expected format for the reading assistant
             word_feedback = analysis_result.get("word_feedback", [])
@@ -587,6 +553,292 @@ class ReadingAssistantService:
             # Fallback analysis
             print(f"❌ DEBUG: AI analysis failed, using fallback. Error: {e}")
             return self._generate_fallback_analysis(target_text, transcribed_text)
+    
+    async def _analyze_with_gemini_ai(
+        self,
+        expected_text: str,
+        transcribed_text: str,
+        reading_level: ReadingLevel
+    ) -> Dict[str, Any]:
+        """
+        Use Gemini AI as a reading teacher to analyze pronunciation.
+        Simple role-based prompt - let AI do what it does best.
+        """
+        
+        prompt = f"""You are an experienced reading teacher for {reading_level.value.replace('_', ' ')} level.
+
+A student just read this text aloud:
+Expected: "{expected_text}"
+They said: "{transcribed_text}"
+
+Analyze their reading and provide feedback in this JSON format:
+{{
+    "accuracy_score": 0.85,
+    "word_feedback": [
+        {{
+            "expected": "word",
+            "said": "word",
+            "pronunciation_score": 1.0,
+            "sound_errors": [],
+            "feedback": "Perfect!"
+        }}
+    ],
+    "suggestions": ["Practice tip 1", "Practice tip 2"],
+    "correctly_read_words": ["word1", "word2"],
+    "incorrectly_read_words": ["word3"],
+    "needs_practice_words": ["word3"],
+    "encouragement": "Positive message"
+}}
+
+Focus on pronunciation accuracy and provide helpful phonics tips."""
+
+        try:
+            response = await asyncio.to_thread(
+                self.gemini_service.config.model.generate_content,
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.3,
+                    max_output_tokens=2048,
+                    response_mime_type="application/json"
+                )
+            )
+            
+            # Parse JSON response
+            result = json.loads(response.text)
+            print(f"✅ AI analysis: {result.get('accuracy_score', 0)*100:.1f}% accuracy")
+            return result
+            
+        except Exception as e:
+            print(f"❌ AI analysis error: {e}")
+            raise Exception(f"AI analysis failed: {str(e)}")
+    
+    def _analyze_pronunciation_locally(
+        self,
+        expected_text: str,
+        transcribed_text: str,
+        reading_level: ReadingLevel
+    ) -> Dict[str, Any]:
+        """
+        Perform local word-by-word pronunciation analysis with phonetic guides.
+        Takes pronunciations literally as transcribed by Gemini.
+        """
+        from difflib import SequenceMatcher
+        
+        def get_pronunciation_guide(word: str) -> str:
+            """Generate phonetic pronunciation guide for a word"""
+            word_lower = word.lower()
+            
+            # Common word pronunciations - expanded list
+            pronunciation_map = {
+                'the': 'THUH (like "thuh")',
+                'sky': 'SKY (sounds like "skai")',
+                'leaf': 'LEEF (long "ee" sound)',
+                'see': 'SEE (sounds like the letter "C")',
+                'tree': 'TREE (rhymes with "free")',
+                'sun': 'SUN (rhymes with "fun")',
+                'run': 'RUN (rhymes with "sun")',
+                'big': 'BIG (short "i" sound)',
+                'slide': 'SLIDE (sounds like "slyde")',
+                'through': 'THROO (with "th" sound, like "threw")',
+                'play': 'PLAY (sounds like "plei")',
+                'say': 'SAY (sounds like "sei")',
+                'day': 'DAY (sounds like "dei")',
+                'eat': 'EET (long "ee" sound)',
+                'read': 'REED (long "ee" sound)',
+                'friend': 'FREND (short "e" sound)',
+                'get': 'GET (short "e" sound)',
+                'kind': 'KYND (long "i" sound)',
+                'being': 'BEE-ing (sounds like "bee" + "ing")',
+                'keen': 'KEEN (long "ee" sound)',
+                'house': 'HOWSE (sounds like "ow" as in "cow")',
+                'bed': 'BED (short "e" sound)',
+                'teddy': 'TED-ee (short "e" then "ee")',
+                'bear': 'BAIR (sounds like "air" with B)',
+                'looked': 'LOOKT (sounds like "lukt")',
+                'found': 'FOWND (sounds like "ow" in "cow")',
+                'closet': 'CLOZ-it (soft "z" sound)',
+                'gets': 'GETS (short "e" sound)',
+                'two': 'TOO (sounds like "too")',
+                'bread': 'BRED (short "e" sound)',
+                'next': 'NEKST (short "e" sound)',
+                'add': 'AD (short "a" sound)',
+                'peanut': 'PEE-nut (long "ee" sound)',
+                'butter': 'BUT-er (short "u" sound)',
+                'then': 'THEN (short "e" sound)',
+                'jelly': 'JEL-ee (short "e" then "ee")',
+                'finally': 'FY-nal-ee (long "i" sound)',
+                'put': 'PUT (sounds like "puht")',
+                'together': 'tuh-GETH-er (soft "uh" sounds)',
+                'now': 'NOW (sounds like "ow" in "cow")',
+                'have': 'HAV (short "a" sound)',
+                'sandwich': 'SAND-wich (short "a" sound)',
+            }
+            
+            if word_lower in pronunciation_map:
+                return pronunciation_map[word_lower]
+            
+            # Pattern-based pronunciation for unknown words
+            if 'ee' in word_lower:
+                return f'{word.upper()} (with long "ee" sound like "tree")'
+            elif 'ea' in word_lower:
+                return f'{word.upper()} (with long "e" sound like "eat")'
+            elif 'ay' in word_lower or 'ai' in word_lower:
+                return f'{word.upper()} (with long "a" sound like "play")'
+            elif 'oo' in word_lower:
+                return f'{word.upper()} (with "oo" sound like "moon")'
+            elif word_lower.endswith('y') and len(word_lower) > 2:
+                return f'{word.upper()} (ends with "ee" sound like "happy")'
+            else:
+                return f'{word.upper()}'
+        
+        def analyze_phonics_error(expected_word: str, spoken_word: str) -> tuple:
+            """Analyze the phonetic/phonics difference between expected and spoken words"""
+            exp_clean = expected_word.lower().strip('.,!?;:')
+            sp_clean = spoken_word.lower().strip('.,!?;:')
+            
+            sound_errors = []
+            
+            # Get pronunciation guide for the correct word
+            pronunciation = get_pronunciation_guide(expected_word)
+            feedback = f"You said '{spoken_word}'. Say it like: {pronunciation}"
+            
+            # Add specific phonics hints based on patterns
+            if 'ee' in exp_clean and 'ee' not in sp_clean:
+                sound_errors.append("vowel_pattern_ee")
+                feedback += " - The 'ee' makes a long E sound."
+            elif 'ea' in exp_clean and 'ea' not in sp_clean:
+                sound_errors.append("vowel_pattern_ea")
+                feedback += " - The 'ea' makes a long E sound."
+            elif 'ay' in exp_clean or 'ai' in exp_clean:
+                sound_errors.append("vowel_pattern_ay_ai")
+                feedback += " - The 'ay'/'ai' makes a long A sound."
+            elif exp_clean.endswith('y') and len(exp_clean) > 2:
+                sound_errors.append("y_ending")
+                feedback += " - Words ending in 'y' often sound like 'ee'."
+            
+            # Check for missing consonants
+            if exp_clean.startswith('th') and not sp_clean.startswith('th'):
+                sound_errors.append("missing_th")
+                feedback += " - Don't forget the 'TH' sound at the start!"
+            elif len(sp_clean) > len(exp_clean):
+                sound_errors.append("added_letters")
+                feedback = f"You said '{spoken_word}' but the word is shorter. Say it like: {pronunciation}"
+            elif len(sp_clean) < len(exp_clean):
+                sound_errors.append("missing_letters")
+                feedback = f"You said '{spoken_word}' but you're missing part. Say it like: {pronunciation}"
+            
+            return sound_errors, feedback
+        
+        # Normalize texts for comparison (remove punctuation, lowercase)
+        def normalize(text: str) -> str:
+            return re.sub(r'[^\w\s]', '', text.lower().strip())
+        
+        expected_normalized = normalize(expected_text)
+        transcribed_normalized = normalize(transcribed_text)
+        
+        # Quick check: If texts are identical, perfect reading!
+        if expected_normalized == transcribed_normalized:
+            print("🎉 Perfect reading detected - texts match exactly!")
+            expected_words = expected_text.strip().split()
+            return {
+                "accuracy_score": 1.0,
+                "overall_feedback": "Perfect! You read every word correctly!",
+                "word_feedback": [
+                    {
+                        "word": word,
+                        "expected": word,
+                        "said": word,
+                        "pronunciation_score": 1.0,
+                        "sound_errors": [],
+                        "feedback": "✅ Perfect!"
+                    }
+                    for word in expected_words
+                ],
+                "suggestions": ["Keep up the great work!", "Try reading more challenging content"],
+                "correctly_read_words": expected_words,
+                "incorrectly_read_words": [],
+                "needs_practice_words": [],
+                "encouragement": f"Excellent work! You got all {len(expected_words)} words correct!"
+            }
+        
+        # Split into words (preserve punctuation context)
+        expected_words = expected_text.strip().split()
+        transcribed_words = transcribed_text.strip().split()
+        
+        word_feedback = []
+        correct_count = 0
+        incorrect_words = []
+        needs_practice = []
+        
+        max_len = max(len(expected_words), len(transcribed_words))
+        
+        for i in range(max_len):
+            expected_word = expected_words[i] if i < len(expected_words) else ""
+            spoken_word = transcribed_words[i] if i < len(transcribed_words) else ""
+            
+            # Normalize for comparison (remove punctuation)
+            expected_clean = re.sub(r'[^\w]', '', expected_word.lower())
+            spoken_clean = re.sub(r'[^\w]', '', spoken_word.lower())
+            
+            # Calculate word similarity
+            if expected_clean == spoken_clean:
+                # Perfect match
+                score = 1.0
+                correct_count += 1
+                feedback_text = f"✅ Perfect!"
+                sound_errors = []
+            elif not spoken_clean:
+                # Word was skipped
+                score = 0.0
+                incorrect_words.append(expected_word)
+                needs_practice.append(expected_word)
+                pronunciation = get_pronunciation_guide(expected_word)
+                feedback_text = f"⚠️ You skipped this word. Say it like: {pronunciation}"
+                sound_errors = ["word_skipped"]
+            elif not expected_clean:
+                # Extra word spoken
+                score = 0.0
+                feedback_text = f"⚠️ This word isn't in the text. You added '{spoken_word}'."
+                sound_errors = ["extra_word"]
+            else:
+                # Analyze phonics/pronunciation error
+                sound_errors, feedback_text = analyze_phonics_error(expected_word, spoken_word)
+                
+                # Calculate similarity score
+                word_similarity = SequenceMatcher(None, expected_clean, spoken_clean).ratio()
+                score = word_similarity
+                
+                # Add to practice list
+                if score < 1.0:
+                    needs_practice.append(expected_word)
+                    if score < 0.7:
+                        incorrect_words.append(expected_word)
+            
+            word_feedback.append({
+                "word": expected_word,
+                "expected": expected_word,
+                "said": spoken_word,
+                "pronunciation_score": score,
+                "sound_errors": sound_errors,
+                "feedback": feedback_text
+            })
+        
+        accuracy_score = correct_count / len(expected_words) if expected_words else 0.0
+        
+        print(f"📊 Local analysis: {correct_count}/{len(expected_words)} words correct ({accuracy_score*100:.1f}%)")
+        
+        return {
+            "accuracy_score": accuracy_score,
+            "overall_feedback": f"Good job! You got {correct_count} out of {len(expected_words)} words correct.",
+            "word_feedback": word_feedback,
+            "suggestions": [
+                f"Practice saying: {', '.join(needs_practice[:3])}" if needs_practice else "Keep reading aloud every day!"
+            ],
+            "correctly_read_words": [w["expected"] for w in word_feedback if w["pronunciation_score"] >= 0.8],
+            "incorrectly_read_words": incorrect_words,
+            "needs_practice_words": needs_practice,
+            "encouragement": "Great effort! Keep practicing and you'll get even better!"
+        }
     
     def _generate_fallback_analysis(self, target_text: str, transcribed_text: str) -> Dict[str, Any]:
         """Generate basic analysis if AI analysis fails"""
