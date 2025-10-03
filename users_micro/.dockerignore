@@ -42,8 +42,6 @@ hs_err_pid*.log
 
 # AWS SAM
 .aws-sam/
-samconfig.toml
-template.yaml
 
 # Development scripts
 start.sh
