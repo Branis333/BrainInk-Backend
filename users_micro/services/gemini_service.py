@@ -1720,11 +1720,22 @@ class GeminiService:
                 response_mime_type=kwargs.get('response_format', 'text/plain')
             )
             
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                prompt,
-                generation_config=generation_config
-            )
+            # Support safety_settings parameter
+            safety_settings = kwargs.get('safety_settings', None)
+            
+            if safety_settings:
+                response = await asyncio.to_thread(
+                    self.config.model.generate_content,
+                    prompt,
+                    generation_config=generation_config,
+                    safety_settings=safety_settings
+                )
+            else:
+                response = await asyncio.to_thread(
+                    self.config.model.generate_content,
+                    prompt,
+                    generation_config=generation_config
+                )
             
             return response.text
             
@@ -1887,11 +1898,20 @@ Return a JSON object with this structure:
 Analyze word-by-word and be specific about pronunciation."""
         
         try:
+            # Disable safety filters for educational analysis
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+            
             # Call AI with freedom to analyze
             response = await self.generate_text(
                 prompt,
                 response_format="application/json",
-                temperature=0.3  # Slight creativity for helpful explanations
+                temperature=0.3,  # Slight creativity for helpful explanations
+                safety_settings=safety_settings
             )
             
             # Parse JSON response
@@ -1910,26 +1930,6 @@ Analyze word-by-word and be specific about pronunciation."""
             print(f"⚠️ AI analysis failed: {e}. Using fallback.")
             # Fallback to local analysis if AI fails
             return self._local_word_analysis(expected_text, transcribed_text)
-        
-        try:
-            response = await self.generate_text(
-                prompt,
-                response_format="application/json",
-                temperature=0.6
-            )
-            
-            # Clean and parse JSON response
-            json_text = response.strip()
-            if json_text.startswith('```json'):
-                json_text = json_text[7:-3].strip()
-            elif json_text.startswith('```'):
-                json_text = json_text[3:-3].strip()
-                
-            return json.loads(json_text)
-            
-        except Exception as e:
-            print(f"❌ Speech analysis failed: {e}")
-            raise Exception(f"Failed to analyze speech performance: {str(e)}")
     
     async def generate_personalized_recommendations(
         self,
