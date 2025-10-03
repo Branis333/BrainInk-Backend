@@ -362,20 +362,53 @@ class ReadingAssistantService:
             
             print("🤖 Requesting transcription from Gemini...")
             
-            # Simple transcription - just one attempt
-            response = await asyncio.to_thread(
-                self.gemini_service.config.model.generate_content,
-                [uploaded_file, transcription_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.0,
-                    max_output_tokens=512
-                )
-            )
+            # Try multiple prompts if safety filter blocks
+            prompts_to_try = [
+                # Attempt 1: Ultra-literal phonetic transcription
+                transcription_prompt,
+                
+                # Attempt 2: Simpler, more neutral prompt
+                """Transcribe this audio recording word-for-word. 
+                Write exactly what is said, including any mispronunciations or errors.
+                Do not correct mistakes. Return only the transcribed text.""",
+                
+                # Attempt 3: Minimal prompt
+                """Listen to this audio and write down every word you hear exactly as spoken."""
+            ]
             
-            transcribed_text = response.text.strip()
-            print(f"✅ Transcription successful")
+            transcribed_text = None
+            last_error = None
             
-            print(f"🎯 Gemini transcription result: '{transcribed_text}'")
+            for attempt_num, prompt in enumerate(prompts_to_try, 1):
+                try:
+                    print(f"🔄 Transcription attempt {attempt_num}/{len(prompts_to_try)}...")
+                    
+                    response = await asyncio.to_thread(
+                        self.gemini_service.config.model.generate_content,
+                        [uploaded_file, prompt],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.0,
+                            max_output_tokens=512
+                        )
+                    )
+                    
+                    # Check if response has text
+                    if hasattr(response, 'text') and response.text:
+                        transcribed_text = response.text.strip()
+                        print(f"✅ Transcription successful on attempt {attempt_num}")
+                        print(f"🎯 Gemini transcription result: '{transcribed_text}'")
+                        break
+                    else:
+                        # Check finish_reason
+                        finish_reason = response.candidates[0].finish_reason if response.candidates else None
+                        print(f"⚠️ Attempt {attempt_num} blocked: finish_reason={finish_reason}")
+                        last_error = f"Safety filter blocked (finish_reason={finish_reason})"
+                        continue
+                        
+                except Exception as attempt_error:
+                    print(f"⚠️ Attempt {attempt_num} failed: {attempt_error}")
+                    last_error = str(attempt_error)
+                    continue
             
             # Cleanup uploaded file
             try:
@@ -384,10 +417,10 @@ class ReadingAssistantService:
             except:
                 pass
             
-            # Check if transcription actually worked
-            if transcribed_text == "TRANSCRIPTION_FAILED" or len(transcribed_text) < 2:
-                print("❌ Transcription failed or empty")
-                raise Exception("Transcription failed")
+            # Check if we got a transcription
+            if not transcribed_text or len(transcribed_text) < 2:
+                print(f"❌ All transcription attempts failed. Last error: {last_error}")
+                raise Exception(f"Transcription failed after {len(prompts_to_try)} attempts: {last_error}")
             
             return transcribed_text
             
