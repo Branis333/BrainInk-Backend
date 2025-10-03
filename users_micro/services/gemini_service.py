@@ -1859,14 +1859,21 @@ class GeminiService:
         # Let AI analyze with freedom
         print("🤖 Letting AI analyze pronunciation freely...")
         
-        prompt = f"""You are a reading teacher helping a {reading_level} student improve their pronunciation.
+        prompt = f"""Analyze this reading pronunciation for a {reading_level} level.
 
-WHAT HAPPENED:
-- The student should have read: "{expected_text}"
-- The student actually said: "{transcribed_text}"
+COMPARISON:
+- Expected text: "{expected_text}"
+- What was said: "{transcribed_text}"
 
-YOUR JOB:
-Analyze each word and explain HOW to pronounce it correctly when the student got it wrong.
+TASK:
+Analyze each word and provide pronunciation feedback when incorrect.
+
+For each word, include:
+1. What they said vs what they should say
+2. HOW to pronounce it correctly (phonetic guide)
+3. Why it's pronounced that way (phonics patterns, rules, etc)
+
+Be encouraging but accurate.
 
 For each word, provide:
 1. What they said vs what they should say
