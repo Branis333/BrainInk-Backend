@@ -1737,6 +1737,16 @@ class GeminiService:
                     generation_config=generation_config
                 )
             
+            # Check if response was blocked before accessing .text
+            if not response.candidates:
+                raise Exception("Response blocked by safety filters (no candidates returned)")
+            
+            candidate = response.candidates[0]
+            if candidate.finish_reason != 1:  # 1 = STOP (normal completion), 2 = SAFETY
+                print(f"⚠️ Response finish_reason: {candidate.finish_reason}")
+                print(f"⚠️ Safety ratings: {candidate.safety_ratings if hasattr(candidate, 'safety_ratings') else 'N/A'}")
+                raise Exception(f"Response blocked (finish_reason={candidate.finish_reason})")
+            
             return response.text
             
         except Exception as e:
@@ -1887,6 +1897,10 @@ Return JSON with:
                 {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
+            
+            # Debug: log what we're sending
+            print(f"📤 Sending prompt to Gemini (length: {len(prompt)} chars)")
+            print(f"🔒 Safety settings: BLOCK_NONE for all categories")
             
             # Call AI with freedom to analyze
             response = await self.generate_text(
