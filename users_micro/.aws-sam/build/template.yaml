@@ -15,10 +15,11 @@ Resources:
       Description: Environment variables for BrainInk Backend
       SecretString:
         Fn::Sub: "{\n  \"SECRET_KEY\": \"${SecretKey}\",\n  \"SECRET_KEY_DATA\": \"\
-          ${SecretKeyData}\",\n  \"DB_PASSWORD\": \"${DbPassword}\",\n  \"BRAININK_PASSWORD\"\
-          : \"${BraininkPassword}\",\n  \"OPENAI_API_KEY\": \"${OpenaiApiKey}\",\n\
-          \  \"GOOGLE_API_KEY\": \"${GoogleApiKey}\",\n  \"CORE_API_KEY\": \"${CoreApiKey}\"\
-          ,\n  \"AGENT_API_KEY\": \"${AgentApiKey}\"\n}\n"
+          ${SecretKeyData}\",\n  \"DB_PASSWORD\": \"${DbPassword}\",\n  \"DATABASE_URL\"\
+          : \"${DatabaseUrl}\",\n  \"BRAININK_PASSWORD\": \"${BraininkPassword}\"\
+          ,\n  \"OPENAI_API_KEY\": \"${OpenaiApiKey}\",\n  \"GOOGLE_API_KEY\": \"\
+          ${GoogleApiKey}\",\n  \"CORE_API_KEY\": \"${CoreApiKey}\",\n  \"AGENT_API_KEY\"\
+          : \"${AgentApiKey}\"\n}\n"
   UsersFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -45,7 +46,7 @@ Resources:
           DB_NAME:
             Ref: DbName
           DATABASE_URL:
-            Ref: DatabaseUrl
+            Fn::Sub: '{{resolve:secretsmanager:${BrainInkSecret}:SecretString:DATABASE_URL}}'
           BRAININK_USERNAME:
             Ref: BraininkUsername
           BRAININK_PASSWORD:

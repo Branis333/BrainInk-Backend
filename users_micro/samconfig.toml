@@ -1,11 +1,11 @@
 version = 0.1
 [prod.deploy.parameters]
-stack_name = "brainink-api-python"
+stack_name = "brainink-users-micro"
 resolve_s3 = true
-s3_prefix = "brainink-api-python"
+s3_prefix = "brainink-users-micro"
 region = "eu-west-1"
-#profile = "brainink"
+# profile = "brainink"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
-resolve_image_repos = true
-parameter_overrides = "Algorithm=\"HS256\" AlgorithmData=\"HS256\" DbUser=\"postgres\" DbHost=\"prod-db.cdi20mcii7vt.eu-west-1.rds.amazonaws.com\" DbPort=\"5432\" DbName=\"postgres\" BraininkUsername=\"www.BrainInk@gmail.com\" BraininkSenderEmail=\"www.BrainInk@gmail.com\" AccessTokenExpireMinutes=\"1440\" Environment=\"production\" Debug=\"false\" GoogleClientId=\"969723698837-9aepndmu033gu0bk3gdrb6o1707mknp6.apps.googleusercontent.com\" KanaBaseUrl=\"http://localhost:10000\" ViteGoogleClientId=\"969723698837-9aepndmu033gu0bk3gdrb6o1707mknp6.apps.googleusercontent.com\" ViteApiBaseUrl=\"http://localhost:8000\" ViteOcrServiceUrl=\"http://localhost:8001\" ViteKanaApiBaseUrl=\"https://kana-backend-app.onrender.com/api/kana\" KanaApiUrl=\"https://kana-backend-app.onrender.com\" ViteAgentApiBaseUrl=\"https://brainink.onrender.com\" AgentApiBaseUrl=\"https://kana-backend-app.onrender.com\" AgentSystemEnabled=\"true\" BraininkAgentPort=\"443\" BraininkAgentUrl=\"https://brainink.onrender.com\""
+parameter_overrides = "Algorithm=\"HS256\" AlgorithmData=\"HS256\" DbUser=\"postgres\" DbHost=\"prod-db.cdi20mcii7vt.eu-west-1.rds.amazonaws.com\" DbPort=\"5432\" DbName=\"postgres\" DatabaseUrl=\"postgresql://postgres:DUDr9yiHiICQYHJpSTmG4@prod-db.cdi20mcii7vt.eu-west-1.rds.amazonaws.com:6543/postgres\" BraininkUsername=\"www.BrainInk@gmail.com\" BraininkSenderEmail=\"www.BrainInk@gmail.com\" AccessTokenExpireMinutes=\"1440\" Environment=\"Production\" Debug=\"false\" GoogleClientId=\"969723698837-9aepndmu033gu0bk3gdrb6o1707mknp6.apps.googleusercontent.com\" KanaBaseUrl=\"http://localhost:10000\" ViteGoogleClientId=\"969723698837-9aepndmu033gu0bk3gdrb6o1707mknp6.apps.googleusercontent.com\" ViteApiBaseUrl=\"http://localhost:8000\" ViteOcrServiceUrl=\"http://localhost:8001\" ViteKanaApiBaseUrl=\"https://kana-backend-app.onrender.com/api/kana\" KanaApiUrl=\"https://kana-backend-app.onrender.com\" ViteAgentApiBaseUrl=\"https://brainink.onrender.com\" AgentApiBaseUrl=\"https://kana-backend-app.onrender.com\" AgentSystemEnabled=\"true\" BraininkAgentPort=\"443\" BraininkAgentUrl=\"https://brainink.onrender.com\""
+image_repositories = ["UsersFunction=503515996770.dkr.ecr.eu-west-1.amazonaws.com/braininkusersmicro41a62968/usersfunctiond9d734f6repo"]
