@@ -400,41 +400,54 @@ class ReadingAssistantService:
             
             print("🤖 Requesting transcription from Gemini...")
             
-            try:
-                response = await asyncio.to_thread(
-                    self.gemini_service.config.model.generate_content,
-                    [uploaded_file, transcription_prompt],
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.0,  # Maximum literal transcription
-                        max_output_tokens=512
-                    )
-                )
-                
-                transcribed_text = response.text.strip()
-                
-            except Exception as e:
-                if "finish_reason" in str(e) and "2" in str(e):
-                    # Safety filter blocked - try with minimal prompt
-                    print(f"⚠️ Detailed prompt blocked by safety filter. Retrying with simple prompt...")
-                    
-                    simple_prompt = """
-                    Transcribe this audio of a child reading aloud.
-                    Write exactly what you hear, including any mispronunciations.
-                    Do not correct errors. This is for educational assessment.
-                    Return only the transcribed text.
-                    """
+            # Explicitly disable ALL safety filters
+            safety_settings = [
+                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+            ]
+            
+            # Try progressively simpler prompts if safety filter blocks
+            prompts_to_try = [
+                transcription_prompt,  # Detailed phonetic prompt
+                "Transcribe this audio. Write exactly what you hear.",  # Simple
+                "Transcribe this audio file."  # Minimal
+            ]
+            
+            transcribed_text = None
+            for attempt, prompt_text in enumerate(prompts_to_try, 1):
+                try:
+                    if attempt > 1:
+                        print(f"⚠️ Attempt {attempt}: Trying simpler prompt...")
                     
                     response = await asyncio.to_thread(
                         self.gemini_service.config.model.generate_content,
-                        [uploaded_file, simple_prompt],
+                        [uploaded_file, prompt_text],
                         generation_config=genai.types.GenerationConfig(
                             temperature=0.0,
                             max_output_tokens=512
-                        )
+                        ),
+                        safety_settings=safety_settings
                     )
+                    
                     transcribed_text = response.text.strip()
-                else:
-                    raise e
+                    print(f"✅ Transcription successful with prompt attempt {attempt}")
+                    break
+                    
+                except Exception as e:
+                    if "finish_reason" in str(e) and "2" in str(e):
+                        if attempt < len(prompts_to_try):
+                            print(f"⚠️ Safety filter blocked attempt {attempt}. Trying next...")
+                            continue
+                        else:
+                            print(f"❌ All transcription attempts blocked by safety filter")
+                            raise Exception("Safety filter blocked all transcription attempts")
+                    else:
+                        raise e
+            
+            if not transcribed_text:
+                raise Exception("Transcription failed - no text generated")
             
             print(f"🎯 Gemini transcription result: '{transcribed_text}'")
             
