@@ -63,9 +63,6 @@ comprehensive_fix.py
 tests/
 test_*.py
 
-# Uploads (exclude from Docker image)
-uploads/
-
 # Temporary files
 *.tmp
 *.temp
