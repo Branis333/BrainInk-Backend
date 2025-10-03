@@ -20,7 +20,18 @@ phases:
   post_build:
     commands:
       - echo Starting deployment...
-      - cd $CODEBUILD_SRC_DIR/users_micro && sam deploy --config-env prod --no-confirm-changeset && echo "SAM deploy completed successfully"
+      - |
+        cd $CODEBUILD_SRC_DIR/users_micro && sam deploy --config-env prod --no-confirm-changeset --parameter-overrides \
+        SecretKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .SECRET_KEY) \
+        SecretKeyData=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .SECRET_KEY_DATA) \
+        DbPassword=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .DB_PASSWORD) \
+        BraininkPassword=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .BRAININK_PASSWORD) \
+        OpenaiApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .OPENAI_API_KEY) \
+        GoogleApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .GOOGLE_API_KEY) \
+        CoreApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .CORE_API_KEY) \
+        AgentApiKey=$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .AGENT_API_KEY) \
+        DatabaseUrl="postgresql://postgres:$(aws secretsmanager get-secret-value --secret-id brainink-secret-prod --query SecretString --output text | jq -r .DB_PASSWORD)@prod-db.cdi20mcii7vt.eu-west-1.rds.amazonaws.com:6543/postgres" \
+        && echo "SAM deploy completed successfully"
 
 artifacts:
   files:
