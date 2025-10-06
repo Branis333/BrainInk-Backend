@@ -272,27 +272,28 @@ async def create_pdf_from_images(files: List[UploadFile], pdf_filename: str) -> 
 async def bulk_upload_images_to_pdf_session(
     db: db_dependency,
     current_user: dict = user_dependency,
-    session_id: int = Form(..., description="Study session ID"),
+    course_id: int = Form(..., description="Course ID"),
     submission_type: str = Form("homework", description="Type of submission"),
     files: List[UploadFile] = File(..., description="Multiple image files to combine into PDF"),
-    # New contextual metadata
-    course_id: Optional[int] = Form(None, description="Course ID (optional, can be derived from session)"),
-    lesson_id: Optional[int] = Form(None, description="Lesson ID (optional, can be derived from session)"),
-    block_id: Optional[int] = Form(None, description="Block ID (optional, can be derived from session)"),
+    # Contextual metadata
+    lesson_id: Optional[int] = Form(None, description="Lesson ID (for legacy courses)"),
+    block_id: Optional[int] = Form(None, description="Block ID (for AI-generated courses)"),
     assignment_id: Optional[int] = Form(None, description="Assignment ID (optional)"),
     storage_mode: str = Form("database", description="Storage mode: 'database' (default)"),
     skip_db: bool = Form(False, description="If true, only generate PDF and return; do not persist (debug)")
 ):
     """
-    Upload multiple image files for a study session and combine them into a single PDF.
+    Upload multiple image files for a course block and combine them into a single PDF.
     
-    - **session_id**: Study session the images belong to
+    - **course_id**: Course ID (required)
+    - **block_id**: Block ID (for AI-generated courses)
+    - **lesson_id**: Lesson ID (for legacy courses)
     - **submission_type**: Type of submission (homework, quiz, practice, assessment)
     - **files**: List of image files (JPG, PNG, GIF, BMP, WEBP)
     - Returns: PDF file containing all images as separate pages
     
     The API will:
-    1. Validate user access to study session
+    1. Validate user access to course and block/lesson
     2. Validate all uploaded files are images
     3. Convert and resize images to fit PDF pages
     4. Combine all images into a single PDF document
@@ -303,27 +304,45 @@ async def bulk_upload_images_to_pdf_session(
     try:
         user_id = current_user["user_id"]
         
-        # Get and validate study session
-        session = db.query(StudySession).options(
-            joinedload(StudySession.course),
-            joinedload(StudySession.lesson),
-            joinedload(StudySession.block)
-        ).filter(
-            StudySession.id == session_id,
-            StudySession.user_id == user_id
-        ).first()
+        # Validate that either lesson_id or block_id is provided
+        if not lesson_id and not block_id:
+            raise HTTPException(status_code=400, detail="Either lesson_id or block_id must be provided")
         
-        if not session:
+        # Get and validate course
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Study session not found or doesn't belong to you"
+                detail="Course not found"
             )
         
-        if session.status != "in_progress":
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Can only submit work for active study sessions"
-            )
+        # Validate block or lesson exists and belongs to the course
+        block = None
+        lesson = None
+        
+        if block_id:
+            block = db.query(CourseBlock).filter(
+                CourseBlock.id == block_id,
+                CourseBlock.course_id == course_id,
+                CourseBlock.is_active == True
+            ).first()
+            if not block:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course block not found or inactive"
+                )
+        
+        if lesson_id:
+            lesson = db.query(CourseLesson).filter(
+                CourseLesson.id == lesson_id,
+                CourseLesson.course_id == course_id,
+                CourseLesson.is_active == True
+            ).first()
+            if not lesson:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Course lesson not found or inactive"
+                )
         
         # Validate that files are provided
         if not files:
@@ -362,16 +381,19 @@ async def bulk_upload_images_to_pdf_session(
             except Exception:
                 pass
         
-        # Generate PDF filename (support lesson- or block-anchored sessions)
-        course_title = session.course.title.replace(" ", "_").replace("/", "_")
-        if session.lesson is not None:
-            anchor_title = session.lesson.title.replace(" ", "_").replace("/", "_")
-        elif getattr(session, 'block', None) is not None:
-            anchor_title = f"week{session.block.week}_block{session.block.block_number}_" + session.block.title.replace(" ", "_").replace("/", "_")
+        # Generate PDF filename (support lesson- or block-anchored uploads)
+        course_title = course.title.replace(" ", "_").replace("/", "_")
+        if lesson is not None:
+            anchor_title = lesson.title.replace(" ", "_").replace("/", "_")
+            upload_id = f"lesson_{lesson_id}"
+        elif block is not None:
+            anchor_title = f"week{block.week}_block{block.block_number}_" + block.title.replace(" ", "_").replace("/", "_")
+            upload_id = f"block_{block_id}"
         else:
-            anchor_title = "session"
+            anchor_title = "upload"
+            upload_id = "unknown"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_filename = f"session_{session_id}_{course_title}_{anchor_title}_{timestamp}.pdf"
+        pdf_filename = f"{upload_id}_{course_title}_{anchor_title}_{timestamp}.pdf"
         
         # Create PDF from images (returns bytes and hash)
         try:
@@ -396,7 +418,7 @@ async def bulk_upload_images_to_pdf_session(
             )
 
         # Save PDF file to uploads directory
-        unique_filename = generate_unique_filename(pdf_filename, user_id, session_id)
+        unique_filename = generate_unique_filename(pdf_filename, user_id, block_id or lesson_id or 0)
         file_path = UPLOAD_DIR / unique_filename
         
         try:
@@ -405,24 +427,20 @@ async def bulk_upload_images_to_pdf_session(
         except Exception as save_err:
             raise HTTPException(status_code=500, detail=f"Failed to save PDF file: {save_err}")
         
-        # Create AI submission record
-        # Use provided parameters or fall back to session values
-        final_course_id = course_id if course_id is not None else session.course_id
-        final_lesson_id = lesson_id if lesson_id is not None else session.lesson_id
-        final_block_id = block_id if block_id is not None else session.block_id
-        
+        # Create AI submission record without session dependency
         submission = AISubmission(
             user_id=user_id,
-            course_id=final_course_id,
-            lesson_id=final_lesson_id,
-            block_id=final_block_id,
-            session_id=session_id,
+            course_id=course_id,
+            lesson_id=lesson_id,
+            block_id=block_id,
+            session_id=None,  # Not using sessions for this workflow
             assignment_id=assignment_id,
             submission_type=submission_type,
             original_filename=pdf_filename,
             file_path=str(file_path),
             file_type="pdf",
-            ai_processed=False
+            ai_processed=False,
+            submitted_at=datetime.utcnow()
         )
         
         db.add(submission)
@@ -471,19 +489,7 @@ async def bulk_upload_images_to_pdf_session(
             print(f"AI grading error: {ai_err}")
             ai_results = {"error": str(ai_err)}
         
-        # Update study session with latest score and feedback (only if grading succeeded)
-        ai_score_value = ai_results.get("ai_score") if isinstance(ai_results, dict) else None
-        ai_feedback_val = ai_results.get("ai_feedback") if isinstance(ai_results, dict) else None
-        ai_impr_val = ai_results.get("ai_improvements") if isinstance(ai_results, dict) else None
-        if ai_score_value is not None:
-            session.ai_score = ai_score_value
-        if ai_feedback_val:
-            session.ai_feedback = ai_feedback_val
-        if ai_impr_val:
-            session.ai_recommendations = ai_impr_val
-        # Always bump updated_at
-        session.updated_at = datetime.utcnow()
-        
+        # Commit the submission to database
         db.commit()
         
         # Return JSON summary instead of raw PDF content to better support mobile clients
