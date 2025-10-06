@@ -456,39 +456,42 @@ async def upload_reading_audio(
         ]
 
         # Generate pronunciation audio for incorrect words
+        # 🔇 TTS TEMPORARILY DISABLED - waiting for Google Cloud TTS API to be enabled
         pronunciation_urls = {}
-        if hasattr(analysis_result, 'word_accuracy'):
-            incorrect_words = [
-                {
-                    "word": wa.spoken_word or "unknown", 
-                    "target_word": wa.target_word,
-                    "phonetic_tip": wa.pronunciation_tip or f"Say '{wa.target_word}' clearly"
-                }
-                for wa in analysis_result.word_accuracy 
-                if not wa.is_correct and wa.target_word
-            ]
-            
-            if incorrect_words:
-                # Generate pronunciation for words that need correction
-                try:
-                    for word_data in incorrect_words[:5]:  # Limit to 5 words to avoid overload
-                        target_word = word_data["target_word"]
-                        phonetic_tip = word_data["phonetic_tip"]
-                        
-                        pronunciation_result = await tts_service.generate_word_pronunciation(
-                            word=target_word,
-                            phonetic_hint=phonetic_tip
-                        )
-                        
-                        if pronunciation_result["success"]:
-                            pronunciation_urls[target_word] = {
-                                "audio_url": pronunciation_result["audio_url"],
-                                "duration_seconds": pronunciation_result["duration_seconds"],
-                                "instructions": f"Tap to hear how to say '{target_word}' correctly"
-                            }
-                except Exception as e:
-                    print(f"⚠️ Pronunciation generation warning: {e}")
-                    # Don't fail the whole request if TTS fails        # Clean up temporary file
+        # if hasattr(analysis_result, 'word_accuracy'):
+        #     incorrect_words = [
+        #         {
+        #             "word": wa.spoken_word or "unknown", 
+        #             "target_word": wa.target_word,
+        #             "phonetic_tip": wa.pronunciation_tip or f"Say '{wa.target_word}' clearly"
+        #         }
+        #         for wa in analysis_result.word_accuracy 
+        #         if not wa.is_correct and wa.target_word
+        #     ]
+        #     
+        #     if incorrect_words:
+        #         # Generate pronunciation for words that need correction
+        #         try:
+        #             for word_data in incorrect_words[:5]:  # Limit to 5 words to avoid overload
+        #                 target_word = word_data["target_word"]
+        #                 phonetic_tip = word_data["phonetic_tip"]
+        #                 
+        #                 pronunciation_result = await tts_service.generate_word_pronunciation(
+        #                     word=target_word,
+        #                     phonetic_hint=phonetic_tip
+        #                 )
+        #                 
+        #                 if pronunciation_result["success"]:
+        #                     pronunciation_urls[target_word] = {
+        #                         "audio_url": pronunciation_result["audio_url"],
+        #                         "duration_seconds": pronunciation_result["duration_seconds"],
+        #                         "instructions": f"Tap to hear how to say '{target_word}' correctly"
+        #                     }
+        #         except Exception as e:
+        #             print(f"⚠️ Pronunciation generation warning: {e}")
+        #             # Don't fail the whole request if TTS fails        
+        
+        # Clean up temporary file
         try:
             os.unlink(audio_path)
             os.rmdir(temp_dir)
