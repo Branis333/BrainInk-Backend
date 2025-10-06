@@ -287,6 +287,21 @@ class StudySessionEnd(BaseModel):
             raise ValueError(f'Status must be one of: {allowed_statuses}')
         return v
 
+class StudySessionMarkDone(BaseModel):
+    """Simple schema for marking a block/lesson as completed"""
+    course_id: int = Field(..., description="Course ID")
+    block_id: Optional[int] = Field(None, description="Block ID (for AI-generated courses)")
+    lesson_id: Optional[int] = Field(None, description="Lesson ID (for legacy courses)")
+    
+    @validator('lesson_id')
+    def validate_lesson_or_block(cls, v, values):
+        block_id = values.get('block_id')
+        if not v and not block_id:
+            raise ValueError('Either lesson_id or block_id must be provided')
+        if v and block_id:
+            raise ValueError('Cannot specify both lesson_id and block_id')
+        return v
+
 class StudySessionOut(BaseModel):
     id: int
     user_id: int

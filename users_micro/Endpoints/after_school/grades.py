@@ -15,7 +15,7 @@ from models.afterschool_models import (
     StudySession, AISubmission, StudentProgress
 )
 from schemas.afterschool_schema import (
-    StudySessionStart, StudySessionEnd, StudySessionOut,
+    StudySessionStart, StudySessionEnd, StudySessionOut, StudySessionMarkDone,
     AISubmissionUpdate, AIGradingResponse, StudentProgressOut, MessageResponse,
     CourseBlockOut, CourseAssignmentOut, StudentAssignmentOut
 )
@@ -30,45 +30,34 @@ user_dependency = Depends(get_current_user)
 # STUDY SESSION MANAGEMENT
 # ===============================
 
-@router.post("/start", response_model=StudySessionOut)
-async def start_study_session(
-    session_data: StudySessionStart,
+@router.post("/mark-done", response_model=StudySessionOut)
+async def mark_block_done(
+    session_data: StudySessionMarkDone,
     db: db_dependency,
     current_user: dict = user_dependency
 ):
     """
-    Start a new study session for a lesson or course block
+    Mark a block or lesson as completed - simple and user-friendly
     
-    This enhanced endpoint supports both traditional lessons and AI-generated course blocks:
-    - Legacy lesson-based sessions for backward compatibility
-    - Modern block-based sessions for Gemini AI-generated courses
-    - Automatic progress tracking for both formats
+    This simplified endpoint allows users to mark content as done:
+    - No time tracking complexity
+    - Simple mark done functionality
+    - Automatic progress tracking
+    - Sequential completion enforcement (previous blocks must be done first)
     """
     user_id = current_user["user_id"]
     
-    # Diagnostic logging container
-    debug_context = {
-        "user_id": current_user.get("user_id"),
-        "course_id": session_data.course_id,
-        "lesson_id": session_data.lesson_id,
-        "block_id": session_data.block_id,
-        "stage": "init"
-    }
     try:
-        debug_context["stage"] = "course_lookup"
+        # Verify course exists
         course = db.query(Course).filter(Course.id == session_data.course_id).first()
         if not course:
-            debug_context["error"] = "course_not_found"
-            print("❌ StudySession start - course not found", debug_context)
             raise HTTPException(status_code=404, detail="Course not found")
 
+        # Determine if working with lesson or block
         lesson = None
         block = None
-        session_target_type = None
-        active_session = None
-
+        
         if session_data.lesson_id:
-            debug_context["stage"] = "lesson_lookup"
             lesson = db.query(CourseLesson).filter(
                 and_(
                     CourseLesson.id == session_data.lesson_id,
@@ -77,19 +66,9 @@ async def start_study_session(
                 )
             ).first()
             if not lesson:
-                debug_context["error"] = "lesson_not_found"
-                print("❌ StudySession start - lesson not found", debug_context)
                 raise HTTPException(status_code=404, detail="Lesson not found or inactive")
-            session_target_type = "lesson"
-            active_session = db.query(StudySession).filter(
-                and_(
-                    StudySession.user_id == user_id,
-                    StudySession.lesson_id == session_data.lesson_id,
-                    StudySession.status == "in_progress"
-                )
-            ).first()
+                
         elif session_data.block_id:
-            debug_context["stage"] = "block_lookup"
             block = db.query(CourseBlock).filter(
                 and_(
                     CourseBlock.id == session_data.block_id,
@@ -98,127 +77,118 @@ async def start_study_session(
                 )
             ).first()
             if not block:
-                debug_context["error"] = "block_not_found"
-                print("❌ StudySession start - block not found", debug_context)
                 raise HTTPException(status_code=404, detail="Course block not found or inactive")
-            session_target_type = "block"
-            active_session = db.query(StudySession).filter(
-                and_(
-                    StudySession.user_id == user_id,
-                    StudySession.block_id == session_data.block_id,
-                    StudySession.status == "in_progress"
-                )
-            ).first()
+                
+            # Check if this is the very first block in the course (always accessible)
+            is_first_block = block.week == 1 and block.block_number == 1
+            
+            if not is_first_block:
+                # For any block that is NOT the very first one, check prerequisites
+                previous_completed = True
+                
+                if block.block_number > 1:
+                    # Check previous block in same week
+                    prev_block = db.query(CourseBlock).filter(
+                        and_(
+                            CourseBlock.course_id == session_data.course_id,
+                            CourseBlock.week == block.week,
+                            CourseBlock.block_number == block.block_number - 1,
+                            CourseBlock.is_active == True
+                        )
+                    ).first()
+                    if prev_block:
+                        prev_session = db.query(StudySession).filter(
+                            and_(
+                                StudySession.user_id == user_id,
+                                StudySession.block_id == prev_block.id,
+                                StudySession.status == "completed"
+                            )
+                        ).first()
+                        if not prev_session:
+                            previous_completed = False
+                            
+                elif block.week > 1:
+                    # Check last block of previous week
+                    prev_week_blocks = db.query(CourseBlock).filter(
+                        and_(
+                            CourseBlock.course_id == session_data.course_id,
+                            CourseBlock.week == block.week - 1,
+                            CourseBlock.is_active == True
+                        )
+                    ).order_by(CourseBlock.block_number.desc()).first()
+                    
+                    if prev_week_blocks:
+                        prev_session = db.query(StudySession).filter(
+                            and_(
+                                StudySession.user_id == user_id,
+                                StudySession.block_id == prev_week_blocks.id,
+                                StudySession.status == "completed"
+                            )
+                        ).first()
+                        if not prev_session:
+                            previous_completed = False
+                
+                if not previous_completed:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="You must complete the previous blocks first before accessing this one"
+                    )
         else:
-            debug_context["error"] = "missing_target"
-            print("❌ StudySession start - neither lesson_id nor block_id provided", debug_context)
             raise HTTPException(status_code=400, detail="Either lesson_id or block_id must be provided")
 
-        if active_session:
-            target_name = lesson.title if lesson else (block.title if block else "Unknown")
-            debug_context["stage"] = "active_session_exists_return"
-            print("↩️ Returning existing active session instead of error", debug_context)
-            return active_session
+        # Check if already completed
+        existing_session = db.query(StudySession).filter(
+            and_(
+                StudySession.user_id == user_id,
+                or_(
+                    and_(StudySession.lesson_id == session_data.lesson_id) if session_data.lesson_id else False,
+                    and_(StudySession.block_id == session_data.block_id) if session_data.block_id else False
+                ),
+                StudySession.status == "completed"
+            )
+        ).first()
+        
+        if existing_session:
+            return existing_session  # Already completed
 
-        # ---------------------------------------------
-        # Runtime schema self-healing for block sessions
-        # ---------------------------------------------
-        if session_target_type == "block" and session_data.block_id and not session_data.lesson_id:
-            try:
-                debug_context["stage"] = "schema_inspect"
-                insp = inspect(db.bind)
-                cols = {c['name']: c for c in insp.get_columns('as_study_sessions')}
-                changed = False
-                # Add block_id column if missing
-                if 'block_id' not in cols:
-                    print("🔧 Adding missing block_id column to as_study_sessions (runtime migration)")
-                    db.execute(text('ALTER TABLE as_study_sessions ADD COLUMN block_id INTEGER REFERENCES as_course_blocks(id)'))
-                    changed = True
-                # Drop NOT NULL from lesson_id if still enforced
-                if 'lesson_id' in cols and not cols['lesson_id'].get('nullable', True):
-                    print("🔧 Dropping NOT NULL constraint on lesson_id to allow block-based sessions")
-                    db.execute(text('ALTER TABLE as_study_sessions ALTER COLUMN lesson_id DROP NOT NULL'))
-                    changed = True
-                if changed:
-                    db.commit()  # finalize DDL
-                    debug_context["schema_auto_migrated"] = True
-                    # New transaction will begin automatically on next use
-                else:
-                    debug_context["schema_auto_migrated"] = False
-            except Exception as mig_err:
-                # Non-fatal: we surface a clearer error so user can run manual migration
-                debug_context["stage"] = "schema_migration_failed"
-                debug_context["schema_error"] = str(mig_err)[:400]
-                print("❌ Runtime schema migration failed", debug_context)
-                raise HTTPException(status_code=500, detail={
-                    "message": "Study session start failed: database schema incompatible (block sessions require nullable lesson_id & block_id column)",
-                    "code": "schema_incompatible",
-                    "schema_error": str(mig_err)[:400]
-                })
-
-        debug_context["stage"] = "create_session"
-        new_session = StudySession(
+        # Create completed session - simple mark done
+        completed_session = StudySession(
             user_id=user_id,
             course_id=session_data.course_id,
             lesson_id=session_data.lesson_id,
             block_id=session_data.block_id,
-            status="in_progress"
+            status="completed",
+            completion_percentage=100.0,
+            started_at=datetime.utcnow(),
+            ended_at=datetime.utcnow(),
+            marked_done_at=datetime.utcnow()
         )
-        db.add(new_session)
-        # Flush separately so we can surface raw integrity errors (e.g., FK / unique constraint)
-        try:
-            db.flush()  # obtain PK before progress update
-        except Exception as flush_err:
-            from sqlalchemy.exc import IntegrityError
-            debug_context["stage"] = "create_session_flush_error"
-            debug_context["flush_error_type"] = type(flush_err).__name__
-            debug_context["flush_error_message"] = str(flush_err)[:500]
-            if isinstance(flush_err, IntegrityError):
-                # Attempt to capture underlying DB error / constraint name
-                orig = getattr(flush_err, 'orig', None)
-                if orig:
-                    debug_context["flush_error_orig"] = str(orig)[:500]
-            print("❌ StudySession flush failure", debug_context)
-            # Re-raise so outer handler classifies
-            raise
+        db.add(completed_session)
+        db.flush()  # Get session ID
 
-        debug_context["stage"] = "progress_lookup"
-        # Attempt row-level lock; fallback gracefully if unsupported (e.g., SQLite)
-        progress = None
-        try:
-            progress = db.query(StudentProgress).filter(
-                and_(
-                    StudentProgress.user_id == user_id,
-                    StudentProgress.course_id == session_data.course_id
-                )
-            ).with_for_update(nowait=False).first()
-            debug_context["progress_lock"] = "acquired"
-        except Exception as lock_err:  # Broad: dialect differences
-            db.rollback()  # rollback possible partial state from failed FOR UPDATE
-            debug_context["progress_lock"] = f"lock_failed:{type(lock_err).__name__}"
-            # Retry without FOR UPDATE in a fresh transaction
-            progress = db.query(StudentProgress).filter(
-                and_(
-                    StudentProgress.user_id == user_id,
-                    StudentProgress.course_id == session_data.course_id
-                )
-            ).first()
-            debug_context["progress_lock_fallback"] = True
+        # Update or create student progress
+        progress = db.query(StudentProgress).filter(
+            and_(
+                StudentProgress.user_id == user_id,
+                StudentProgress.course_id == session_data.course_id
+            )
+        ).first()
 
         if not progress:
-            debug_context["stage"] = "progress_seed"
+            # Count total content items for this course
             total_lessons = db.query(CourseLesson).filter(
                 and_(CourseLesson.course_id == session_data.course_id, CourseLesson.is_active == True)
             ).count()
             total_blocks = db.query(CourseBlock).filter(
                 and_(CourseBlock.course_id == session_data.course_id, CourseBlock.is_active == True)
             ).count()
-            total_content_items = total_blocks if total_blocks > 0 else total_lessons
+            
             progress = StudentProgress(
                 user_id=user_id,
                 course_id=session_data.course_id,
-                total_lessons=total_content_items or 0,
-                lessons_completed=0,
+                total_lessons=total_blocks if total_blocks > 0 else total_lessons,
+                blocks_completed=1 if session_data.block_id else 0,
+                lessons_completed=1 if session_data.lesson_id else 0,
                 completion_percentage=0.0,
                 sessions_count=1,
                 total_study_time=0,
@@ -227,168 +197,135 @@ async def start_study_session(
             )
             db.add(progress)
         else:
+            # Update progress - increment completed count
+            if session_data.block_id:
+                progress.blocks_completed += 1
+            else:
+                progress.lessons_completed += 1
+                
             progress.sessions_count += 1
             progress.last_activity = datetime.utcnow()
-        try:
-            db.commit()
-        except Exception as commit_err:
-            debug_context["stage"] = "commit_failure"
-            debug_context["commit_error_type"] = type(commit_err).__name__
-            debug_context["commit_error"] = str(commit_err)[:200]
-            print("❌ StudySession commit failure", debug_context)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            # Re-raise to outer handler
-            raise
-        db.refresh(new_session)
+            
+        # Recalculate completion percentage
+        if progress.total_lessons > 0:
+            completed_count = progress.blocks_completed if session_data.block_id else progress.lessons_completed
+            progress.completion_percentage = (completed_count / progress.total_lessons) * 100
+            
+        # Check if course is complete
+        if progress.completion_percentage >= 100:
+            progress.completed_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(completed_session)
 
         target_info = lesson.title if lesson else (f"Block {block.week}.{block.block_number}: {block.title}" if block else "Unknown")
-        print(f"📚 Started {session_target_type} session: '{target_info}' for user {user_id} (session_id={new_session.id})")
-        return new_session
+        print(f"✅ Marked done: '{target_info}' for user {user_id}")
+        return completed_session
     except HTTPException:
         db.rollback()
         raise
     except Exception as e:
-        # Attempt specific DB error classification
-        from sqlalchemy.exc import OperationalError, IntegrityError, ProgrammingError
-        internal_code = None
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        if isinstance(e, IntegrityError):
-            internal_code = "integrity_error"
-        elif isinstance(e, OperationalError):
-            internal_code = "operational_error"
-        elif isinstance(e, ProgrammingError):
-            internal_code = "programming_error"
-        else:
-            internal_code = type(e).__name__
-        debug_context["error_type"] = internal_code
-        debug_context["error_message"] = str(e)[:500]
-        print("❌ StudySession start failure", debug_context)
-        import traceback
-        traceback.print_exc()
-        # Surface a structured diagnostic while keeping 500 semantics
-        raise HTTPException(status_code=500, detail={
-            "message": "Study session start failed",
-            "code": internal_code,
-            "stage": debug_context.get("stage"),
-            "progress_lock": debug_context.get("progress_lock"),
-            "commit_error": debug_context.get("commit_error"),
-            # Additional diagnostic exposure
-            "error_message": debug_context.get("error_message"),
-            "flush_error_type": debug_context.get("flush_error_type"),
-            "flush_error_message": debug_context.get("flush_error_message"),
-            "flush_error_orig": debug_context.get("flush_error_orig")
-        })
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to mark content as done: {str(e)}")
 
-@router.put("/{session_id}/end", response_model=StudySessionOut)
-async def end_study_session(
-    session_id: int,
-    session_data: StudySessionEnd,
+@router.get("/blocks/{block_id}/availability")
+async def check_block_availability(
+    block_id: int,
     db: db_dependency,
     current_user: dict = user_dependency
 ):
     """
-    End a study session and record completion
+    Check if a block is available for the current user.
+    Returns availability status and reason if not available.
     """
     user_id = current_user["user_id"]
     
-    # Get the study session
-    session = db.query(StudySession).filter(
+    # Get the block
+    block = db.query(CourseBlock).filter(CourseBlock.id == block_id).first()
+    if not block:
+        raise HTTPException(status_code=404, detail="Block not found")
+    
+    # Check if already completed
+    existing_session = db.query(StudySession).filter(
         and_(
-            StudySession.id == session_id,
-            StudySession.user_id == user_id
+            StudySession.user_id == user_id,
+            StudySession.block_id == block_id,
+            StudySession.status == "completed"
         )
     ).first()
     
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Study session not found"
-        )
+    if existing_session:
+        return {
+            "available": True,
+            "completed": True,
+            "reason": "Block already completed"
+        }
     
-    if session.status != "in_progress":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session is not in progress"
-        )
+    # Very first block in course is always available
+    is_first_block = block.week == 1 and block.block_number == 1
+    if is_first_block:
+        return {
+            "available": True,
+            "completed": False,
+            "reason": "First block in course - always available"
+        }
     
-    # Calculate duration
-    duration = datetime.utcnow() - session.started_at
-    duration_minutes = int(duration.total_seconds() / 60)
+    # For any other block, check prerequisites
+    previous_completed = True
+    missing_prerequisite = None
     
-    # Update session
-    session.ended_at = datetime.utcnow()
-    session.duration_minutes = duration_minutes
-    session.status = session_data.status
-    session.completion_percentage = session_data.completion_percentage
-    session.updated_at = datetime.utcnow()
-    
-    # Update student progress
-    progress = db.query(StudentProgress).filter(
-        and_(
-            StudentProgress.user_id == user_id,
-            StudentProgress.course_id == session.course_id
-        )
-    ).first()
-    
-    if progress:
-        progress.total_study_time += duration_minutes
-        progress.last_activity = datetime.utcnow()
+    if block.block_number > 1:
+        # Check previous block in same week
+        prev_block = db.query(CourseBlock).filter(
+            and_(
+                CourseBlock.course_id == block.course_id,
+                CourseBlock.week == block.week,
+                CourseBlock.block_number == block.block_number - 1,
+                CourseBlock.is_active == True
+            )
+        ).first()
         
-        # If lesson or block completed, update completion count
-        if session_data.completion_percentage >= 100:
-            # Check if this lesson or block was already completed
-            completed_before = None
+        if prev_block:
+            prev_session = db.query(StudySession).filter(
+                and_(
+                    StudySession.user_id == user_id,
+                    StudySession.block_id == prev_block.id,
+                    StudySession.status == "completed"
+                )
+            ).first()
             
-            if session.lesson_id:
-                # Traditional lesson-based completion
-                completed_before = db.query(StudySession).filter(
-                    and_(
-                        StudySession.user_id == user_id,
-                        StudySession.lesson_id == session.lesson_id,
-                        StudySession.completion_percentage >= 100,
-                        StudySession.id != session_id
-                    )
-                ).first()
-            elif session.block_id:
-                # AI-generated course block completion
-                completed_before = db.query(StudySession).filter(
-                    and_(
-                        StudySession.user_id == user_id,
-                        StudySession.block_id == session.block_id,
-                        StudySession.completion_percentage >= 100,
-                        StudySession.id != session_id
-                    )
-                ).first()
+            if not prev_session:
+                previous_completed = False
+                missing_prerequisite = f"Block {prev_block.week}.{prev_block.block_number}: {prev_block.title}"
+                
+    elif block.week > 1:
+        # Check last block of previous week
+        prev_week_blocks = db.query(CourseBlock).filter(
+            and_(
+                CourseBlock.course_id == block.course_id,
+                CourseBlock.week == block.week - 1,
+                CourseBlock.is_active == True
+            )
+        ).order_by(CourseBlock.block_number.desc()).first()
+        
+        if prev_week_blocks:
+            prev_session = db.query(StudySession).filter(
+                and_(
+                    StudySession.user_id == user_id,
+                    StudySession.block_id == prev_week_blocks.id,
+                    StudySession.status == "completed"
+                )
+            ).first()
             
-            if not completed_before:
-                progress.lessons_completed += 1
-                progress.completion_percentage = (progress.lessons_completed / progress.total_lessons) * 100
-                
-                # Log completion based on type
-                if session.lesson_id:
-                    lesson = db.query(CourseLesson).filter(CourseLesson.id == session.lesson_id).first()
-                    content_name = lesson.title if lesson else f"Lesson {session.lesson_id}"
-                else:
-                    block = db.query(CourseBlock).filter(CourseBlock.id == session.block_id).first()
-                    content_name = f"Block {block.week}.{block.block_number}: {block.title}" if block else f"Block {session.block_id}"
-                
-                print(f"✅ Content completed: '{content_name}' for user {user_id} ({progress.lessons_completed}/{progress.total_lessons})")
-                
-                # Check if course is fully completed
-                if progress.completion_percentage >= 100:
-                    progress.completed_at = datetime.utcnow()
-                    print(f"🎉 Course completed by user {user_id}!")
+            if not prev_session:
+                previous_completed = False
+                missing_prerequisite = f"Block {prev_week_blocks.week}.{prev_week_blocks.block_number}: {prev_week_blocks.title}"
     
-    db.commit()
-    db.refresh(session)
-    
-    return session
+    return {
+        "available": previous_completed,
+        "completed": False,
+        "reason": f"Must complete {missing_prerequisite} first" if not previous_completed else "Available"
+    }
 
 @router.get("/", response_model=List[StudySessionOut])
 async def get_user_sessions(
@@ -417,8 +354,84 @@ async def get_user_sessions(
 # ===============================
 # PROGRESS TRACKING ENDPOINTS (must be before /{session_id} route)
 # ===============================
-# Note: Session submissions are managed through /after-school/uploads/sessions/{session_id}/submissions
-# This avoids duplicate endpoints and provides better filtering options
+
+@router.get("/course/{course_id}/blocks-progress")
+async def get_course_blocks_progress(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get user's progress through all blocks in a course with completion status
+    """
+    user_id = current_user["user_id"]
+    
+    # Get all blocks for this course, ordered by week and block number
+    blocks = db.query(CourseBlock).filter(
+        and_(
+            CourseBlock.course_id == course_id,
+            CourseBlock.is_active == True
+        )
+    ).order_by(CourseBlock.week, CourseBlock.block_number).all()
+    
+    if not blocks:
+        raise HTTPException(status_code=404, detail="No blocks found for this course")
+    
+    # Get all completed sessions for this user and course
+    completed_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id,
+            StudySession.status == "completed"
+        )
+    ).all()
+    
+    # Create a set of completed block IDs for quick lookup
+    completed_block_ids = {session.block_id for session in completed_sessions if session.block_id}
+    
+    # Build response with availability logic
+    blocks_progress = []
+    for i, block in enumerate(blocks):
+        is_completed = block.id in completed_block_ids
+        
+        # Determine availability
+        is_available = False
+        if i == 0:  # First block is always available
+            is_available = True
+        elif is_completed:  # Already completed blocks are available
+            is_available = True
+        else:  # Check if previous block is completed
+            prev_block = blocks[i-1]
+            if prev_block.id in completed_block_ids:
+                is_available = True
+        
+        blocks_progress.append({
+            "block_id": block.id,
+            "week": block.week,
+            "block_number": block.block_number,
+            "title": block.title,
+            "description": block.description,
+            "duration_minutes": block.duration_minutes,
+            "is_completed": is_completed,
+            "is_available": is_available,
+            "completed_at": next(
+                (session.marked_done_at or session.ended_at for session in completed_sessions 
+                 if session.block_id == block.id), None
+            )
+        })
+    
+    # Calculate overall progress
+    total_blocks = len(blocks)
+    completed_count = len(completed_block_ids)
+    completion_percentage = (completed_count / total_blocks * 100) if total_blocks > 0 else 0
+    
+    return {
+        "course_id": course_id,
+        "total_blocks": total_blocks,
+        "completed_blocks": completed_count,
+        "completion_percentage": completion_percentage,
+        "blocks": blocks_progress
+    }
 
 @router.get("/progress", response_model=List[StudentProgressOut])
 async def get_student_progress(
@@ -1226,16 +1239,46 @@ async def auto_grade_assignment_submission(
             submission_type=assignment.assignment_type
         )
         
+        # Count attempts in last 24 hours
+        current_time = datetime.utcnow()
+        twenty_four_hours_ago = current_time - timedelta(hours=24)
+        
+        # Count recent AI submissions for this assignment
+        recent_attempts = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).count()
+        
+        attempts_today = recent_attempts + 1  # Include current attempt
+        
         # Update student assignment with AI grade
         student_assignment.ai_grade = grade_result["percentage"]
         student_assignment.grade = grade_result["percentage"]  # AI grade is final grade
         student_assignment.feedback = grade_result["detailed_feedback"]
-        student_assignment.submitted_at = datetime.utcnow()
-        student_assignment.status = "graded"
+        student_assignment.submitted_at = current_time
         student_assignment.submission_content = submission_content[:1000]  # Store truncated content
         if submission_file_path:
             student_assignment.submission_file_path = submission_file_path
-        student_assignment.updated_at = datetime.utcnow()
+        student_assignment.updated_at = current_time
+        
+        # Determine pass/fail based on 80% threshold
+        passing_grade = grade_result["percentage"] >= 80.0
+        
+        if passing_grade:
+            student_assignment.status = "passed"
+            status_message = f"Congratulations! You passed with {grade_result['percentage']:.1f}%"
+        else:
+            # Failed - check retry attempts
+            if attempts_today >= 3:
+                student_assignment.status = "failed"
+                status_message = f"Assignment failed with {grade_result['percentage']:.1f}%. Maximum attempts (3) reached in 24 hours."
+            else:
+                student_assignment.status = "needs_retry"
+                remaining_attempts = 3 - attempts_today
+                status_message = f"Score: {grade_result['percentage']:.1f}% - Try again! You need 80% to pass. {remaining_attempts} attempts remaining today."
         
         # Update any associated AI submission record
         ai_submission = db.query(AISubmission).filter(
@@ -1259,7 +1302,7 @@ async def auto_grade_assignment_submission(
         
         return {
             "status": "success",
-            "message": "Assignment automatically graded by Gemini AI",
+            "message": status_message,
             "assignment": {
                 "id": assignment.id,
                 "title": assignment.title,
@@ -1273,14 +1316,18 @@ async def auto_grade_assignment_submission(
                 "detailed_feedback": grade_result["detailed_feedback"],
                 "strengths": grade_result.get("strengths", []),
                 "improvements": grade_result.get("improvements", []),
-                "recommendations": grade_result.get("recommendations", [])
+                "recommendations": grade_result.get("recommendations", []),
+                "passing_grade": passing_grade,
+                "required_percentage": 80.0
             },
             "student_assignment": {
                 "id": student_assignment.id,
                 "status": student_assignment.status,
                 "grade": student_assignment.grade,
                 "submitted_at": student_assignment.submitted_at.isoformat(),
-                "graded_by": "Gemini AI"
+                "graded_by": "Gemini AI",
+                "can_retry": not passing_grade and attempts_today < 3,
+                "attempts_remaining": max(0, 3 - attempts_today) if not passing_grade else 0
             },
             "processed_at": datetime.utcnow().isoformat()
         }
@@ -1292,6 +1339,173 @@ async def auto_grade_assignment_submission(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Auto-grading failed: {str(e)}"
+        )
+
+@router.post("/assignments/{assignment_id}/retry")
+async def retry_assignment_attempt(
+    assignment_id: int,
+    submission_data: dict,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Handle assignment retry attempts with proper validation
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Check eligibility before allowing retry
+        student_assignment = db.query(StudentAssignment).filter(
+            and_(
+                StudentAssignment.assignment_id == assignment_id,
+                StudentAssignment.user_id == user_id
+            )
+        ).first()
+        
+        if not student_assignment:
+            raise HTTPException(status_code=404, detail="Student assignment not found")
+        
+        # Check if already passed
+        current_grade = student_assignment.grade or 0
+        if current_grade >= 80.0:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Assignment already passed with {current_grade:.1f}%"
+            )
+        
+        # Count attempts in last 24 hours
+        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+        recent_attempts = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).count()
+        
+        if recent_attempts >= 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
+            )
+        
+        # Proceed with auto-grading
+        grade_response = await auto_grade_assignment_submission(
+            assignment_id, submission_data, db, current_user
+        )
+        
+        # Add retry context to response
+        grade_response["retry_info"] = {
+            "is_retry_attempt": True,
+            "attempts_used": recent_attempts + 1,
+            "attempts_remaining": max(0, 2 - recent_attempts)
+        }
+        
+        return grade_response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Retry attempt failed: {str(e)}"
+        )
+
+@router.get("/assignments/{assignment_id}/status")
+async def get_assignment_status_with_grade(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get assignment status with grade display and retry information
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Get the assignment details
+        assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        # Get the student assignment record
+        student_assignment = db.query(StudentAssignment).filter(
+            and_(
+                StudentAssignment.assignment_id == assignment_id,
+                StudentAssignment.user_id == user_id
+            )
+        ).first()
+        
+        if not student_assignment:
+            return {
+                "assignment": {
+                    "id": assignment.id,
+                    "title": assignment.title,
+                    "description": assignment.description,
+                    "points": assignment.points,
+                    "due_date": assignment.due_days_after_assignment
+                },
+                "status": "not_started",
+                "grade": None,
+                "message": "Assignment not yet started",
+                "can_retry": False
+            }
+        
+        # Calculate current status
+        current_grade = student_assignment.grade or 0
+        passing_grade = current_grade >= 80.0
+        
+        # Count attempts in last 24 hours
+        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+        recent_attempts = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).count()
+        
+        attempts_remaining = max(0, 3 - recent_attempts)
+        can_retry = not passing_grade and attempts_remaining > 0
+        
+        # Determine message based on status
+        if passing_grade:
+            message = f"✅ Passed with {current_grade:.1f}%! Great job!"
+        elif student_assignment.status == "failed":
+            message = f"❌ Failed with {current_grade:.1f}%. No more attempts available today."
+        elif student_assignment.status == "needs_retry":
+            message = f"📝 Score: {current_grade:.1f}% (Need 80% to pass). {attempts_remaining} attempts remaining today."
+        else:
+            message = f"Score: {current_grade:.1f}%"
+        
+        return {
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "description": assignment.description,
+                "points": assignment.points,
+                "required_percentage": 80.0
+            },
+            "student_assignment": {
+                "id": student_assignment.id,
+                "status": student_assignment.status,
+                "grade": current_grade,
+                "submitted_at": student_assignment.submitted_at.isoformat() if student_assignment.submitted_at else None,
+                "feedback": student_assignment.feedback
+            },
+            "attempts_info": {
+                "attempts_used": recent_attempts,
+                "attempts_remaining": attempts_remaining,
+                "can_retry": can_retry
+            },
+            "message": message,
+            "passing_grade": passing_grade
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting assignment status: {str(e)}"
         )
 
 @router.post("/submissions/{submission_id}/process-with-ai")

@@ -1,5 +1,17 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float, UniqueConstraint, CheckConstraint, JSON
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Text,
+    DateTime,
+    Boolean,
+    ForeignKey,
+    Float,
+    UniqueConstraint,
+    CheckConstraint,
+    JSON,
+)
 from sqlalchemy.orm import relationship
 from db.database import Base
 
@@ -127,16 +139,22 @@ class StudySession(Base):
     # Session tracking
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime, nullable=True)
-    duration_minutes = Column(Integer, nullable=True)  # calculated when session ends
+    duration_minutes = Column(Integer, nullable=True)  # legacy field
     
     # AI Scoring and Feedback
     ai_score = Column(Float, nullable=True)  # 0-100 score from AI
     ai_feedback = Column(Text, nullable=True)  # AI generated feedback
     ai_recommendations = Column(Text, nullable=True)  # AI suggestions for improvement
     
-    # Session status
-    status = Column(String(20), nullable=False, default="in_progress")  # in_progress, completed, abandoned
-    completion_percentage = Column(Float, nullable=False, default=0.0)  # 0-100
+    # Session status simplified for mark-done flow
+    status = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+        doc="pending, in_progress, completed",
+    )
+    completion_percentage = Column(Float, nullable=False, default=0.0)
+    marked_done_at = Column(DateTime, nullable=True)
     
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -241,6 +259,8 @@ class StudentProgress(Base):
     lessons_completed = Column(Integer, nullable=False, default=0)
     total_lessons = Column(Integer, nullable=False, default=0)
     completion_percentage = Column(Float, nullable=False, default=0.0)
+    blocks_completed = Column(Integer, nullable=False, default=0)
+    total_blocks = Column(Integer, nullable=False, default=0)
     
     # Performance metrics
     average_score = Column(Float, nullable=True)
