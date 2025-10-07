@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File, Form, Query
 from fastapi.responses import Response, JSONResponse
 from typing import List, Optional
@@ -497,27 +497,39 @@ async def bulk_upload_images_to_pdf_session(
                     StudentAssignment.user_id == user_id
                 ).first()
 
-                if student_assignment:
-                    # Always mark submitted and attach file path
-                    student_assignment.submission_file_path = str(file_path)
-                    student_assignment.submission_content = f"PDF submission with {len(valid_files)} page(s)"
-                    student_assignment.submitted_at = datetime.utcnow()
+                # Create a StudentAssignment record if missing so status shows up immediately
+                if not student_assignment:
+                    due_days = getattr(assignment, 'due_days_after_assignment', 7) if 'assignment' in locals() and assignment else 7
+                    student_assignment = StudentAssignment(
+                        user_id=user_id,
+                        assignment_id=assignment_id,
+                        course_id=course_id,
+                        due_date=datetime.utcnow() + timedelta(days=due_days),
+                        status='assigned'
+                    )
+                    db.add(student_assignment)
+                    db.flush()
 
-                    # When AI produced a score, mark graded, else leave as submitted (pending)
-                    ai_score_val = submission.ai_score
-                    if isinstance(ai_score_val, (int, float)):
-                        student_assignment.ai_grade = float(ai_score_val)
-                        student_assignment.grade = float(ai_score_val)
-                        student_assignment.status = "graded"
-                    else:
-                        student_assignment.status = "submitted"
+                # Always mark submitted and attach file path
+                student_assignment.submission_file_path = str(file_path)
+                student_assignment.submission_content = f"PDF submission with {len(valid_files)} page(s)"
+                student_assignment.submitted_at = datetime.utcnow()
 
-                    # Feedback if available
-                    if submission.ai_feedback:
-                        student_assignment.feedback = submission.ai_feedback
+                # When AI produced a score, mark graded, else leave as submitted (pending)
+                ai_score_val = submission.ai_score
+                if isinstance(ai_score_val, (int, float)):
+                    student_assignment.ai_grade = float(ai_score_val)
+                    student_assignment.grade = float(ai_score_val)
+                    student_assignment.status = "graded"
+                else:
+                    student_assignment.status = "submitted"
 
-                    student_assignment.updated_at = datetime.utcnow()
-                    db.commit()
+                # Feedback if available
+                if submission.ai_feedback:
+                    student_assignment.feedback = submission.ai_feedback
+
+                student_assignment.updated_at = datetime.utcnow()
+                db.commit()
         except Exception as assign_err:
             # Non-fatal: log and continue response
             print(f"⚠️ Could not update StudentAssignment for assignment_id={assignment_id}: {assign_err}")

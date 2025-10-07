@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
-from Endpoints.after_school import course, grades as after_school_grades, uploads as after_school_uploads, reading_assistant
+from Endpoints.after_school import course, grades as after_school_grades, uploads as after_school_uploads, reading_assistant, assignments as after_school_assignments
 from db.database import get_engine, test_connection
 from dotenv import load_dotenv
 import logging
@@ -68,7 +68,7 @@ async def startup_event():
     except Exception as e:
         print(f"⚠️ Database not available at startup: {e}")
     # Log routers (no DB dependency)
-    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router])
+    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router, after_school_assignments.router])
     print(f"🔄 Total endpoints loaded: {total_endpoints}")
 
 """Remove eager table creation; handled in startup_event with lazy engine."""
@@ -104,10 +104,31 @@ app.include_router(course.router)  # Already has prefix /after-school/courses
 app.include_router(after_school_grades.router)  # Already has prefix /after-school/sessions  
 app.include_router(after_school_uploads.router)  # Already has prefix /after-school/uploads
 app.include_router(reading_assistant.router)  # Already has prefix /after-school/reading-assistant
+app.include_router(after_school_assignments.router)  # New: /after-school/assignments
 
 @app.get("/")
 def root():
     return {"message": "Welcome to BrainInk API"}
+
+@app.get("/_debug/routes")
+def list_routes():
+    """Return a list of all registered routes (method + path).
+    Helpful for quickly confirming which endpoints are live in this process.
+    """
+    routes = []
+    for route in app.router.routes:
+        try:
+            methods = sorted([m for m in getattr(route, 'methods', set()) if m not in {"HEAD", "OPTIONS"}])
+            path = getattr(route, 'path', None) or getattr(route, 'path_format', '')
+            routes.append({
+                "methods": methods,
+                "path": path
+            })
+        except Exception:
+            continue
+    # Sort by path for readability
+    routes.sort(key=lambda r: r["path"])
+    return {"count": len(routes), "routes": routes}
 
 @app.get("/health")
 def health_check():
