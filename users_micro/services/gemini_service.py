@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import asyncio
 import tempfile
@@ -136,6 +137,105 @@ class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
     
+    def _default_safety_settings(self):
+        """Return permissive safety settings to reduce false positives."""
+        categories = [
+            "HARM_CATEGORY_HARASSMENT",
+            "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_SEXUAL",
+            "HARM_CATEGORY_DANGEROUS_CONTENT",
+            "HARM_CATEGORY_SELF_HARM",
+        ]
+        settings = []
+        try:
+            from google.generativeai.types import SafetySetting  # type: ignore
+
+            settings = [SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in categories]
+        except Exception:
+            settings = [{"category": cat, "threshold": "BLOCK_NONE"} for cat in categories]
+        return settings
+
+    def _collect_candidate_text(self, response) -> str:
+        """Safely collect text from a Gemini response object."""
+        try:
+            text = getattr(response, "text", None)
+            if isinstance(text, str) and text.strip():
+                return text
+        except Exception:
+            pass
+
+        candidates = getattr(response, "candidates", None) or []
+        collected: List[str] = []
+        for candidate in candidates:
+            if not candidate:
+                continue
+            content = getattr(candidate, "content", None)
+            parts = getattr(content, "parts", None) if content else None
+            if not parts:
+                continue
+            for part in parts:
+                part_text = getattr(part, "text", None)
+                if part_text:
+                    collected.append(part_text)
+        if collected:
+            return "\n".join(collected)
+        raise ValueError("No text returned by Gemini response")
+
+    async def _generate_json_response(
+        self,
+        prompt: str,
+        *,
+        attachments: Optional[List[Any]] = None,
+        temperature: float = 0.3,
+        max_output_tokens: int = 2048,
+    ) -> Dict[str, Any]:
+        """Invoke Gemini with consistent settings and parse JSON output."""
+
+        def _call_model():
+            payload: Any
+            if attachments:
+                payload = list(attachments) + [prompt]
+            else:
+                payload = prompt
+
+            return self.config.model.generate_content(
+                payload,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=temperature,
+                    max_output_tokens=max_output_tokens,
+                    response_mime_type="application/json",
+                ),
+                safety_settings=self._default_safety_settings(),
+            )
+
+        response = await asyncio.to_thread(_call_model)
+        response_text = self._collect_candidate_text(response)
+        return self._safe_parse_json(response_text)
+
+    def _extract_text_from_pdf_bytes(self, file_bytes: bytes) -> str:
+        """Extract plaintext from PDF bytes using pypdf when available."""
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except Exception:
+            return ""
+
+        try:
+            reader = PdfReader(io.BytesIO(file_bytes))
+            texts: List[str] = []
+            for page in reader.pages[:20]:  # limit to first 20 pages for performance
+                try:
+                    page_text = page.extract_text() or ""
+                except Exception:
+                    page_text = ""
+                if page_text:
+                    texts.append(page_text)
+                if len("\n\n".join(texts)) > 20000:
+                    break
+            return "\n\n".join(texts).strip()
+        except Exception as exc:
+            print(f"PDF text extraction failed: {exc}")
+            return ""
+
     def _safe_parse_json(self, text: str) -> Dict[str, Any]:
         """Parse JSON from Gemini response text robustly.
         - Strips ```json fences
@@ -1168,6 +1268,10 @@ class GeminiService:
         - Specific recommendations for better performance
         """
         
+        submission_content = submission_content or ""
+        if len(submission_content) > 12000:
+            submission_content = submission_content[:12000]
+
         grading_prompt = f"""
         You are an expert educational assessor. Grade this student submission with detailed analysis.
 
@@ -1232,17 +1336,11 @@ class GeminiService:
         """
         
         try:
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
+            grade_result = await self._generate_json_response(
                 grading_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,  # Lower temperature for more consistent grading
-                    max_output_tokens=2048,
-                    response_mime_type="application/json"
-                )
+                temperature=0.3,
+                max_output_tokens=2048,
             )
-            # Robust JSON parsing
-            grade_result = self._safe_parse_json(response.text)
             
             # Ensure score consistency
             if "score" in grade_result and "percentage" not in grade_result:
@@ -1433,18 +1531,12 @@ class GeminiService:
             }}
             """
 
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                [uploaded_file, grading_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=2048,
-                    response_mime_type="application/json",
-                ),
+            grade_result = await self._generate_json_response(
+                grading_prompt,
+                attachments=[uploaded_file],
+                temperature=0.25,
+                max_output_tokens=2048,
             )
-
-            # Robust JSON parsing
-            grade_result = self._safe_parse_json(response.text)
 
             # Normalize score fields
             if "percentage" not in grade_result and "score" in grade_result:
@@ -1461,6 +1553,25 @@ class GeminiService:
             return grade_result
 
         except Exception as e:
+            fallback_error = str(e)
+
+            # Attempt plaintext extraction fallback
+            try:
+                extracted_text = self._extract_text_from_pdf_bytes(file_bytes)
+                if extracted_text:
+                    text_grade = await self.grade_submission(
+                        submission_content=extracted_text,
+                        assignment_title=assignment_title,
+                        assignment_description=assignment_description,
+                        rubric=rubric,
+                        submission_type=submission_type,
+                        max_points=max_points,
+                    )
+                    text_grade["graded_by"] = "Gemini AI (file fallback)"
+                    return text_grade
+            except Exception as fallback_exc:
+                fallback_error = f"{fallback_error} | fallback_failed={fallback_exc}"
+
             # Fallback payload to avoid blowing up the caller
             return {
                 "score": None,
@@ -1475,7 +1586,7 @@ class GeminiService:
                 "graded_by": "Gemini AI",
                 "graded_at": datetime.utcnow().isoformat(),
                 "max_points": max_points,
-                "error": str(e),
+                "error": fallback_error,
             }
 
     async def grade_submission_from_file_strict(
@@ -1515,17 +1626,12 @@ class GeminiService:
             Max Points: {max_points}
             """
 
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                [uploaded_file, strict_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=512,
-                    response_mime_type="application/json",
-                ),
+            data = await self._generate_json_response(
+                strict_prompt,
+                attachments=[uploaded_file],
+                temperature=0.1,
+                max_output_tokens=512,
             )
-
-            data = self._safe_parse_json(response.text)
             # Normalize to the same shape used by normalize_ai_grading
             out = {
                 "percentage": data.get("percentage"),
