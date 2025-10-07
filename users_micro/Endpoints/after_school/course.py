@@ -21,7 +21,8 @@ from schemas.afterschool_schema import (
     CourseWithBlocks, ComprehensiveCourseOut, CourseBlockOut, CourseAssignmentOut,
     LessonCreate, LessonUpdate, LessonOut,
     CourseListResponse, LessonListResponse, MessageResponse,
-    StudentDashboard, StudentProgressOut
+    StudentDashboard, StudentProgressOut,
+    CourseBlocksProgressOut, BlockProgressOut
 )
 from services.gemini_service import gemini_service
 
@@ -162,6 +163,89 @@ async def get_course_progress(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to compute course progress: {e}")
+
+@router.get("/{course_id}/blocks-progress", response_model=CourseBlocksProgressOut)
+async def get_course_blocks_progress(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Return the user's progress across all blocks for a course, including
+    per-block completion status and availability. Mirrors the frontend
+    CourseBlocksProgressResponse shape for seamless integration.
+    """
+    user_id = current_user["user_id"]
+
+    # Validate course
+    course = db.query(Course).filter(Course.id == course_id, Course.is_active == True).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    # Fetch blocks in curriculum order
+    blocks = db.query(CourseBlock).filter(
+        and_(
+            CourseBlock.course_id == course_id,
+            CourseBlock.is_active == True
+        )
+    ).order_by(CourseBlock.week, CourseBlock.block_number).all()
+
+    if not blocks:
+        return {
+            "course_id": course_id,
+            "total_blocks": 0,
+            "completed_blocks": 0,
+            "completion_percentage": 0.0,
+            "blocks": []
+        }
+
+    # Completed sessions for user/course
+    completed_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id,
+            StudySession.status == "completed"
+        )
+    ).all()
+    completed_block_ids = {s.block_id for s in completed_sessions if s.block_id}
+
+    blocks_progress: list[dict] = []
+    for i, block in enumerate(blocks):
+        is_completed = block.id in completed_block_ids
+        # Availability: first block or after completed previous block, or if already completed
+        if i == 0:
+            is_available = True
+        elif is_completed:
+            is_available = True
+        else:
+            prev_block = blocks[i - 1]
+            is_available = prev_block.id in completed_block_ids
+
+        blocks_progress.append({
+            "block_id": block.id,
+            "week": block.week,
+            "block_number": block.block_number,
+            "title": block.title,
+            "description": block.description,
+            "duration_minutes": block.duration_minutes,
+            "is_completed": is_completed,
+            "is_available": is_available,
+            "completed_at": next(
+                (s.marked_done_at or s.ended_at for s in completed_sessions if s.block_id == block.id), None
+            )
+        })
+
+    total_blocks = len(blocks)
+    completed_count = len(completed_block_ids)
+    completion_percentage = (completed_count / total_blocks * 100.0) if total_blocks > 0 else 0.0
+
+    return {
+        "course_id": course_id,
+        "total_blocks": total_blocks,
+        "completed_blocks": completed_count,
+        "completion_percentage": completion_percentage,
+        "blocks": blocks_progress
+    }
 
 @router.post("/from-textbook", response_model=ComprehensiveCourseOut)
 async def create_course_from_textbook(

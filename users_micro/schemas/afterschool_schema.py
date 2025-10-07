@@ -259,6 +259,28 @@ class ComprehensiveCourseOut(CourseOut):
     estimated_total_duration: int = 0  # in minutes
 
 # ===============================
+# BLOCKS PROGRESS SCHEMAS
+# ===============================
+
+class BlockProgressOut(BaseModel):
+    block_id: int
+    week: int
+    block_number: int
+    title: str
+    description: Optional[str]
+    duration_minutes: int
+    is_completed: bool
+    is_available: bool
+    completed_at: Optional[datetime]
+
+class CourseBlocksProgressOut(BaseModel):
+    course_id: int
+    total_blocks: int
+    completed_blocks: int
+    completion_percentage: float
+    blocks: List[BlockProgressOut]
+
+# ===============================
 # STUDY SESSION SCHEMAS
 # ===============================
 
