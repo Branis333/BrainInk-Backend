@@ -933,6 +933,37 @@ async def grade_course_submissions(
                     max_points=max_points,
                     submission_type=item.get("submission_type", "homework"),
                 )
+
+                preview_normalized = normalize_ai_grading(grade_result, max_points=max_points)
+                if preview_normalized.get("ai_score") is None:
+                    try:
+                        strict = await gemini_service.grade_submission_from_file_strict(
+                            file_bytes=item["file_bytes"],
+                            filename=item["filename"],
+                            assignment_title=assignment_title,
+                            assignment_description=assignment_description,
+                            max_points=max_points,
+                            submission_type=item.get("submission_type", "homework"),
+                        )
+                        strict_normalized = normalize_ai_grading(strict, max_points=max_points)
+                        strict_score = strict_normalized.get("ai_score")
+                        if strict_score is not None:
+                            grade_result["percentage"] = strict_score
+                        if not grade_result.get("overall_feedback") and strict_normalized.get("ai_feedback"):
+                            grade_result["overall_feedback"] = strict_normalized.get("ai_feedback")
+                        if strict_normalized.get("ai_feedback"):
+                            grade_result.setdefault("detailed_feedback", strict_normalized.get("ai_feedback"))
+                        grade_result["strict_fallback"] = True
+                    except Exception as strict_error:
+                        logger.warning(
+                            "Strict Gemini grading fallback failed",
+                            extra={
+                                "submission_id": item["submission_id"],
+                                "user_id": item["user_id"],
+                                "error": str(strict_error),
+                            },
+                        )
+
                 grade_result.update(
                     {
                         "submission_id": item["submission_id"],

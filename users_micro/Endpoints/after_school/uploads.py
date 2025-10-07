@@ -4,6 +4,7 @@ from fastapi.responses import Response, JSONResponse
 from typing import List, Optional
 from sqlalchemy.orm import Session, joinedload
 from pathlib import Path
+import re
 import os
 import shutil
 import uuid
@@ -76,6 +77,28 @@ async def save_uploaded_file(file: UploadFile, file_path: Path) -> bool:
 # Removed simulation; real grading is performed via services.gemini_service
 
 # Normalize Gemini grading payload to our AISubmission fields
+def _extract_numeric_percentage(value) -> Optional[float]:
+    """Attempt to coerce various representations into a float percentage."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip().replace('%', '').replace(',', '')
+        if text.replace('.', '', 1).isdigit():
+            try:
+                return float(text)
+            except Exception:
+                return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if match:
+            try:
+                return float(match.group())
+            except Exception:
+                return None
+    return None
+
+
 def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
     """Normalize Gemini grading payload to our AISubmission fields and types.
 
@@ -95,14 +118,10 @@ def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
     try:
         # Check direct numeric percentage
         for p in percent_candidates:
-            if isinstance(p, (int, float)):
-                ai_score = float(p)
+            parsed = _extract_numeric_percentage(p)
+            if parsed is not None:
+                ai_score = parsed
                 break
-            if isinstance(p, str):
-                ps = p.strip().replace('%', '')
-                if ps.replace('.', '', 1).isdigit():
-                    ai_score = float(ps)
-                    break
         # If percentage missing, compute from score/max_points
         if ai_score is None and isinstance(score, (int, float)):
             if isinstance(max_points, (int, float)) and max_points > 0:
@@ -487,11 +506,12 @@ async def bulk_upload_images_to_pdf_session(
                         max_points=max_points,
                         submission_type=submission_type,
                     )
-                    strict_score = strict.get("percentage")
-                    if isinstance(strict_score, (int, float)):
-                        normalized["ai_score"] = float(strict_score)
-                    if not normalized.get("ai_feedback") and strict.get("overall_feedback"):
-                        normalized["ai_feedback"] = strict.get("overall_feedback")
+                    strict_normalized = normalize_ai_grading(strict, max_points=max_points)
+                    for key, value in strict_normalized.items():
+                        if key == "raw":
+                            continue
+                        if normalized.get(key) in (None, "", []):
+                            normalized[key] = value
                 except Exception as _strict_err:
                     print(f"Strict grading fallback failed: {_strict_err}")
             submission.ai_processed = True
