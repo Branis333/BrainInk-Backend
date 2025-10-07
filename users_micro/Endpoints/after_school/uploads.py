@@ -16,7 +16,7 @@ import hashlib
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
-    Course, CourseLesson, CourseBlock, StudySession, AISubmission, CourseAssignment
+    Course, CourseLesson, CourseBlock, StudySession, AISubmission, CourseAssignment, StudentAssignment
 )
 from schemas.afterschool_schema import (
     AISubmissionCreate, AISubmissionOut, AIGradingResponse, MessageResponse
@@ -447,7 +447,7 @@ async def bulk_upload_images_to_pdf_session(
         db.commit()
         db.refresh(submission)
         
-        # Process with AI (real grading via Gemini)
+    # Process with AI (real grading via Gemini)
         try:
             # Prepare assignment context if available
             assignment_title = f"{submission_type.capitalize()} Submission"
@@ -489,7 +489,40 @@ async def bulk_upload_images_to_pdf_session(
             print(f"AI grading error: {ai_err}")
             ai_results = {"error": str(ai_err)}
         
-        # Commit the submission to database
+        # If this upload is for an assignment, propagate status/grade to StudentAssignment
+        try:
+            if assignment_id:
+                student_assignment = db.query(StudentAssignment).filter(
+                    StudentAssignment.assignment_id == assignment_id,
+                    StudentAssignment.user_id == user_id
+                ).first()
+
+                if student_assignment:
+                    # Always mark submitted and attach file path
+                    student_assignment.submission_file_path = str(file_path)
+                    student_assignment.submission_content = f"PDF submission with {len(valid_files)} page(s)"
+                    student_assignment.submitted_at = datetime.utcnow()
+
+                    # When AI produced a score, mark graded, else leave as submitted (pending)
+                    ai_score_val = submission.ai_score
+                    if isinstance(ai_score_val, (int, float)):
+                        student_assignment.ai_grade = float(ai_score_val)
+                        student_assignment.grade = float(ai_score_val)
+                        student_assignment.status = "graded"
+                    else:
+                        student_assignment.status = "submitted"
+
+                    # Feedback if available
+                    if submission.ai_feedback:
+                        student_assignment.feedback = submission.ai_feedback
+
+                    student_assignment.updated_at = datetime.utcnow()
+                    db.commit()
+        except Exception as assign_err:
+            # Non-fatal: log and continue response
+            print(f"⚠️ Could not update StudentAssignment for assignment_id={assignment_id}: {assign_err}")
+
+        # Final commit to ensure all changes persisted
         db.commit()
         
         # Return JSON summary instead of raw PDF content to better support mobile clients

@@ -228,6 +228,70 @@ async def mark_block_done(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to mark content as done: {str(e)}")
 
+# ===============================
+# ASSIGNMENT STATUS (minimal, avoid 404 for client UX)
+# ===============================
+
+@router.get("/../assignments/{assignment_id}/status")
+async def get_assignment_status_minimal(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Minimal assignment status for current user.
+    Returns student's assignment record if exists, else 404 with message.
+
+    Frontend expects this route under /after-school/assignments/{id}/status.
+    This shim lives here by using a relative path (..) from sessions prefix.
+    """
+    user_id = current_user["user_id"]
+    try:
+        assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+
+        sa = db.query(StudentAssignment).filter(
+            StudentAssignment.assignment_id == assignment_id,
+            StudentAssignment.user_id == user_id
+        ).first()
+
+        if not sa:
+            # Not assigned (treat as not found to keep noise low)
+            raise HTTPException(status_code=404, detail="Not assigned")
+
+        # Build a minimal status payload compatible with frontend types
+        required_pct = 80
+        can_retry = False  # Retry policy not implemented here
+
+        return {
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "description": assignment.description or assignment.title,
+                "points": assignment.points or 100,
+                "required_percentage": required_pct
+            },
+            "student_assignment": {
+                "id": sa.id,
+                "status": sa.status,
+                "grade": float(sa.grade) if sa.grade is not None else 0.0,
+                "submitted_at": sa.submitted_at.isoformat() if sa.submitted_at else None,
+                "feedback": sa.feedback or None
+            },
+            "attempts_info": {
+                "attempts_used": 0,
+                "attempts_remaining": 0,
+                "can_retry": can_retry
+            },
+            "message": "OK",
+            "passing_grade": (sa.grade or 0) >= required_pct
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get assignment status: {str(e)}")
+
 @router.get("/blocks/{block_id}/availability")
 async def check_block_availability(
     block_id: int,
