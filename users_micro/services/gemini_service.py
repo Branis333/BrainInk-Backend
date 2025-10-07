@@ -1478,6 +1478,73 @@ class GeminiService:
                 "error": str(e),
             }
 
+    async def grade_submission_from_file_strict(
+        self,
+        file_bytes: bytes,
+        filename: str,
+        assignment_title: str,
+        assignment_description: str,
+        max_points: int = 100,
+        submission_type: str = "homework",
+    ) -> Dict[str, Any]:
+        """
+        Second-pass grading with a stricter prompt requiring a numeric percentage (0-100).
+        Returns a minimal JSON payload to maximize compliance when initial grading omitted numeric score.
+        """
+        try:
+            gemini_file_uri = await self.upload_file_to_gemini(file_bytes, filename)
+            uploaded_file = genai.get_file(gemini_file_uri)
+
+            strict_prompt = f"""
+            You are an automated grader. Read the attached submission in full.
+            Produce ONLY a compact JSON object with EXACTLY these keys and nothing else:
+            {{
+              "percentage": <number between 0 and 100>,
+              "overall_feedback": "<one short paragraph of feedback>"
+            }}
+
+            Rules:
+            - percentage MUST be a number (not a string), in range 0..100.
+            - Do not include any other keys or commentary.
+            - If evidence is weak but present, estimate a percentage rather than leaving it blank.
+
+            Context:
+            Assignment Title: {assignment_title}
+            Description: {assignment_description}
+            Type: {submission_type}
+            Max Points: {max_points}
+            """
+
+            response = await asyncio.to_thread(
+                self.config.model.generate_content,
+                [uploaded_file, strict_prompt],
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.1,
+                    max_output_tokens=512,
+                    response_mime_type="application/json",
+                ),
+            )
+
+            data = self._safe_parse_json(response.text)
+            # Normalize to the same shape used by normalize_ai_grading
+            out = {
+                "percentage": data.get("percentage"),
+                "overall_feedback": data.get("overall_feedback") or data.get("feedback"),
+                "graded_by": "Gemini AI (strict)",
+                "graded_at": datetime.utcnow().isoformat(),
+                "max_points": max_points,
+            }
+            return out
+        except Exception as e:
+            return {
+                "percentage": None,
+                "overall_feedback": None,
+                "graded_by": "Gemini AI (strict)",
+                "graded_at": datetime.utcnow().isoformat(),
+                "max_points": max_points,
+                "error": str(e),
+            }
+
     async def extract_text_from_pdf_content(self, pdf_content: str) -> str:
         """
         Extract and process text content from PDF for grading

@@ -475,6 +475,25 @@ async def bulk_upload_images_to_pdf_session(
 
             # Normalize and update submission with AI results
             normalized = normalize_ai_grading(grading, max_points=max_points)
+
+            # If first pass didn't yield a numeric percentage, attempt a strict pass
+            if normalized.get("ai_score") is None:
+                try:
+                    strict = await gemini_service.grade_submission_from_file_strict(
+                        file_bytes=pdf_bytes,
+                        filename=pdf_filename,
+                        assignment_title=assignment_title,
+                        assignment_description=assignment_description,
+                        max_points=max_points,
+                        submission_type=submission_type,
+                    )
+                    strict_score = strict.get("percentage")
+                    if isinstance(strict_score, (int, float)):
+                        normalized["ai_score"] = float(strict_score)
+                    if not normalized.get("ai_feedback") and strict.get("overall_feedback"):
+                        normalized["ai_feedback"] = strict.get("overall_feedback")
+                except Exception as _strict_err:
+                    print(f"Strict grading fallback failed: {_strict_err}")
             submission.ai_processed = True
             submission.ai_score = normalized.get("ai_score")
             submission.ai_feedback = normalized.get("ai_feedback")
