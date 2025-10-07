@@ -13,7 +13,7 @@ from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
     Course, CourseLesson, CourseBlock, CourseAssignment, 
-    StudySession, StudentProgress, StudentAssignment
+    StudySession, StudentProgress, StudentAssignment, AISubmission
 )
 from models.study_area_models import StudentPDF
 from schemas.afterschool_schema import (
@@ -33,6 +33,135 @@ user_dependency = Depends(get_current_user)
 # ===============================
 # COURSE MANAGEMENT ENDPOINTS
 # ===============================
+
+@router.get("/{course_id}/progress", response_model=StudentProgressOut)
+async def get_course_progress(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Compute and return the student's progress for a course based on mark-done sessions and submissions.
+
+    - Uses StudySession records with status='completed' to count completed blocks/lessons
+    - Calculates totals from CourseBlock and CourseLesson
+    - Derives completion percentage prioritizing block-based structure; falls back to lessons
+    - Aggregates average AI score across processed AISubmissions for the course
+    - Upserts StudentProgress for idempotency and returns the fresh record
+    """
+    user_id = current_user["user_id"]
+
+    # Validate course
+    course = db.query(Course).filter(Course.id == course_id, Course.is_active == True).first()
+    if not course:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+    try:
+        # Totals from structure
+        total_blocks = db.query(CourseBlock).filter(CourseBlock.course_id == course_id, CourseBlock.is_active == True).count()
+        total_lessons = db.query(CourseLesson).filter(CourseLesson.course_id == course_id, CourseLesson.is_active == True).count()
+
+        # Completed via mark-done sessions
+        completed_sessions_q = db.query(StudySession).filter(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id,
+            StudySession.status == "completed"
+        )
+        blocks_completed = completed_sessions_q.filter(StudySession.block_id.isnot(None)).count()
+        lessons_completed = completed_sessions_q.filter(StudySession.lesson_id.isnot(None)).count()
+
+        # Average score from processed submissions
+        processed = db.query(AISubmission.ai_score).filter(
+            AISubmission.user_id == user_id,
+            AISubmission.course_id == course_id,
+            AISubmission.ai_score.isnot(None)
+        ).all()
+        avg_score = None
+        if processed:
+            scores = [row[0] for row in processed if row[0] is not None]
+            if scores:
+                avg_score = sum(scores) / len(scores)
+
+        # Sessions count and total study time (legacy minutes if present)
+        all_sessions = db.query(StudySession).filter(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id
+        ).all()
+        sessions_count = len(all_sessions)
+        total_study_time = sum([s.duration_minutes or 0 for s in all_sessions])
+
+        # Completion percentage: prefer blocks when structure exists
+        completion_percentage = 0.0
+        if total_blocks > 0:
+            completion_percentage = (blocks_completed / total_blocks) * 100.0
+        elif total_lessons > 0:
+            completion_percentage = (lessons_completed / total_lessons) * 100.0
+
+        # Clamp and round
+        completion_percentage = round(max(0.0, min(100.0, completion_percentage)), 2)
+
+        # Upsert StudentProgress
+        progress = db.query(StudentProgress).filter(
+            StudentProgress.user_id == user_id,
+            StudentProgress.course_id == course_id
+        ).first()
+
+        now = datetime.utcnow()
+        if not progress:
+            progress = StudentProgress(
+                user_id=user_id,
+                course_id=course_id,
+                lessons_completed=lessons_completed,
+                total_lessons=total_lessons,
+                blocks_completed=blocks_completed,
+                total_blocks=total_blocks,
+                completion_percentage=completion_percentage,
+                average_score=avg_score,
+                total_study_time=total_study_time,
+                sessions_count=sessions_count,
+                started_at=now,
+                last_activity=now,
+                completed_at=now if completion_percentage >= 100.0 else None,
+            )
+            db.add(progress)
+        else:
+            progress.lessons_completed = lessons_completed
+            progress.total_lessons = total_lessons
+            progress.blocks_completed = blocks_completed
+            progress.total_blocks = total_blocks
+            progress.completion_percentage = completion_percentage
+            progress.average_score = avg_score
+            progress.total_study_time = total_study_time
+            progress.sessions_count = sessions_count
+            progress.last_activity = now
+            progress.completed_at = progress.completed_at or (now if completion_percentage >= 100.0 else None)
+
+        db.commit()
+        db.refresh(progress)
+
+        # Build response
+        return StudentProgressOut(
+            id=progress.id,
+            user_id=progress.user_id,
+            course_id=progress.course_id,
+            lessons_completed=progress.lessons_completed,
+            total_lessons=progress.total_lessons,
+            completion_percentage=progress.completion_percentage,
+            blocks_completed=progress.blocks_completed,
+            total_blocks=progress.total_blocks,
+            average_score=progress.average_score,
+            total_study_time=progress.total_study_time,
+            sessions_count=progress.sessions_count,
+            started_at=progress.started_at,
+            last_activity=progress.last_activity,
+            completed_at=progress.completed_at,
+            created_at=progress.created_at,
+            updated_at=progress.updated_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute course progress: {e}")
 
 @router.post("/from-textbook", response_model=ComprehensiveCourseOut)
 async def create_course_from_textbook(

@@ -330,7 +330,8 @@ class AISubmissionCreate(BaseModel):
     course_id: int = Field(..., description="Course ID")
     lesson_id: Optional[int] = Field(default=None, description="Lesson ID (for legacy courses)")
     block_id: Optional[int] = Field(default=None, description="Course Block ID (for AI-generated courses)")
-    session_id: int = Field(..., description="Study session ID")
+    # Session is optional in mark-done model; keep for legacy compatibility
+    session_id: Optional[int] = Field(default=None, description="Study session ID (optional)")
     assignment_id: Optional[int] = Field(default=None, description="Assignment ID (if submission is for assignment)")
     submission_type: str = Field(..., description="Type of submission")
     
@@ -368,7 +369,7 @@ class AISubmissionOut(BaseModel):
     course_id: int
     lesson_id: Optional[int] = Field(default=None)  # Made optional for block-based sessions
     block_id: Optional[int] = Field(default=None)  # New field for AI-generated course blocks
-    session_id: int
+    session_id: Optional[int]
     assignment_id: Optional[int] = Field(default=None)  # New field for assignment submissions
     submission_type: str
     original_filename: Optional[str]
@@ -412,6 +413,9 @@ class StudentProgressOut(BaseModel):
     lessons_completed: int
     total_lessons: int
     completion_percentage: float
+    # Include blocks progress for AI-generated courses
+    blocks_completed: int
+    total_blocks: int
     average_score: Optional[float]
     total_study_time: int
     sessions_count: int

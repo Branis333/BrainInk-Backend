@@ -206,7 +206,8 @@ class AISubmission(Base):
     course_id = Column(Integer, ForeignKey("as_courses.id"), nullable=False)
     lesson_id = Column(Integer, ForeignKey("as_course_lessons.id"), nullable=True)  # Made nullable
     block_id = Column(Integer, ForeignKey("as_course_blocks.id"), nullable=True)  # New: for block submissions
-    session_id = Column(Integer, ForeignKey("as_study_sessions.id"), nullable=False)
+    # Session is now optional for mark-done flows (uploads tied to block/lesson without a session)
+    session_id = Column(Integer, ForeignKey("as_study_sessions.id"), nullable=True)
     assignment_id = Column(Integer, ForeignKey("as_course_assignments.id"), nullable=True)  # New: link to assignment
     
     # Submission details
