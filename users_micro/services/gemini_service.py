@@ -4,6 +4,7 @@ import json
 import asyncio
 import tempfile
 import mimetypes
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -12,6 +13,9 @@ import google.generativeai as genai
 from pydantic import BaseModel
 import httpx
 from urllib.parse import quote_plus, urlencode
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 # Configuration for Gemini API
 class GeminiConfig:
@@ -142,14 +146,23 @@ class GeminiService:
         try:
             from google.generativeai.types import HarmCategory, HarmBlockThreshold
             # Use the proper enums for safety settings
-            return {
+            settings = {
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
             }
+            logger.info(
+                "🛡️ Safety Settings Created",
+                extra={
+                    "settings_count": len(settings),
+                    "threshold": "BLOCK_NONE",
+                    "categories": [str(cat) for cat in settings.keys()]
+                }
+            )
+            return settings
         except Exception as e:
-            print(f"⚠️ Could not create safety settings: {e}")
+            logger.error(f"⚠️ Could not create safety settings: {e}")
             # Fallback to string-based dict if imports fail
             return {
                 "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
@@ -159,29 +172,75 @@ class GeminiService:
             }
 
     def _collect_candidate_text(self, response) -> str:
-        """Safely collect text from a Gemini response object."""
+        """Safely collect text from a Gemini response object with detailed logging."""
+        # Log the full response for debugging
+        logger.warning(
+            "🔍 Gemini Response Debug",
+            extra={
+                "has_text_attr": hasattr(response, "text"),
+                "has_candidates": hasattr(response, "candidates"),
+                "prompt_feedback": getattr(response, "prompt_feedback", None),
+            }
+        )
+        
+        # Check if response was blocked
+        if hasattr(response, "prompt_feedback"):
+            feedback = response.prompt_feedback
+            if hasattr(feedback, "block_reason"):
+                logger.error(
+                    "❌ Gemini BLOCKED the request",
+                    extra={
+                        "block_reason": feedback.block_reason,
+                        "safety_ratings": getattr(feedback, "safety_ratings", None)
+                    }
+                )
+                raise ValueError(f"Gemini blocked the request: {feedback.block_reason}")
+        
+        # Try to get text from response.text first
         try:
             text = getattr(response, "text", None)
             if isinstance(text, str) and text.strip():
+                logger.info(f"✅ Got text from response.text: {len(text)} chars")
                 return text
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get response.text: {e}")
 
+        # Try to extract from candidates
         candidates = getattr(response, "candidates", None) or []
+        logger.warning(f"📋 Found {len(candidates)} candidates")
+        
         collected: List[str] = []
-        for candidate in candidates:
+        for idx, candidate in enumerate(candidates):
             if not candidate:
                 continue
+                
+            # Check finish_reason
+            finish_reason = getattr(candidate, "finish_reason", None)
+            logger.warning(f"  Candidate {idx}: finish_reason={finish_reason}")
+            
+            # Log safety ratings
+            safety_ratings = getattr(candidate, "safety_ratings", None)
+            if safety_ratings:
+                logger.warning(f"  Candidate {idx} safety_ratings: {safety_ratings}")
+            
             content = getattr(candidate, "content", None)
             parts = getattr(content, "parts", None) if content else None
             if not parts:
+                logger.warning(f"  Candidate {idx}: No parts found")
                 continue
-            for part in parts:
+                
+            for part_idx, part in enumerate(parts):
                 part_text = getattr(part, "text", None)
                 if part_text:
+                    logger.info(f"  Candidate {idx}, Part {part_idx}: {len(part_text)} chars")
                     collected.append(part_text)
+        
         if collected:
-            return "\n".join(collected)
+            result = "\n".join(collected)
+            logger.info(f"✅ Collected {len(result)} chars from {len(collected)} parts")
+            return result
+            
+        logger.error("❌ No text found in any candidates - Gemini returned empty response")
         raise ValueError("No text returned by Gemini response")
 
     async def _generate_json_response(
@@ -201,6 +260,22 @@ class GeminiService:
             else:
                 payload = prompt
 
+            safety_settings = self._default_safety_settings()
+            
+            # Log what we're about to send to Gemini
+            logger.info(
+                "🚀 Calling Gemini API",
+                extra={
+                    "has_attachments": bool(attachments),
+                    "attachment_count": len(attachments) if attachments else 0,
+                    "prompt_length": len(prompt),
+                    "temperature": temperature,
+                    "max_output_tokens": max_output_tokens,
+                    "safety_settings_type": type(safety_settings).__name__,
+                    "safety_settings_count": len(safety_settings) if isinstance(safety_settings, dict) else 0,
+                }
+            )
+
             return self.config.model.generate_content(
                 payload,
                 generation_config=genai.types.GenerationConfig(
@@ -208,7 +283,7 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
-                safety_settings=self._default_safety_settings(),
+                safety_settings=safety_settings,
             )
 
         response = await asyncio.to_thread(_call_model)
