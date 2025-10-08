@@ -497,6 +497,18 @@ async def bulk_upload_images_to_pdf_session(
             # Normalize and update submission with AI results
             normalized = normalize_ai_grading(grading, max_points=max_points)
             
+            # DEBUG: Log the raw Gemini response to see what we're getting
+            logger.warning(
+                "🔍 RAW GEMINI RESPONSE",
+                extra={
+                    "submission_id": submission.id,
+                    "grading_response": grading,
+                    "grading_type": type(grading).__name__,
+                    "grading_keys": list(grading.keys()) if isinstance(grading, dict) else None,
+                    "normalized_score": normalized.get("ai_score"),
+                }
+            )
+            
             logger.info(
                 "Initial AI grading attempt",
                 extra={
