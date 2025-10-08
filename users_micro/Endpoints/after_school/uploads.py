@@ -297,9 +297,9 @@ async def bulk_upload_images_to_pdf_session(
     submission_type: str = Form("homework", description="Type of submission"),
     files: List[UploadFile] = File(..., description="Multiple image files to combine into PDF"),
     # Contextual metadata
-    lesson_id: Optional[int] = Form(None, description="Lesson ID (for legacy courses)"),
-    block_id: Optional[int] = Form(None, description="Block ID (for AI-generated courses)"),
-    assignment_id: Optional[int] = Form(None, description="Assignment ID (optional)"),
+    lesson_id: Optional[str] = Form(None, description="Lesson ID (for legacy courses) - leave empty if using block_id"),
+    block_id: Optional[str] = Form(None, description="Block ID (for AI-generated courses) - leave empty if using lesson_id"),
+    assignment_id: Optional[str] = Form(None, description="Assignment ID (optional) - leave empty if not needed"),
     storage_mode: str = Form("database", description="Storage mode: 'database' (default)"),
     skip_db: bool = Form(False, description="If true, only generate PDF and return; do not persist (debug)")
 ):
@@ -325,8 +325,21 @@ async def bulk_upload_images_to_pdf_session(
     try:
         user_id = current_user["user_id"]
         
+        # Convert string parameters to integers, handling empty strings and "null"
+        def parse_optional_int(value: Optional[str]) -> Optional[int]:
+            if value is None or value == "" or value.lower() == "null":
+                return None
+            try:
+                return int(value)
+            except (ValueError, AttributeError):
+                return None
+        
+        lesson_id_int = parse_optional_int(lesson_id)
+        block_id_int = parse_optional_int(block_id)
+        assignment_id_int = parse_optional_int(assignment_id)
+        
         # Validate that either lesson_id or block_id is provided
-        if not lesson_id and not block_id:
+        if not lesson_id_int and not block_id_int:
             raise HTTPException(status_code=400, detail="Either lesson_id or block_id must be provided")
         
         # Get and validate course
@@ -341,9 +354,9 @@ async def bulk_upload_images_to_pdf_session(
         block = None
         lesson = None
         
-        if block_id:
+        if block_id_int:
             block = db.query(CourseBlock).filter(
-                CourseBlock.id == block_id,
+                CourseBlock.id == block_id_int,
                 CourseBlock.course_id == course_id,
                 CourseBlock.is_active == True
             ).first()
@@ -353,9 +366,9 @@ async def bulk_upload_images_to_pdf_session(
                     detail="Course block not found or inactive"
                 )
         
-        if lesson_id:
+        if lesson_id_int:
             lesson = db.query(CourseLesson).filter(
-                CourseLesson.id == lesson_id,
+                CourseLesson.id == lesson_id_int,
                 CourseLesson.course_id == course_id,
                 CourseLesson.is_active == True
             ).first()
@@ -406,10 +419,10 @@ async def bulk_upload_images_to_pdf_session(
         course_title = course.title.replace(" ", "_").replace("/", "_")
         if lesson is not None:
             anchor_title = lesson.title.replace(" ", "_").replace("/", "_")
-            upload_id = f"lesson_{lesson_id}"
+            upload_id = f"lesson_{lesson_id_int}"
         elif block is not None:
             anchor_title = f"week{block.week}_block{block.block_number}_" + block.title.replace(" ", "_").replace("/", "_")
-            upload_id = f"block_{block_id}"
+            upload_id = f"block_{block_id_int}"
         else:
             anchor_title = "upload"
             upload_id = "unknown"
@@ -439,7 +452,7 @@ async def bulk_upload_images_to_pdf_session(
             )
 
         # Save PDF file to uploads directory
-        unique_filename = generate_unique_filename(pdf_filename, user_id, block_id or lesson_id or 0)
+        unique_filename = generate_unique_filename(pdf_filename, user_id, block_id_int or lesson_id_int or 0)
         file_path = UPLOAD_DIR / unique_filename
         
         try:
@@ -452,10 +465,10 @@ async def bulk_upload_images_to_pdf_session(
         submission = AISubmission(
             user_id=user_id,
             course_id=course_id,
-            lesson_id=lesson_id,
-            block_id=block_id,
+            lesson_id=lesson_id_int,
+            block_id=block_id_int,
             session_id=None,  # Not using sessions for this workflow
-            assignment_id=assignment_id,
+            assignment_id=assignment_id_int,
             submission_type=submission_type,
             original_filename=pdf_filename,
             file_path=str(file_path),
@@ -475,8 +488,8 @@ async def bulk_upload_images_to_pdf_session(
             assignment_description = ""
             rubric = ""
             max_points = 100
-            if assignment_id:
-                assignment: Optional[CourseAssignment] = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+            if assignment_id_int:
+                assignment: Optional[CourseAssignment] = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id_int).first()
                 if assignment:
                     assignment_title = assignment.title or assignment_title
                     assignment_description = assignment.description or ""
@@ -493,6 +506,18 @@ async def bulk_upload_images_to_pdf_session(
                 max_points=max_points,
                 submission_type=submission_type
             )
+            
+            # CRITICAL DEBUG: Print to stdout so we can see in Render logs
+            print(f"\n{'='*80}")
+            print(f"🔍 GEMINI GRADING RESPONSE DEBUG")
+            print(f"{'='*80}")
+            print(f"Response Type: {type(grading)}")
+            print(f"Response Value: {grading}")
+            if isinstance(grading, dict):
+                print(f"Keys: {list(grading.keys())}")
+                for key, value in grading.items():
+                    print(f"  {key}: {value} (type: {type(value).__name__})")
+            print(f"{'='*80}\n")
 
             # Normalize and update submission with AI results
             normalized = normalize_ai_grading(grading, max_points=max_points)
@@ -578,9 +603,9 @@ async def bulk_upload_images_to_pdf_session(
         
         # If this upload is for an assignment, propagate status/grade to StudentAssignment
         try:
-            if assignment_id:
+            if assignment_id_int:
                 student_assignment = db.query(StudentAssignment).filter(
-                    StudentAssignment.assignment_id == assignment_id,
+                    StudentAssignment.assignment_id == assignment_id_int,
                     StudentAssignment.user_id == user_id
                 ).first()
 
@@ -589,7 +614,7 @@ async def bulk_upload_images_to_pdf_session(
                     due_days = getattr(assignment, 'due_days_after_assignment', 7) if 'assignment' in locals() and assignment else 7
                     student_assignment = StudentAssignment(
                         user_id=user_id,
-                        assignment_id=assignment_id,
+                        assignment_id=assignment_id_int,
                         course_id=course_id,
                         due_date=datetime.utcnow() + timedelta(days=due_days),
                         status='assigned'
@@ -619,7 +644,7 @@ async def bulk_upload_images_to_pdf_session(
                 db.commit()
         except Exception as assign_err:
             # Non-fatal: log and continue response
-            print(f"⚠️ Could not update StudentAssignment for assignment_id={assignment_id}: {assign_err}")
+            print(f"⚠️ Could not update StudentAssignment for assignment_id={assignment_id_int}: {assign_err}")
 
         # Final commit to ensure all changes persisted
         db.commit()

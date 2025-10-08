@@ -215,6 +215,22 @@ class GeminiService:
         response = await asyncio.to_thread(_call_model)
         try:
             response_text = self._collect_candidate_text(response)
+            
+            # DEBUG: Log the raw response text before parsing
+            logger.info(
+                "📥 RAW GEMINI RESPONSE TEXT",
+                extra={
+                    "response_text_preview": response_text[:500] if response_text else None,
+                    "response_text_length": len(response_text) if response_text else 0,
+                    "first_char": response_text[0] if response_text else None,
+                    "last_char": response_text[-1] if response_text else None,
+                }
+            )
+            print(f"\n{'='*80}")
+            print(f"📥 RAW GEMINI RESPONSE TEXT (full):")
+            print(response_text)
+            print(f"{'='*80}\n")
+            
         except ValueError as missing_text:
             # If Gemini returned nothing, attempt a looser retry that does not force JSON
             # so we can salvage any textual feedback rather than failing outright.
@@ -286,23 +302,60 @@ class GeminiService:
         """Parse JSON from Gemini response text robustly.
         - Strips ```json fences
         - Attempts direct json.loads
+        - Handles escaped JSON strings (e.g., "\"key\": \"value\"")
+        - Handles trailing commas in string values (e.g., "0," -> "0")
         - Falls back to slicing first {...} block
         Returns a dict or raises ValueError.
         """
         import json as _json
+        import re
+        
         if text is None:
             raise ValueError("Empty response text")
         t = text.strip()
+        
         # Strip code fences if present
         if t.startswith("```json") and t.endswith("```"):
             t = t[7:-3].strip()
         elif t.startswith("```") and t.endswith("```"):
             t = t[3:-3].strip()
-        # Try direct parse
+        
+        # Fix common malformations:
+        # 1. Remove trailing commas inside string values: "value", -> "value"
+        # Pattern: "string_value", or 'string_value', (where comma is before closing quote)
+        t = re.sub(r'(["\'])\s*,\s*(["\'])', r'\1\2', t)
+        
+        # 2. Remove escaped quotes around keys: "\"key\"" -> "key"
+        # Pattern: "\"word\"": -> "word":
+        t = re.sub(r'"\\"([^"]+)\\""(\s*:)', r'"\1"\2', t)
+        
+        # 3. Remove escaped quotes around string values: : "\"value\"" -> : "value"
+        # Pattern: : "\"word\"" -> : "word"
+        t = re.sub(r':\s*"\\"([^"]+)\\""', r': "\1"', t)
+        
+        # Try direct parse first
         try:
             return _json.loads(t)
         except Exception:
             pass
+        
+        # Handle case where Gemini returns JSON as an escaped string
+        # E.g., "{\"score\": 0, \"percentage\": 0.0}" instead of {"score": 0, "percentage": 0.0}
+        if t.startswith('"{') and t.endswith('}"'):
+            try:
+                # Remove outer quotes and unescape
+                unescaped = t[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+                return _json.loads(unescaped)
+            except Exception:
+                pass
+        
+        # Also try unescaping even without outer quotes (malformed JSON with escaped quotes)
+        try:
+            unescaped = t.replace('\\"', '"')
+            return _json.loads(unescaped)
+        except Exception:
+            pass
+        
         # Try to find the first JSON object substring
         start = t.find('{')
         end = t.rfind('}')
@@ -311,7 +364,13 @@ class GeminiService:
             try:
                 return _json.loads(candidate)
             except Exception:
-                pass
+                # Try unescaping the candidate too
+                try:
+                    unescaped_candidate = candidate.replace('\\"', '"')
+                    return _json.loads(unescaped_candidate)
+                except Exception:
+                    pass
+        
         # As last resort, attempt to replace single quotes and parse
         try:
             return _json.loads(t.replace("'", '"'))
