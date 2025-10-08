@@ -496,6 +496,17 @@ async def bulk_upload_images_to_pdf_session(
 
             # Normalize and update submission with AI results
             normalized = normalize_ai_grading(grading, max_points=max_points)
+            
+            logger.info(
+                "Initial AI grading attempt",
+                extra={
+                    "submission_id": submission.id,
+                    "ai_score": normalized.get("ai_score"),
+                    "has_percentage": "percentage" in grading or "percent" in grading,
+                    "has_score": "score" in grading,
+                    "grading_keys": list(grading.keys()) if isinstance(grading, dict) else None
+                }
+            )
 
             # If first pass didn't yield a numeric percentage, attempt a strict pass
             if normalized.get("ai_score") is None:
@@ -533,9 +544,21 @@ async def bulk_upload_images_to_pdf_session(
                     "submission_id": submission.id,
                     "ai_score": normalized.get("ai_score"),
                     "score_type": type(normalized.get("ai_score")).__name__,
-                    "has_feedback": bool(normalized.get("ai_feedback"))
+                    "has_feedback": bool(normalized.get("ai_feedback")),
+                    "feedback_preview": normalized.get("ai_feedback")[:100] if normalized.get("ai_feedback") else None
                 }
             )
+            
+            # If score is still null after all attempts, log warning
+            if normalized.get("ai_score") is None:
+                logger.warning(
+                    "AI grading failed to extract score",
+                    extra={
+                        "submission_id": submission.id,
+                        "grading_response": grading,
+                        "assignment_id": assignment_id
+                    }
+                )
         except Exception as ai_err:
             # Don't fail the whole request if AI grading has an issue
             print(f"AI grading error: {ai_err}")

@@ -1775,11 +1775,19 @@ async def retry_assignment_attempt(
             )
         ).scalar() or 0
         
-        if recent_attempts >= 3:
-            raise HTTPException(
-                status_code=400,
-                detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
-            )
+        logger.info(
+            "Retry attempt check",
+            extra={
+                "assignment_id": assignment_id,
+                "user_id": user_id,
+                "recent_attempts": recent_attempts,
+                "current_grade": current_grade
+            }
+        )
+        
+        # IMPORTANT: Don't block the retry button click itself
+        # Only block if they try to submit NEW work after 3 attempts
+        # The frontend just needs confirmation that retry is available
         
         payload = submission_data or {}
         has_submission_payload = any(
@@ -1797,10 +1805,12 @@ async def retry_assignment_attempt(
         attempts_remaining = max(0, 3 - recent_attempts)
 
         if not has_submission_payload:
+            # User clicked retry but hasn't submitted new work yet
+            # Just return status showing they can retry
             message = (
-                "Retry enabled. Submit new work to use your next attempt."
+                f"Ready to retry. You have {attempts_remaining} attempt(s) remaining today."
                 if attempts_remaining > 0
-                else "No attempts remaining today."
+                else "No attempts remaining today. Try again tomorrow."
             )
 
             return {
@@ -1830,6 +1840,13 @@ async def retry_assignment_attempt(
                 },
                 "processed_at": datetime.utcnow().isoformat()
             }
+
+        # User is submitting new work - NOW check if they've exceeded attempts
+        if recent_attempts >= 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
+            )
 
         # Proceed with auto-grading
         grade_response = await auto_grade_assignment_submission(
