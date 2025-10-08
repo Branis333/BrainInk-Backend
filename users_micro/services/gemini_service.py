@@ -137,23 +137,26 @@ class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
     
-    # def _default_safety_settings(self):
-    #     """Return permissive safety settings to reduce false positives."""
-    #     categories = [
-    #         "HARM_CATEGORY_HARASSMENT",
-    #         "HARM_CATEGORY_HATE_SPEECH",
-    #         "HARM_CATEGORY_SEXUAL",
-    #         "HARM_CATEGORY_DANGEROUS_CONTENT",
-    #         "HARM_CATEGORY_SELF_HARM",
-    #     ]
-    #     settings = []
-    #     try:
-    #         from google.generativeai.types import SafetySetting  # type: ignore
-
-    #         settings = [SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in categories]
-    #     except Exception:
-    #         settings = [{"category": cat, "threshold": "BLOCK_NONE"} for cat in categories]
-    #     return settings
+    def _default_safety_settings(self):
+        """Return permissive safety settings to reduce false positives for educational content."""
+        try:
+            from google.generativeai.types import HarmCategory, HarmBlockThreshold
+            # Use the proper enums for safety settings
+            return {
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
+        except Exception as e:
+            print(f"⚠️ Could not create safety settings: {e}")
+            # Fallback to string-based dict if imports fail
+            return {
+                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+            }
 
     def _collect_candidate_text(self, response) -> str:
         """Safely collect text from a Gemini response object."""
@@ -205,6 +208,7 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
+                safety_settings=self._default_safety_settings(),
             )
 
         response = await asyncio.to_thread(_call_model)
@@ -231,6 +235,7 @@ class GeminiService:
                         temperature=temperature,
                         max_output_tokens=max_output_tokens,
                     ),
+                    safety_settings=self._default_safety_settings(),
                 )
 
             response_plain = await asyncio.to_thread(_call_model_plain)
