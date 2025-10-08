@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Body
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, desc, func, inspect, text
 from typing import List, Optional
@@ -1454,7 +1454,9 @@ async def auto_grade_assignment_submission(
                 detail="Assignment not found"
             )
 
-        student_assignment = db.query(StudentAssignment).filter(
+        student_assignment = db.query(StudentAssignment).options(
+            joinedload(StudentAssignment.assignment)
+        ).filter(
             and_(
                 StudentAssignment.assignment_id == assignment_id,
                 StudentAssignment.user_id == user_id
@@ -1471,6 +1473,7 @@ async def auto_grade_assignment_submission(
         submission_file_path = submission_data.get("file_path")
         file_bytes: Optional[bytes] = None
         filename: Optional[str] = None
+        raw_path: Optional[Path] = None
 
         if submission_file_path:
             raw_path = Path(submission_file_path)
@@ -1552,15 +1555,71 @@ async def auto_grade_assignment_submission(
         ai_feedback = normalized.get("ai_feedback")
 
         current_time = datetime.utcnow()
+        submission_id = submission_data.get("submission_id")
+
+        ai_submission_query = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id
+            )
+        )
+
+        ai_submission = None
+        if submission_id:
+            ai_submission = ai_submission_query.filter(AISubmission.id == submission_id).first()
+            if ai_submission is None:
+                logger.warning(
+                    "Submission ID provided but not found for auto-grading",
+                    extra={"assignment_id": assignment_id, "submission_id": submission_id, "user_id": user_id}
+                )
+
+        if not ai_submission:
+            file_type_value = None
+            if filename:
+                suffix = Path(filename).suffix
+                if suffix:
+                    file_type_value = suffix.lstrip('.')
+            saved_file_path = str(raw_path) if raw_path else submission_file_path
+            if not file_type_value and saved_file_path:
+                alt_suffix = Path(saved_file_path).suffix
+                if alt_suffix:
+                    file_type_value = alt_suffix.lstrip('.')
+            ai_submission = AISubmission(
+                user_id=user_id,
+                course_id=student_assignment.course_id,
+                assignment_id=assignment_id,
+                block_id=getattr(assignment, "block_id", None),
+                submission_type=assignment.assignment_type or "assessment",
+                original_filename=filename,
+                file_path=saved_file_path,
+                file_type=file_type_value,
+                submitted_at=current_time,
+            )
+            db.add(ai_submission)
+            db.flush()
+        else:
+            ai_submission.course_id = student_assignment.course_id
+            ai_submission.assignment_id = assignment_id
+            ai_submission.submitted_at = current_time
+            if submission_file_path:
+                ai_submission.file_path = str(raw_path) if raw_path else submission_file_path
+            if filename:
+                ai_submission.original_filename = filename
+                suffix = Path(filename).suffix
+                if suffix:
+                    ai_submission.file_type = suffix.lstrip('.')
+            if ai_submission.submission_type in (None, "") and assignment.assignment_type:
+                ai_submission.submission_type = assignment.assignment_type
+
         twenty_four_hours_ago = current_time - timedelta(hours=24)
-        recent_attempts = db.query(AISubmission).filter(
+        attempts_today = db.query(func.count(AISubmission.id)).filter(
             and_(
                 AISubmission.user_id == user_id,
                 AISubmission.assignment_id == assignment_id,
                 AISubmission.submitted_at >= twenty_four_hours_ago
             )
-        ).count()
-        attempts_today = recent_attempts + 1
+        ).scalar() or 0
+        attempts_today = max(attempts_today, 1)
 
         student_assignment.ai_grade = ai_score
         student_assignment.grade = ai_score
@@ -1598,21 +1657,13 @@ async def auto_grade_assignment_submission(
                         f"{remaining_attempts} attempts remaining today."
                     )
 
-        ai_submission = db.query(AISubmission).filter(
-            and_(
-                AISubmission.user_id == user_id,
-                AISubmission.assignment_id == assignment_id
-            )
-        ).first()
-
-        if ai_submission:
-            ai_submission.ai_processed = True
-            ai_submission.ai_score = ai_score
-            ai_submission.ai_feedback = ai_feedback
-            ai_submission.ai_strengths = normalized.get("ai_strengths")
-            ai_submission.ai_improvements = normalized.get("ai_improvements")
-            ai_submission.ai_corrections = normalized.get("ai_corrections")
-            ai_submission.processed_at = datetime.utcnow()
+        ai_submission.ai_processed = True
+        ai_submission.ai_score = ai_score
+        ai_submission.ai_feedback = ai_feedback
+        ai_submission.ai_strengths = normalized.get("ai_strengths")
+        ai_submission.ai_improvements = normalized.get("ai_improvements")
+        ai_submission.ai_corrections = normalized.get("ai_corrections")
+        ai_submission.processed_at = datetime.utcnow()
 
         db.commit()
 
@@ -1648,6 +1699,8 @@ async def auto_grade_assignment_submission(
                 "grade": student_assignment.grade,
                 "submitted_at": student_assignment.submitted_at.isoformat(),
                 "graded_by": "Gemini AI",
+                "submission_id": ai_submission.id,
+                "attempts_used": attempts_today,
                 "can_retry": not passing_grade and attempts_today < 3,
                 "attempts_remaining": max(0, 3 - attempts_today) if not passing_grade else 0
             },
@@ -1669,9 +1722,9 @@ async def auto_grade_assignment_submission(
 @router.post("/assignments/{assignment_id}/retry")
 async def retry_assignment_attempt(
     assignment_id: int,
-    submission_data: dict,
     db: db_dependency,
-    current_user: dict = user_dependency
+    current_user: dict = user_dependency,
+    submission_data: dict = Body(default_factory=dict)
 ):
     """
     Handle assignment retry attempts with proper validation
@@ -1679,6 +1732,10 @@ async def retry_assignment_attempt(
     user_id = current_user["user_id"]
     
     try:
+        assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+
         # Check eligibility before allowing retry
         student_assignment = db.query(StudentAssignment).filter(
             and_(
@@ -1700,13 +1757,13 @@ async def retry_assignment_attempt(
         
         # Count attempts in last 24 hours
         twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
-        recent_attempts = db.query(AISubmission).filter(
+        recent_attempts = db.query(func.count(AISubmission.id)).filter(
             and_(
                 AISubmission.user_id == user_id,
                 AISubmission.assignment_id == assignment_id,
                 AISubmission.submitted_at >= twenty_four_hours_ago
             )
-        ).count()
+        ).scalar() or 0
         
         if recent_attempts >= 3:
             raise HTTPException(
@@ -1714,16 +1771,69 @@ async def retry_assignment_attempt(
                 detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
             )
         
+        payload = submission_data or {}
+        has_submission_payload = any(
+            payload.get(key)
+            for key in ("submission_content", "content", "submission_file_path", "file_path")
+        )
+
+        latest_submission = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id
+            )
+        ).order_by(desc(AISubmission.submitted_at)).first()
+
+        attempts_remaining = max(0, 3 - recent_attempts)
+
+        if not has_submission_payload:
+            message = (
+                "Retry enabled. Submit new work to use your next attempt."
+                if attempts_remaining > 0
+                else "No attempts remaining today."
+            )
+
+            return {
+                "status": "ready",
+                "message": message,
+                "assignment": {
+                    "id": assignment.id,
+                    "title": assignment.title,
+                    "type": assignment.assignment_type
+                },
+                "grade_result": None,
+                "student_assignment": {
+                    "id": student_assignment.id,
+                    "status": student_assignment.status,
+                    "grade": student_assignment.grade,
+                    "submitted_at": student_assignment.submitted_at.isoformat() if student_assignment.submitted_at else None,
+                    "graded_by": "Gemini AI" if student_assignment.ai_grade is not None else None,
+                    "submission_id": latest_submission.id if latest_submission else None,
+                    "attempts_used": recent_attempts,
+                    "can_retry": attempts_remaining > 0,
+                    "attempts_remaining": attempts_remaining
+                },
+                "retry_info": {
+                    "is_retry_attempt": True,
+                    "attempts_used": recent_attempts,
+                    "attempts_remaining": attempts_remaining
+                },
+                "processed_at": datetime.utcnow().isoformat()
+            }
+
         # Proceed with auto-grading
         grade_response = await auto_grade_assignment_submission(
             assignment_id, submission_data, db, current_user
         )
         
-        # Add retry context to response
+        student_assignment_payload = grade_response.get("student_assignment", {})
+        attempts_used = student_assignment_payload.get("attempts_used", recent_attempts + 1)
+        attempts_remaining = student_assignment_payload.get("attempts_remaining", max(0, 3 - attempts_used))
+
         grade_response["retry_info"] = {
             "is_retry_attempt": True,
-            "attempts_used": recent_attempts + 1,
-            "attempts_remaining": max(0, 2 - recent_attempts)
+            "attempts_used": attempts_used,
+            "attempts_remaining": attempts_remaining
         }
         
         return grade_response
@@ -1780,16 +1890,22 @@ async def get_assignment_status_with_grade(
         current_grade = student_assignment.grade or 0
         passing_grade = current_grade >= 80.0
         
-        # Count attempts in last 24 hours
+        latest_submission = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id
+            )
+        ).order_by(desc(AISubmission.submitted_at)).first()
+
         twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
-        recent_attempts = db.query(AISubmission).filter(
+        recent_attempts = db.query(func.count(AISubmission.id)).filter(
             and_(
                 AISubmission.user_id == user_id,
                 AISubmission.assignment_id == assignment_id,
                 AISubmission.submitted_at >= twenty_four_hours_ago
             )
-        ).count()
-        
+        ).scalar() or 0
+
         attempts_remaining = max(0, 3 - recent_attempts)
         can_retry = not passing_grade and attempts_remaining > 0
         
@@ -1816,12 +1932,14 @@ async def get_assignment_status_with_grade(
                 "status": student_assignment.status,
                 "grade": current_grade,
                 "submitted_at": student_assignment.submitted_at.isoformat() if student_assignment.submitted_at else None,
-                "feedback": student_assignment.feedback
+                "feedback": student_assignment.feedback,
+                "submission_id": latest_submission.id if latest_submission else None
             },
             "attempts_info": {
                 "attempts_used": recent_attempts,
                 "attempts_remaining": attempts_remaining,
-                "can_retry": can_retry
+                "can_retry": can_retry,
+                "latest_submission_at": latest_submission.submitted_at.isoformat() if latest_submission and latest_submission.submitted_at else None
             },
             "message": message,
             "passing_grade": passing_grade

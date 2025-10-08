@@ -21,7 +21,7 @@ from schemas.afterschool_schema import (
     CourseWithBlocks, ComprehensiveCourseOut, CourseBlockOut, CourseAssignmentOut,
     LessonCreate, LessonUpdate, LessonOut,
     CourseListResponse, LessonListResponse, MessageResponse,
-    StudentDashboard, StudentProgressOut,
+    StudentDashboard, StudentProgressOut, StudentAssignmentOut,
     CourseBlocksProgressOut, BlockProgressOut
 )
 from services.gemini_service import gemini_service
@@ -163,6 +163,40 @@ async def get_course_progress(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to compute course progress: {e}")
+
+
+@router.get("/assignments/my-assignments", response_model=List[StudentAssignmentOut])
+async def get_my_course_assignments(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    course_id: Optional[int] = Query(None, description="Filter assignments by course"),
+    status: Optional[str] = Query(None, description="Filter by status: assigned, submitted, graded, passed, needs_retry, failed"),
+    limit: int = Query(100, ge=1, le=200, description="Limit results"),
+    include_overdue: bool = Query(True, description="Include assignments that are overdue")
+):
+    """Convenience endpoint for mobile clients to fetch the current user's assignments.
+
+    Mirrors the existing student assignment listing while living under the
+    `/after-school/courses` prefix expected by React Native clients.
+    """
+    user_id = current_user["user_id"]
+
+    query = db.query(StudentAssignment).options(
+        joinedload(StudentAssignment.assignment)
+    ).filter(StudentAssignment.user_id == user_id)
+
+    if course_id:
+        query = query.filter(StudentAssignment.course_id == course_id)
+
+    if status:
+        query = query.filter(StudentAssignment.status == status)
+
+    if not include_overdue:
+        query = query.filter(StudentAssignment.due_date >= datetime.utcnow())
+
+    assignments = query.order_by(StudentAssignment.due_date.asc()).limit(limit).all()
+
+    return assignments
 
 @router.get("/{course_id}/blocks-progress", response_model=CourseBlocksProgressOut)
 async def get_course_blocks_progress(

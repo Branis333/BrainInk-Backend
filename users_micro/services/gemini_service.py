@@ -137,23 +137,23 @@ class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
     
-    def _default_safety_settings(self):
-        """Return permissive safety settings to reduce false positives."""
-        categories = [
-            "HARM_CATEGORY_HARASSMENT",
-            "HARM_CATEGORY_HATE_SPEECH",
-            "HARM_CATEGORY_SEXUAL",
-            "HARM_CATEGORY_DANGEROUS_CONTENT",
-            "HARM_CATEGORY_SELF_HARM",
-        ]
-        settings = []
-        try:
-            from google.generativeai.types import SafetySetting  # type: ignore
+    # def _default_safety_settings(self):
+    #     """Return permissive safety settings to reduce false positives."""
+    #     categories = [
+    #         "HARM_CATEGORY_HARASSMENT",
+    #         "HARM_CATEGORY_HATE_SPEECH",
+    #         "HARM_CATEGORY_SEXUAL",
+    #         "HARM_CATEGORY_DANGEROUS_CONTENT",
+    #         "HARM_CATEGORY_SELF_HARM",
+    #     ]
+    #     settings = []
+    #     try:
+    #         from google.generativeai.types import SafetySetting  # type: ignore
 
-            settings = [SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in categories]
-        except Exception:
-            settings = [{"category": cat, "threshold": "BLOCK_NONE"} for cat in categories]
-        return settings
+    #         settings = [SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in categories]
+    #     except Exception:
+    #         settings = [{"category": cat, "threshold": "BLOCK_NONE"} for cat in categories]
+    #     return settings
 
     def _collect_candidate_text(self, response) -> str:
         """Safely collect text from a Gemini response object."""
