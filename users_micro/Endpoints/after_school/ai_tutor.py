@@ -63,9 +63,9 @@ async def send_ai_tutor_message(
 @router.post("/sessions/{session_id}/checkpoint", response_model=TutorCheckpointResponse)
 async def submit_ai_tutor_checkpoint(
     session_id: int,
+    db: db_dependency,
     checkpoint_type: TutorCheckpointType = Form(...),
     notes: Optional[str] = Form(None),
-    db: db_dependency = Depends(),
     artifact: Optional[UploadFile] = File(None),
     current_user: dict = user_dependency,
 ):
