@@ -1863,32 +1863,41 @@ async def get_assignment_status_with_grade(
         if not assignment:
             raise HTTPException(status_code=404, detail="Assignment not found")
         
-        # Get the student assignment record
+        # Get or create the student assignment record
         student_assignment = db.query(StudentAssignment).filter(
             and_(
                 StudentAssignment.assignment_id == assignment_id,
                 StudentAssignment.user_id == user_id
             )
         ).first()
-        
+
         if not student_assignment:
-            return {
-                "assignment": {
-                    "id": assignment.id,
-                    "title": assignment.title,
-                    "description": assignment.description,
-                    "points": assignment.points,
-                    "due_date": assignment.due_days_after_assignment
-                },
-                "status": "not_started",
-                "grade": None,
-                "message": "Assignment not yet started",
-                "can_retry": False
-            }
-        
-        # Calculate current status
-        current_grade = student_assignment.grade or 0
-        passing_grade = current_grade >= 80.0
+            due_days = getattr(assignment, "due_days_after_assignment", None) or 7
+            student_assignment = StudentAssignment(
+                user_id=user_id,
+                assignment_id=assignment.id,
+                course_id=assignment.course_id,
+                due_date=datetime.utcnow() + timedelta(days=due_days),
+                status="assigned",
+            )
+            try:
+                db.add(student_assignment)
+                db.commit()
+                db.refresh(student_assignment)
+            except Exception:
+                db.rollback()
+                student_assignment = db.query(StudentAssignment).filter(
+                    and_(
+                        StudentAssignment.assignment_id == assignment_id,
+                        StudentAssignment.user_id == user_id
+                    )
+                ).first()
+                if not student_assignment:
+                    raise HTTPException(status_code=500, detail="Failed to create student assignment record")
+
+        required_pct = 80.0
+        current_grade = float(student_assignment.grade) if student_assignment.grade is not None else 0.0
+        passing_grade = current_grade >= required_pct
         
         latest_submission = db.query(AISubmission).filter(
             and_(
@@ -1907,15 +1916,19 @@ async def get_assignment_status_with_grade(
         ).scalar() or 0
 
         attempts_remaining = max(0, 3 - recent_attempts)
-        can_retry = not passing_grade and attempts_remaining > 0
-        
-        # Determine message based on status
         if passing_grade:
+            attempts_remaining = 0
+        can_retry = not passing_grade and attempts_remaining > 0
+
+        # Determine message based on status
+        if student_assignment.submitted_at is None:
+            message = "Assignment not yet started. Submit your first attempt to get graded."
+        elif passing_grade:
             message = f"✅ Passed with {current_grade:.1f}%! Great job!"
-        elif student_assignment.status == "failed":
+        elif student_assignment.status == "failed" or attempts_remaining == 0:
             message = f"❌ Failed with {current_grade:.1f}%. No more attempts available today."
         elif student_assignment.status == "needs_retry":
-            message = f"📝 Score: {current_grade:.1f}% (Need 80% to pass). {attempts_remaining} attempts remaining today."
+            message = f"📝 Score: {current_grade:.1f}% (Need {required_pct:.0f}% to pass). {attempts_remaining} attempts remaining today."
         else:
             message = f"Score: {current_grade:.1f}%"
         
@@ -1925,7 +1938,7 @@ async def get_assignment_status_with_grade(
                 "title": assignment.title,
                 "description": assignment.description,
                 "points": assignment.points,
-                "required_percentage": 80.0
+                "required_percentage": required_pct
             },
             "student_assignment": {
                 "id": student_assignment.id,
