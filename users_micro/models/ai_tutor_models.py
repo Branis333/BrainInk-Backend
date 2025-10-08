@@ -97,7 +97,7 @@ class AITutorInteraction(Base):
     input_type = Column(SQLEnum(TutorInteractionInputType), nullable=False, default=TutorInteractionInputType.TEXT)
     output_type = Column(String(50), nullable=True)
     latency_ms = Column(Float, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    metadata_payload = Column("metadata", JSON, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 

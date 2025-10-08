@@ -110,7 +110,7 @@ class AITutorService:
             role=TutorInteractionRole.STUDENT,
             content=message_request.message,
             input_type=self._map_input_type(message_request.input_type),
-            metadata=message_request.metadata,
+            metadata_payload=message_request.metadata,
         )
         db.add(interaction)
         db.flush()
@@ -172,7 +172,7 @@ class AITutorService:
                         role=TutorInteractionRole.TUTOR,
                         content=tutor_message,
                         input_type=TutorInteractionInputType.TEXT,
-                        metadata={"analysis": active_checkpoint.ai_feedback},
+                        metadata_payload={"analysis": active_checkpoint.ai_feedback},
                     )
                 )
 
@@ -357,7 +357,7 @@ class AITutorService:
                 role=TutorInteractionRole.TUTOR,
                 content=tutor_turn.narration,
                 input_type=TutorInteractionInputType.TEXT,
-                metadata={
+                metadata_payload={
                     "checkpoint": tutor_turn.checkpoint.dict() if tutor_turn.checkpoint else None,
                     "follow_up_prompts": tutor_turn.follow_up_prompts,
                 },
