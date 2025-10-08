@@ -81,7 +81,7 @@ class AITutorSession(Base):
         "AITutorCheckpoint",
         back_populates="session",
         cascade="all, delete-orphan",
-        order_by="AITutorCheckpoint.created_at",
+        order_by="AITutorCheckpoint.started_at",
     )
 
 
