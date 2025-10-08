@@ -52,6 +52,7 @@ class TutorCheckpointStatus(Enum):
 
 class AITutorSession(Base):
     __tablename__ = "ai_tutor_sessions"
+    __allow_unmapped__ = True
 
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, nullable=False)
@@ -86,6 +87,7 @@ class AITutorSession(Base):
 
 class AITutorInteraction(Base):
     __tablename__ = "ai_tutor_interactions"
+    __allow_unmapped__ = True
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("ai_tutor_sessions.id"), nullable=False, index=True)
@@ -104,6 +106,7 @@ class AITutorInteraction(Base):
 
 class AITutorCheckpoint(Base):
     __tablename__ = "ai_tutor_checkpoints"
+    __allow_unmapped__ = True
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("ai_tutor_sessions.id"), nullable=False, index=True)
