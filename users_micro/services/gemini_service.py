@@ -205,7 +205,6 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
-                safety_settings=self._default_safety_settings(),
             )
 
         response = await asyncio.to_thread(_call_model)
