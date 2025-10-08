@@ -52,6 +52,7 @@ class TutorCheckpointStatus(Enum):
 
 class AITutorSession(Base):
     __tablename__ = "ai_tutor_sessions"
+    __allow_unmapped__ = True
 
     id = Column(Integer, primary_key=True, index=True)
     student_id = Column(Integer, nullable=False)
@@ -80,12 +81,13 @@ class AITutorSession(Base):
         "AITutorCheckpoint",
         back_populates="session",
         cascade="all, delete-orphan",
-        order_by="AITutorCheckpoint.created_at",
+        order_by="AITutorCheckpoint.started_at",
     )
 
 
 class AITutorInteraction(Base):
     __tablename__ = "ai_tutor_interactions"
+    __allow_unmapped__ = True
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("ai_tutor_sessions.id"), nullable=False, index=True)
@@ -95,7 +97,7 @@ class AITutorInteraction(Base):
     input_type = Column(SQLEnum(TutorInteractionInputType), nullable=False, default=TutorInteractionInputType.TEXT)
     output_type = Column(String(50), nullable=True)
     latency_ms = Column(Float, nullable=True)
-    metadata = Column(JSON, nullable=True)
+    metadata_payload = Column("metadata", JSON, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
@@ -104,6 +106,7 @@ class AITutorInteraction(Base):
 
 class AITutorCheckpoint(Base):
     __tablename__ = "ai_tutor_checkpoints"
+    __allow_unmapped__ = True
 
     id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("ai_tutor_sessions.id"), nullable=False, index=True)
