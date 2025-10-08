@@ -9,6 +9,7 @@ import os
 import shutil
 import uuid
 import asyncio
+import logging
 import aiofiles
 from PIL import Image
 import io
@@ -24,10 +25,11 @@ from schemas.afterschool_schema import (
 )
 from services.gemini_service import gemini_service
 import base64
-
 router = APIRouter(prefix="/after-school/uploads", tags=["After-School File Uploads"])
+logger = logging.getLogger(__name__)
 
 # Dependency for current user
+user_dependency = Depends(get_current_user)
 user_dependency = Depends(get_current_user)
 
 # Configuration
@@ -523,6 +525,17 @@ async def bulk_upload_images_to_pdf_session(
             submission.processed_at = datetime.utcnow()
             db.commit()
             ai_results = normalized
+            
+            # Log AI grading results for debugging
+            logger.info(
+                "AI grading completed",
+                extra={
+                    "submission_id": submission.id,
+                    "ai_score": normalized.get("ai_score"),
+                    "score_type": type(normalized.get("ai_score")).__name__,
+                    "has_feedback": bool(normalized.get("ai_feedback"))
+                }
+            )
         except Exception as ai_err:
             # Don't fail the whole request if AI grading has an issue
             print(f"AI grading error: {ai_err}")
@@ -575,6 +588,17 @@ async def bulk_upload_images_to_pdf_session(
 
         # Final commit to ensure all changes persisted
         db.commit()
+        
+        # Log what we're returning for debugging
+        logger.info(
+            "Returning bulk upload response",
+            extra={
+                "submission_id": submission.id,
+                "ai_score": ai_results.get("ai_score") if isinstance(ai_results, dict) else None,
+                "ai_processed": submission.ai_processed,
+                "has_feedback": bool(submission.ai_feedback)
+            }
+        )
         
         # Return JSON summary instead of raw PDF content to better support mobile clients
         return JSONResponse({
