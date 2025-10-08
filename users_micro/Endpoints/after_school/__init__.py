@@ -11,6 +11,7 @@ from . import grades
 from . import uploads
 from . import reading_assistant
 from . import assignments
+from . import ai_tutor
 
 __all__ = [
     "course",
@@ -18,4 +19,5 @@ __all__ = [
     "uploads",
     "reading_assistant",
     "assignments",
+    "ai_tutor",
 ]

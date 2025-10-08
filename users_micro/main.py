@@ -1,7 +1,14 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
-from Endpoints.after_school import course, grades as after_school_grades, uploads as after_school_uploads, reading_assistant, assignments as after_school_assignments
+from Endpoints.after_school import (
+    course,
+    grades as after_school_grades,
+    uploads as after_school_uploads,
+    reading_assistant,
+    assignments as after_school_assignments,
+    ai_tutor as after_school_ai_tutor,
+)
 from db.database import get_engine, test_connection
 from dotenv import load_dotenv
 import logging
@@ -16,6 +23,7 @@ import models.users_models as models
 import models.study_area_models as study_models
 import models.afterschool_models as afterschool_models
 import models.reading_assistant_models as reading_models
+import models.ai_tutor_models as ai_tutor_models
 from sqlalchemy import text
 
 app = FastAPI(
@@ -79,7 +87,7 @@ async def startup_event():
 async def create_tables_startup():
     try:
         engine = get_engine()
-        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base]:
+        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base, ai_tutor_models.Base]:
             base.metadata.create_all(bind=engine, checkfirst=True)
         logger.info("✅ Tables ensured (lazy engine)")
     except Exception as e:
@@ -105,6 +113,7 @@ app.include_router(after_school_grades.router)  # Already has prefix /after-scho
 app.include_router(after_school_uploads.router)  # Already has prefix /after-school/uploads
 app.include_router(reading_assistant.router)  # Already has prefix /after-school/reading-assistant
 app.include_router(after_school_assignments.router)  # New: /after-school/assignments
+app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
 
 @app.get("/")
 def root():

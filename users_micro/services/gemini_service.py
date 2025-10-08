@@ -2101,5 +2101,188 @@ class GeminiService:
         
         return validation_result
 
+    # ------------------------------------------------------------------
+    # AI tutor helpers
+    # ------------------------------------------------------------------
+
+    async def generate_ai_tutor_turn(
+        self,
+        *,
+        persona: Optional[Dict[str, Any]],
+        content_segment: Dict[str, Any],
+        history: List[Dict[str, Any]],
+        learner_message: Optional[str],
+        total_segments: int,
+        current_index: int,
+    ) -> Dict[str, Any]:
+        """Generate a conversational turn for the AI tutor overlay."""
+
+        persona_label = self._describe_persona(persona)
+        history_text = self._render_history_for_prompt(history)
+        learner_line = learner_message or "(no new learner message)"
+        segment_text = content_segment.get("text", "")
+
+        prompt = (
+            f"You are {persona_label}.\n"
+            f"You are guiding a learner through structured content with {total_segments} total segments.\n"
+            f"You are currently guiding segment {current_index + 1}.\n\n"
+            f"CONTENT SEGMENT:\n\"\"\"{segment_text}\"\"\"\n\n"
+            "INTERACTION HISTORY (MOST RECENT FIRST):\n"
+            f"{history_text}\n\n"
+            "LATEST LEARNER MESSAGE:\n"
+            f"{learner_line}\n\n"
+            "TASK:\n"
+            "- Provide an engaging narration explaining the current segment in a warm, tutor-like voice.\n"
+            "- Optionally ask a concise comprehension question to confirm understanding.\n"
+            "- Offer 1-3 short follow-up prompts the learner could explore next.\n"
+            "- Decide if a checkpoint activity is needed. Checkpoints can be of type \"photo\", \"reflection\", or \"quiz\".\n"
+            "- If a checkpoint is required, craft clear instructions and up to 3 bullet criteria for success.\n"
+            "- Indicate whether the tutor should advance to the next content segment after this turn.\n\n"
+            "Return a JSON object with the exact schema:\n"
+            "{\n"
+            "  \"narration\": string,\n"
+            "  \"comprehension_check\": string or null,\n"
+            "  \"follow_up_prompts\": [string],\n"
+            "  \"checkpoint\": {\n"
+            "    \"required\": boolean,\n"
+            "    \"checkpoint_type\": \"photo\" | \"reflection\" | \"quiz\",\n"
+            "    \"instructions\": string,\n"
+            "    \"criteria\": [string]\n"
+            "  } or null,\n"
+            "  \"advance_segment\": boolean\n"
+            "}\n\n"
+            "Always fill every field. If something is not needed, use null (for strings) or false.\n"
+            "Respond with pure JSON only."
+        )
+
+        raw = await self._generate_json_response(
+            prompt,
+            temperature=0.35,
+            max_output_tokens=768,
+        )
+
+        return self._normalise_tutor_turn_payload(raw)
+
+    async def analyze_student_work_with_gemini(
+        self,
+        *,
+        prompt: str,
+        file_path: Optional[str],
+        mime_type: Optional[str],
+        learner_notes: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Analyze an uploaded learner artifact (e.g., photo of work) and return actionable feedback."""
+
+        attachments: List[Any] = []
+
+        if file_path and Path(file_path).exists():
+            uploaded = genai.upload_file(path=file_path, display_name=Path(file_path).name)
+            processed_file = self._wait_for_file_processing(uploaded)
+            attachments.append(processed_file)
+
+        analysis_prompt = (
+            "You are an expert tutor reviewing a learner submission.\n"
+            f"Instructions for the learner: {prompt}\n\n"
+            f"Learner notes: {learner_notes or '(none provided)'}\n\n"
+            "Provide calm, actionable feedback suitable for a student. Emphasise encouragement before corrections.\n\n"
+            "Return JSON with schema:\n"
+            "{\n"
+            "  \"feedback\": {\n"
+            "    \"summary\": string,\n"
+            "    \"strengths\": [string],\n"
+            "    \"improvements\": [string],\n"
+            "    \"next_steps\": [string]\n"
+            "  },\n"
+            "  \"score\": number between 0 and 100 or null,\n"
+            "  \"needs_review\": boolean,\n"
+            "  \"tutor_message\": string\n"
+            "}\n\n"
+            "Respond with JSON only."
+        )
+
+        result = await self._generate_json_response(
+            analysis_prompt,
+            attachments=attachments if attachments else None,
+            temperature=0.2,
+            max_output_tokens=640,
+        )
+
+        return self._normalise_analysis_payload(result)
+
+    def _describe_persona(self, persona: Optional[Dict[str, Any]]) -> str:
+        if not persona:
+            return "a friendly, encouraging AI tutor"
+
+        label = persona.get("persona") or "friendly"
+        focus = persona.get("learning_focus") or "balanced skill support"
+        return f"a {label} AI tutor with focus on {focus}"
+
+    def _render_history_for_prompt(self, history: List[Dict[str, Any]]) -> str:
+        if not history:
+            return "(no prior messages)"
+
+        formatted = []
+        for item in history[-8:]:
+            role = item.get("role", "unknown").upper()
+            content = item.get("content", "")
+            formatted.append(f"[{role}] {content}")
+        return "\n".join(reversed(formatted))
+
+    def _normalise_tutor_turn_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        narration = raw.get("narration") or "Let's keep learning together!"
+        follow_ups = raw.get("follow_up_prompts") or []
+
+        checkpoint_payload = raw.get("checkpoint") or None
+        checkpoint: Optional[Dict[str, Any]] = None
+        if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("required"):
+            checkpoint = {
+                "required": bool(checkpoint_payload.get("required", False)),
+                "checkpoint_type": (checkpoint_payload.get("checkpoint_type") or "reflection").lower(),
+                "instructions": checkpoint_payload.get("instructions") or "Take a moment to reflect on what you learned.",
+                "criteria": checkpoint_payload.get("criteria") or [],
+            }
+
+        return {
+            "narration": narration,
+            "comprehension_check": raw.get("comprehension_check"),
+            "follow_up_prompts": follow_ups,
+            "checkpoint": checkpoint,
+            "advance_segment": bool(raw.get("advance_segment", True)),
+        }
+
+    def _normalise_analysis_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        feedback = raw.get("feedback") or {}
+        formatted_feedback = {
+            "summary": feedback.get("summary") or "Thanks for sharing your work!",
+            "strengths": feedback.get("strengths") or [],
+            "improvements": feedback.get("improvements") or [],
+            "next_steps": feedback.get("next_steps") or [],
+        }
+
+        return {
+            "feedback": formatted_feedback,
+            "score": raw.get("score"),
+            "needs_review": bool(raw.get("needs_review", False)),
+            "tutor_message": raw.get("tutor_message") or formatted_feedback["summary"],
+        }
+
+    def _wait_for_file_processing(self, uploaded_file):
+        import time
+
+        max_wait = 30
+        start = time.time()
+
+        while getattr(uploaded_file, "state", None) and uploaded_file.state.name == "PROCESSING":
+            if time.time() - start > max_wait:
+                raise TimeoutError("Gemini file processing timed out")
+            time.sleep(2)
+            uploaded_file = genai.get_file(uploaded_file.name)
+
+        if getattr(uploaded_file, "state", None) and uploaded_file.state.name == "FAILED":
+            raise RuntimeError("Gemini failed to process the uploaded file")
+
+        return uploaded_file
+
+
 # Singleton instance
 gemini_service = GeminiService()
