@@ -1475,6 +1475,25 @@ async def auto_grade_assignment_submission(
         filename: Optional[str] = None
         raw_path: Optional[Path] = None
 
+        current_time = datetime.utcnow()
+
+        # Enforce per-assignment attempt limits before processing a new submission
+        twenty_four_hours_ago = current_time - timedelta(hours=24)
+        recent_attempts_before = db.query(func.count(AISubmission.id)).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).scalar() or 0
+
+        existing_grade = float(student_assignment.grade) if student_assignment.grade is not None else 0.0
+        if recent_attempts_before >= 3 and existing_grade < 80.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
+            )
+
         if submission_file_path:
             raw_path = Path(submission_file_path)
             if not raw_path.is_absolute():
@@ -1554,7 +1573,6 @@ async def auto_grade_assignment_submission(
         ai_score = normalized.get("ai_score")
         ai_feedback = normalized.get("ai_feedback")
 
-        current_time = datetime.utcnow()
         submission_id = submission_data.get("submission_id")
 
         ai_submission_query = db.query(AISubmission).filter(
@@ -1611,15 +1629,7 @@ async def auto_grade_assignment_submission(
             if ai_submission.submission_type in (None, "") and assignment.assignment_type:
                 ai_submission.submission_type = assignment.assignment_type
 
-        twenty_four_hours_ago = current_time - timedelta(hours=24)
-        attempts_today = db.query(func.count(AISubmission.id)).filter(
-            and_(
-                AISubmission.user_id == user_id,
-                AISubmission.assignment_id == assignment_id,
-                AISubmission.submitted_at >= twenty_four_hours_ago
-            )
-        ).scalar() or 0
-        attempts_today = max(attempts_today, 1)
+        attempts_today = recent_attempts_before + 1
 
         student_assignment.ai_grade = ai_score
         student_assignment.grade = ai_score
