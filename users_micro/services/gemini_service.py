@@ -5,7 +5,7 @@ import asyncio
 import tempfile
 import mimetypes
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
 import re
 import google.generativeai as genai
@@ -137,23 +137,23 @@ class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
     
-    def _default_safety_settings(self):
-        """Return permissive safety settings to reduce false positives."""
-        categories = [
-            "HARM_CATEGORY_HARASSMENT",
-            "HARM_CATEGORY_HATE_SPEECH",
-            "HARM_CATEGORY_SEXUAL",
-            "HARM_CATEGORY_DANGEROUS_CONTENT",
-            "HARM_CATEGORY_SELF_HARM",
-        ]
-        settings = []
-        try:
-            from google.generativeai.types import SafetySetting  # type: ignore
+    # def _default_safety_settings(self):
+    #     """Return permissive safety settings to reduce false positives."""
+    #     categories = [
+    #         "HARM_CATEGORY_HARASSMENT",
+    #         "HARM_CATEGORY_HATE_SPEECH",
+    #         "HARM_CATEGORY_SEXUAL",
+    #         "HARM_CATEGORY_DANGEROUS_CONTENT",
+    #         "HARM_CATEGORY_SELF_HARM",
+    #     ]
+    #     settings = []
+    #     try:
+    #         from google.generativeai.types import SafetySetting  # type: ignore
 
-            settings = [SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in categories]
-        except Exception:
-            settings = [{"category": cat, "threshold": "BLOCK_NONE"} for cat in categories]
-        return settings
+    #         settings = [SafetySetting(category=cat, threshold="BLOCK_NONE") for cat in categories]
+    #     except Exception:
+    #         settings = [{"category": cat, "threshold": "BLOCK_NONE"} for cat in categories]
+    #     return settings
 
     def _collect_candidate_text(self, response) -> str:
         """Safely collect text from a Gemini response object."""
@@ -205,12 +205,53 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
-                safety_settings=self._default_safety_settings(),
             )
 
         response = await asyncio.to_thread(_call_model)
-        response_text = self._collect_candidate_text(response)
-        return self._safe_parse_json(response_text)
+        try:
+            response_text = self._collect_candidate_text(response)
+        except ValueError as missing_text:
+            # If Gemini returned nothing, attempt a looser retry that does not force JSON
+            # so we can salvage any textual feedback rather than failing outright.
+            retry_prompt = (
+                prompt
+                + "\n\nIf you cannot output structured JSON, provide plain text with a percentage score"
+            )
+
+            def _call_model_plain():
+                payload: Any
+                if attachments:
+                    payload = list(attachments) + [retry_prompt]
+                else:
+                    payload = retry_prompt
+
+                return self.config.model.generate_content(
+                    payload,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=temperature,
+                        max_output_tokens=max_output_tokens,
+                    ),
+                )
+
+            response_plain = await asyncio.to_thread(_call_model_plain)
+            try:
+                response_text = self._collect_candidate_text(response_plain)
+            except Exception:
+                raise missing_text
+
+            # Attempt to coerce plain text into JSON-compatible shape
+            parsed = self._safe_parse_json_soft(response_text)
+            if parsed is None:
+                raise missing_text
+            return parsed
+
+        try:
+            return self._safe_parse_json(response_text)
+        except ValueError:
+            parsed_soft = self._safe_parse_json_soft(response_text)
+            if parsed_soft is not None:
+                return parsed_soft
+            raise
 
     def _extract_text_from_pdf_bytes(self, file_bytes: bytes) -> str:
         """Extract plaintext from PDF bytes using pypdf when available."""
@@ -271,6 +312,161 @@ class GeminiService:
             return _json.loads(t.replace("'", '"'))
         except Exception as e:
             raise ValueError(f"Failed to parse JSON from response: {str(e)}")
+
+    def _safe_parse_json_soft(self, text: str) -> Optional[Dict[str, Any]]:
+        """Best-effort parsing that tolerates plain text with simple key:value patterns.
+
+        Returns a dict if something usable can be derived; otherwise None."""
+        if not text:
+            return None
+
+        try:
+            return self._safe_parse_json(text)
+        except Exception:
+            pass
+
+        # Attempt to parse simple "key: value" newline formats
+        def _try_float_local(value: str) -> Optional[float]:
+            try:
+                return float(value)
+            except Exception:
+                cleaned = value.replace("%", "").strip()
+                try:
+                    return float(cleaned)
+                except Exception:
+                    return None
+
+        lines = [line.strip() for line in text.splitlines() if ":" in line]
+        result: Dict[str, Any] = {}
+        for line in lines:
+            try:
+                key, value = line.split(":", 1)
+                key = key.strip().lower().replace(" ", "_")
+                value = value.strip()
+                if key and value:
+                    # Attempt numeric conversion for scores
+                    numeric_value = _try_float_local(value)
+                    result[key] = numeric_value if numeric_value is not None else value
+            except Exception:
+                continue
+
+        return result or None
+
+    def _clamp_percentage(self, value: float) -> float:
+        return max(0.0, min(100.0, round(float(value), 2)))
+
+    def _parse_percentage_token(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return self._clamp_percentage(float(value))
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            ratio_match = re.match(r"(-?\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
+            if ratio_match:
+                numerator = float(ratio_match.group(1))
+                denominator = float(ratio_match.group(2))
+                if denominator != 0:
+                    return self._clamp_percentage((numerator / denominator) * 100.0)
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            if match:
+                number = float(match.group())
+                if "%" in text or "percent" in text.lower() or number <= 100:
+                    return self._clamp_percentage(number)
+        return None
+
+    def _parse_score_token(self, value: Any) -> Tuple[Optional[float], Optional[float]]:
+        if value is None:
+            return (None, None)
+        if isinstance(value, (int, float)):
+            return (float(value), None)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return (None, None)
+            ratio_match = re.match(r"(-?\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
+            if ratio_match:
+                numerator = float(ratio_match.group(1))
+                denominator = float(ratio_match.group(2))
+                return (numerator, denominator if denominator != 0 else None)
+            match = re.search(r"-?\d+(?:\.\d+)?", text)
+            if match:
+                return (float(match.group()), None)
+        return (None, None)
+
+    def _to_float(self, value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            text = text.replace("%", "")
+            try:
+                return float(text)
+            except Exception:
+                match = re.search(r"-?\d+(?:\.\d+)?", text)
+                if match:
+                    try:
+                        return float(match.group())
+                    except Exception:
+                        return None
+        return None
+
+    def _coerce_percentage(self, payload: Dict[str, Any], max_points: int) -> Optional[float]:
+        candidates = [
+            payload.get("percentage"),
+            payload.get("percent"),
+            payload.get("score_percentage"),
+            payload.get("score_percent"),
+        ]
+        for candidate in candidates:
+            pct = self._parse_percentage_token(candidate)
+            if pct is not None:
+                return pct
+
+        score_value, score_max = self._parse_score_token(payload.get("score"))
+        if score_value is not None:
+            denominator_candidates = [
+                score_max,
+                payload.get("max_points"),
+                payload.get("points"),
+                max_points,
+            ]
+            for denom in denominator_candidates:
+                denom_val = self._to_float(denom)
+                if denom_val and denom_val > 0:
+                    return self._clamp_percentage((score_value / denom_val) * 100.0)
+
+        rubric = payload.get("rubric_breakdown")
+        if isinstance(rubric, dict):
+            total_scored = 0.0
+            total_max = 0.0
+            for crit in rubric.values():
+                if isinstance(crit, dict):
+                    crit_score, _ = self._parse_score_token(crit.get("score"))
+                    crit_max_val = self._to_float(crit.get("max"))
+                    if crit_score is not None and crit_max_val and crit_max_val > 0:
+                        total_scored += crit_score
+                        total_max += crit_max_val
+            if total_max > 0:
+                return self._clamp_percentage((total_scored / total_max) * 100.0)
+
+        feedback_candidates = [
+            payload.get("overall_feedback"),
+            payload.get("detailed_feedback"),
+            payload.get("feedback"),
+        ]
+        for text in feedback_candidates:
+            pct = self._parse_percentage_token(text)
+            if pct is not None:
+                return pct
+
+        return None
         
     async def analyze_textbook_and_generate_course(
         self, 
@@ -1341,15 +1537,25 @@ class GeminiService:
                 temperature=0.3,
                 max_output_tokens=2048,
             )
-            
-            # Ensure score consistency
-            if "score" in grade_result and "percentage" not in grade_result:
-                try:
-                    score_val = float(grade_result.get("score", 0))
-                    grade_result["percentage"] = (score_val / max_points) * 100 if max_points else score_val
-                except Exception:
-                    grade_result["percentage"] = None
-            
+
+            coerced_percentage = self._coerce_percentage(grade_result, max_points)
+            if coerced_percentage is not None:
+                grade_result["percentage"] = coerced_percentage
+            elif "percentage" in grade_result:
+                parsed_percentage = self._parse_percentage_token(grade_result.get("percentage"))
+                if parsed_percentage is not None:
+                    grade_result["percentage"] = parsed_percentage
+
+            score_value, _ = self._parse_score_token(grade_result.get("score"))
+            if score_value is not None:
+                grade_result["score"] = round(score_value, 2)
+
+            if not grade_result.get("overall_feedback"):
+                for feedback_key in ("detailed_feedback", "feedback", "ai_feedback"):
+                    if grade_result.get(feedback_key):
+                        grade_result["overall_feedback"] = grade_result[feedback_key]
+                        break
+
             # Add metadata
             grade_result["graded_by"] = "Gemini AI"
             grade_result["graded_at"] = datetime.utcnow().isoformat()
@@ -1538,13 +1744,23 @@ class GeminiService:
                 max_output_tokens=2048,
             )
 
-            # Normalize score fields
-            if "percentage" not in grade_result and "score" in grade_result:
-                try:
-                    score_val = float(grade_result.get("score", 0))
-                    grade_result["percentage"] = (score_val / max_points) * 100 if max_points else score_val
-                except Exception:
-                    grade_result["percentage"] = None
+            coerced_percentage = self._coerce_percentage(grade_result, max_points)
+            if coerced_percentage is not None:
+                grade_result["percentage"] = coerced_percentage
+            elif "percentage" in grade_result:
+                parsed_percentage = self._parse_percentage_token(grade_result.get("percentage"))
+                if parsed_percentage is not None:
+                    grade_result["percentage"] = parsed_percentage
+
+            score_value, _ = self._parse_score_token(grade_result.get("score"))
+            if score_value is not None:
+                grade_result["score"] = round(score_value, 2)
+
+            if not grade_result.get("overall_feedback"):
+                for feedback_key in ("detailed_feedback", "feedback", "ai_feedback"):
+                    if grade_result.get(feedback_key):
+                        grade_result["overall_feedback"] = grade_result[feedback_key]
+                        break
 
             grade_result["graded_by"] = "Gemini AI"
             grade_result["graded_at"] = datetime.utcnow().isoformat()

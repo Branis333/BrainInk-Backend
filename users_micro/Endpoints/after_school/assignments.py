@@ -1,15 +1,84 @@
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import and_
-from datetime import datetime, timedelta
 
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
+from Endpoints.after_school.grades import get_assignment_status_with_grade
 from models.afterschool_models import CourseAssignment, StudentAssignment
 
 router = APIRouter(prefix="/after-school/assignments", tags=["After-School Assignments (Public)"])
 
 # Dependency for current user
 user_dependency = Depends(get_current_user)
+
+@router.get("/{assignment_id}")
+async def get_single_assignment(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get a single assignment with full details including student-specific status and attempts.
+    
+    This endpoint provides comprehensive assignment information:
+    - Assignment definition (title, description, points, instructions, etc.)
+    - Student's assignment record if they're assigned to it
+    - Attempt tracking scoped to this specific assignment
+    - Current grade and feedback
+    
+    Perfect for displaying detailed assignment views with accurate attempt counts.
+    """
+    user_id = current_user["user_id"]
+    
+    # Get the assignment definition
+    assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Assignment not found")
+    
+    # Get student's assignment record if exists
+    student_assignment = db.query(StudentAssignment).filter(
+        and_(
+            StudentAssignment.assignment_id == assignment_id,
+            StudentAssignment.user_id == user_id
+        )
+    ).first()
+    
+    # Get status with attempts (properly scoped per assignment)
+    try:
+        status = await get_assignment_status_with_grade(
+            assignment_id=assignment_id,
+            db=db,
+            current_user=current_user
+        )
+    except HTTPException as e:
+        if e.status_code == 404:
+            # Not assigned yet - return basic assignment info without student data
+            status = None
+        else:
+            raise
+    
+    return {
+        "assignment": {
+            "id": assignment.id,
+            "course_id": assignment.course_id,
+            "title": assignment.title,
+            "description": assignment.description,
+            "assignment_type": assignment.assignment_type,
+            "instructions": assignment.instructions,
+            "duration_minutes": assignment.duration_minutes,
+            "points": assignment.points,
+            "rubric": assignment.rubric,
+            "week_assigned": assignment.week_assigned,
+            "block_id": assignment.block_id,
+            "due_days_after_assignment": assignment.due_days_after_assignment,
+            "submission_format": assignment.submission_format,
+            "learning_outcomes": assignment.learning_outcomes,
+            "generated_by_ai": assignment.generated_by_ai,
+            "is_active": assignment.is_active
+        },
+        "student_status": status,
+        "is_assigned": student_assignment is not None
+    }
 
 @router.get("/{assignment_id}/status")
 async def get_assignment_status_public(
@@ -21,70 +90,14 @@ async def get_assignment_status_public(
     Public assignment status endpoint expected by mobile app at
     GET /after-school/assignments/{assignment_id}/status
 
-    Returns a minimal payload compatible with frontend types. This mirrors
-    the minimal status present in sessions router but at the correct path.
+    Returns the richer status payload (grade + attempts) expected by the mobile app.
+    Delegates to the shared implementation used by the sessions router so the
+    data stays consistent regardless of which endpoint the client calls.
+    
+    Attempts are properly scoped per assignment, not shared across all assignments.
     """
-    user_id = current_user["user_id"]
-
-    assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
-    if not assignment:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found")
-
-    sa = db.query(StudentAssignment).filter(
-        and_(
-            StudentAssignment.assignment_id == assignment_id,
-            StudentAssignment.user_id == user_id
-        )
-    ).first()
-
-    # If no student assignment exists yet, seed a lightweight record so the app has something to track
-    if not sa:
-        # Due date fallback: from assignment config or 7 days from now
-        due_days = getattr(assignment, 'due_days_after_assignment', None) or 7
-        sa = StudentAssignment(
-            user_id=user_id,
-            assignment_id=assignment.id,
-            course_id=assignment.course_id,
-            due_date=datetime.utcnow() + timedelta(days=due_days),
-            status='assigned'
-        )
-        try:
-            db.add(sa)
-            db.commit()
-            db.refresh(sa)
-        except Exception:
-            db.rollback()
-            # If unique constraint hit due to race, fetch again
-            sa = db.query(StudentAssignment).filter(
-                and_(
-                    StudentAssignment.assignment_id == assignment_id,
-                    StudentAssignment.user_id == user_id
-                )
-            ).first()
-
-    required_pct = 80
-    can_retry = False
-
-    return {
-        "assignment": {
-            "id": assignment.id,
-            "title": assignment.title,
-            "description": assignment.description or assignment.title,
-            "points": assignment.points or 100,
-            "required_percentage": required_pct,
-        },
-        "student_assignment": {
-            "id": sa.id,
-            "status": sa.status,
-            "grade": float(sa.grade) if sa.grade is not None else 0.0,
-            "submitted_at": sa.submitted_at.isoformat() if sa.submitted_at else None,
-            "feedback": sa.feedback or None,
-        },
-        "attempts_info": {
-            "attempts_used": 0,
-            "attempts_remaining": 0,
-            "can_retry": can_retry,
-        },
-        "message": "OK",
-        "passing_grade": (sa.grade or 0) >= required_pct,
-    }
+    return await get_assignment_status_with_grade(
+        assignment_id=assignment_id,
+        db=db,
+        current_user=current_user,
+    )
