@@ -19,7 +19,6 @@ from schemas.afterschool_schema import (
     CourseBlockOut, CourseAssignmentOut, StudentAssignmentOut
 )
 from services.gemini_service import gemini_service
-from Endpoints.after_school.uploads import normalize_ai_grading
 
 logger = logging.getLogger(__name__)
 
@@ -934,8 +933,21 @@ async def grade_course_submissions(
                     submission_type=item.get("submission_type", "homework"),
                 )
 
-                preview_normalized = normalize_ai_grading(grade_result, max_points=max_points)
-                if preview_normalized.get("ai_score") is None:
+                # Extract score from raw data (best effort, handle malformed keys)
+                extracted_score = None
+                if isinstance(grade_result, dict):
+                    score_val = grade_result.get('score') or grade_result.get('"score"') or grade_result.get('percentage') or grade_result.get('"percentage"')
+                    if isinstance(score_val, (int, float)):
+                        extracted_score = float(score_val)
+                    elif isinstance(score_val, str):
+                        cleaned = score_val.rstrip(',').strip()
+                        try:
+                            extracted_score = float(cleaned)
+                        except:
+                            pass
+                
+                # If no score extracted, try strict grading
+                if extracted_score is None:
                     try:
                         strict = await gemini_service.grade_submission_from_file_strict(
                             file_bytes=item["file_bytes"],
@@ -945,15 +957,27 @@ async def grade_course_submissions(
                             max_points=max_points,
                             submission_type=item.get("submission_type", "homework"),
                         )
-                        strict_normalized = normalize_ai_grading(strict, max_points=max_points)
-                        strict_score = strict_normalized.get("ai_score")
-                        if strict_score is not None:
-                            grade_result["percentage"] = strict_score
-                        if not grade_result.get("overall_feedback") and strict_normalized.get("ai_feedback"):
-                            grade_result["overall_feedback"] = strict_normalized.get("ai_feedback")
-                        if strict_normalized.get("ai_feedback"):
-                            grade_result.setdefault("detailed_feedback", strict_normalized.get("ai_feedback"))
-                        grade_result["strict_fallback"] = True
+                        # Extract score from strict result
+                        if isinstance(strict, dict):
+                            strict_score_val = strict.get('score') or strict.get('"score"') or strict.get('percentage') or strict.get('"percentage"')
+                            if isinstance(strict_score_val, (int, float)):
+                                extracted_score = float(strict_score_val)
+                                grade_result["percentage"] = extracted_score
+                            elif isinstance(strict_score_val, str):
+                                cleaned = strict_score_val.rstrip(',').strip()
+                                try:
+                                    extracted_score = float(cleaned)
+                                    grade_result["percentage"] = extracted_score
+                                except:
+                                    pass
+                            
+                            # Copy feedback if missing
+                            if not grade_result.get("overall_feedback"):
+                                feedback_val = strict.get('overall_feedback') or strict.get('"overall_feedback"') or strict.get('detailed_feedback') or strict.get('"detailed_feedback"')
+                                if isinstance(feedback_val, str):
+                                    grade_result["overall_feedback"] = feedback_val.strip('"').strip(',').strip()
+                            
+                            grade_result["strict_fallback"] = True
                     except Exception as strict_error:
                         logger.warning(
                             "Strict Gemini grading fallback failed",
@@ -1015,29 +1039,47 @@ async def grade_course_submissions(
             if result.get("success", False):
                 submission_id = result.get("submission_id")
                 student_name = result.get("student_name", "")
-                normalized = normalize_ai_grading(result, max_points=max_points)
-                percentage = normalized.get("ai_score")
-                feedback = normalized.get("ai_feedback")
+                
+                # Extract score and feedback from raw data (best effort)
+                extracted_score = None
+                extracted_feedback = None
+                
+                if isinstance(result, dict):
+                    # Extract score (handle malformed keys)
+                    score_val = result.get('score') or result.get('"score"') or result.get('percentage') or result.get('"percentage"')
+                    if isinstance(score_val, (int, float)):
+                        extracted_score = float(score_val)
+                    elif isinstance(score_val, str):
+                        cleaned = score_val.rstrip(',').strip()
+                        try:
+                            extracted_score = float(cleaned)
+                        except:
+                            pass
+                    
+                    # Extract feedback (handle malformed keys)
+                    feedback_val = result.get('overall_feedback') or result.get('"overall_feedback"') or result.get('detailed_feedback') or result.get('"detailed_feedback"')
+                    if isinstance(feedback_val, str):
+                        extracted_feedback = feedback_val.strip('"').strip(',').strip()
                 
                 try:
                     # Update the AI submission with Gemini results
                     submission = db.query(AISubmission).filter(AISubmission.id == submission_id).first()
                     if submission:
                         submission.ai_processed = True
-                        submission.ai_score = percentage
-                        submission.ai_feedback = feedback
-                        submission.ai_corrections = normalized.get("ai_corrections")
-                        submission.ai_strengths = normalized.get("ai_strengths")
-                        submission.ai_improvements = normalized.get("ai_improvements")
+                        submission.ai_score = extracted_score
+                        submission.ai_feedback = extracted_feedback
+                        submission.ai_corrections = None  # Not using normalized fields
+                        submission.ai_strengths = None  # Not using normalized fields
+                        submission.ai_improvements = None  # Not using normalized fields
                         submission.processed_at = datetime.utcnow()
                         
                         # Update the associated study session
                         if submission.session_id:
                             session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
                             if session:
-                                session.ai_score = percentage
-                                session.ai_feedback = feedback
-                                session.ai_recommendations = normalized.get("ai_improvements")
+                                session.ai_score = extracted_score
+                                session.ai_feedback = extracted_feedback
+                                session.ai_recommendations = None  # Not using normalized fields
                                 session.updated_at = datetime.utcnow()
                         
                         # Update StudentAssignment record if this is assignment-based
@@ -1050,9 +1092,9 @@ async def grade_course_submissions(
                             ).first()
                             
                             if student_assignment:
-                                student_assignment.ai_grade = percentage
-                                student_assignment.grade = percentage  # AI grade is the final grade
-                                student_assignment.feedback = feedback
+                                student_assignment.ai_grade = extracted_score
+                                student_assignment.grade = extracted_score  # AI grade is the final grade
+                                student_assignment.feedback = extracted_feedback
                                 student_assignment.status = "graded"
                                 student_assignment.updated_at = datetime.utcnow()
                                 logger.info(
@@ -1060,7 +1102,7 @@ async def grade_course_submissions(
                                     extra={
                                         "student_assignment_id": student_assignment.id,
                                         "submission_id": submission_id,
-                                        "percentage": percentage,
+                                        "percentage": extracted_score,
                                     },
                                 )
                             else:
@@ -1078,15 +1120,15 @@ async def grade_course_submissions(
                             "user_id": submission.user_id,
                             "student_name": student_name,
                             "score": result.get("score", 0),
-                            "percentage": percentage,
+                            "percentage": extracted_score,
                             "grade_letter": result.get("grade_letter", ""),
-                            "feedback": feedback,
-                            "overall_feedback": result.get("overall_feedback") or feedback,
+                            "feedback": extracted_feedback,
+                            "overall_feedback": result.get("overall_feedback") or extracted_feedback,
                             "strengths": result.get("strengths", []),
                             "improvements": result.get("improvements", []),
                             "recommendations": result.get("recommendations", []),
                             "graded_by": result.get("graded_by", "Gemini AI"),
-                            "normalized": normalized,
+                            "raw": result,  # Include raw data instead of normalized
                             "success": True
                         })
                     
@@ -1551,9 +1593,29 @@ async def auto_grade_assignment_submission(
                 submission_type=assignment.assignment_type,
             )
 
-        normalized = normalize_ai_grading(grade_result, max_points=max_points)
+        # Extract score and feedback from raw data (best effort, handle malformed keys)
+        extracted_score = None
+        extracted_feedback = None
+        
+        if isinstance(grade_result, dict):
+            # Extract score
+            score_val = grade_result.get('score') or grade_result.get('"score"') or grade_result.get('percentage') or grade_result.get('"percentage"')
+            if isinstance(score_val, (int, float)):
+                extracted_score = float(score_val)
+            elif isinstance(score_val, str):
+                cleaned = score_val.rstrip(',').strip()
+                try:
+                    extracted_score = float(cleaned)
+                except:
+                    pass
+            
+            # Extract feedback
+            feedback_val = grade_result.get('overall_feedback') or grade_result.get('"overall_feedback"') or grade_result.get('detailed_feedback') or grade_result.get('"detailed_feedback"')
+            if isinstance(feedback_val, str):
+                extracted_feedback = feedback_val.strip('"').strip(',').strip()
 
-        if file_bytes is not None and normalized.get("ai_score") is None:
+        # If no score extracted and we have file, try strict grading
+        if file_bytes is not None and extracted_score is None:
             strict = await gemini_service.grade_submission_from_file_strict(
                 file_bytes=file_bytes,
                 filename=filename or f"assignment_{assignment_id}.pdf",
@@ -1562,16 +1624,26 @@ async def auto_grade_assignment_submission(
                 max_points=max_points,
                 submission_type=assignment.assignment_type,
             )
-            strict_normalized = normalize_ai_grading(strict, max_points=max_points)
-            for key, value in strict_normalized.items():
-                if key == "raw":
-                    continue
-                if normalized.get(key) in (None, "", []):
-                    if value not in (None, "", []):
-                        normalized[key] = value
+            # Extract from strict result
+            if isinstance(strict, dict):
+                strict_score_val = strict.get('score') or strict.get('"score"') or strict.get('percentage') or strict.get('"percentage"')
+                if isinstance(strict_score_val, (int, float)):
+                    extracted_score = float(strict_score_val)
+                elif isinstance(strict_score_val, str):
+                    cleaned = strict_score_val.rstrip(',').strip()
+                    try:
+                        extracted_score = float(cleaned)
+                    except:
+                        pass
+                
+                # Use strict feedback if main feedback is missing
+                if not extracted_feedback:
+                    strict_feedback_val = strict.get('overall_feedback') or strict.get('"overall_feedback"') or strict.get('detailed_feedback') or strict.get('"detailed_feedback"')
+                    if isinstance(strict_feedback_val, str):
+                        extracted_feedback = strict_feedback_val.strip('"').strip(',').strip()
 
-        ai_score = normalized.get("ai_score")
-        ai_feedback = normalized.get("ai_feedback")
+        ai_score = extracted_score
+        ai_feedback = extracted_feedback
 
         submission_id = submission_data.get("submission_id")
 
@@ -1670,9 +1742,9 @@ async def auto_grade_assignment_submission(
         ai_submission.ai_processed = True
         ai_submission.ai_score = ai_score
         ai_submission.ai_feedback = ai_feedback
-        ai_submission.ai_strengths = normalized.get("ai_strengths")
-        ai_submission.ai_improvements = normalized.get("ai_improvements")
-        ai_submission.ai_corrections = normalized.get("ai_corrections")
+        ai_submission.ai_strengths = None  # Not using normalized fields
+        ai_submission.ai_improvements = None  # Not using normalized fields
+        ai_submission.ai_corrections = None  # Not using normalized fields
         ai_submission.processed_at = datetime.utcnow()
 
         db.commit()
@@ -1699,7 +1771,7 @@ async def auto_grade_assignment_submission(
                 "strengths": grade_result.get("strengths", []),
                 "improvements": grade_result.get("improvements", []),
                 "recommendations": grade_result.get("recommendations", []),
-                "normalized": normalized,
+                "raw": grade_result,  # Return raw data instead of normalized
                 "passing_grade": passing_grade,
                 "required_percentage": 80.0
             },
@@ -2110,9 +2182,29 @@ async def process_submission_with_gemini_ai(
                 submission_type=submission.submission_type
             )
 
-        normalized = normalize_ai_grading(grade_result, max_points=max_points)
+        # Extract score and feedback from raw data (best effort, handle malformed keys)
+        extracted_score = None
+        extracted_feedback = None
+        
+        if isinstance(grade_result, dict):
+            # Extract score
+            score_val = grade_result.get('score') or grade_result.get('"score"') or grade_result.get('percentage') or grade_result.get('"percentage"')
+            if isinstance(score_val, (int, float)):
+                extracted_score = float(score_val)
+            elif isinstance(score_val, str):
+                cleaned = score_val.rstrip(',').strip()
+                try:
+                    extracted_score = float(cleaned)
+                except:
+                    pass
+            
+            # Extract feedback
+            feedback_val = grade_result.get('overall_feedback') or grade_result.get('"overall_feedback"') or grade_result.get('detailed_feedback') or grade_result.get('"detailed_feedback"')
+            if isinstance(feedback_val, str):
+                extracted_feedback = feedback_val.strip('"').strip(',').strip()
 
-        if file_bytes is not None and normalized.get("ai_score") is None:
+        # If no score extracted and we have file, try strict grading
+        if file_bytes is not None and extracted_score is None:
             strict = await gemini_service.grade_submission_from_file_strict(
                 file_bytes=file_bytes,
                 filename=filename or f"submission_{submission_id}.pdf",
@@ -2121,23 +2213,33 @@ async def process_submission_with_gemini_ai(
                 max_points=max_points,
                 submission_type=submission.submission_type,
             )
-            strict_normalized = normalize_ai_grading(strict, max_points=max_points)
-            for key, value in strict_normalized.items():
-                if key == "raw":
-                    continue
-                if normalized.get(key) in (None, "", []):
-                    if value not in (None, "", []):
-                        normalized[key] = value
+            # Extract from strict result
+            if isinstance(strict, dict):
+                strict_score_val = strict.get('score') or strict.get('"score"') or strict.get('percentage') or strict.get('"percentage"')
+                if isinstance(strict_score_val, (int, float)):
+                    extracted_score = float(strict_score_val)
+                elif isinstance(strict_score_val, str):
+                    cleaned = strict_score_val.rstrip(',').strip()
+                    try:
+                        extracted_score = float(cleaned)
+                    except:
+                        pass
+                
+                # Use strict feedback if main feedback is missing
+                if not extracted_feedback:
+                    strict_feedback_val = strict.get('overall_feedback') or strict.get('"overall_feedback"') or strict.get('detailed_feedback') or strict.get('"detailed_feedback"')
+                    if isinstance(strict_feedback_val, str):
+                        extracted_feedback = strict_feedback_val.strip('"').strip(',').strip()
 
-        ai_score = normalized.get("ai_score")
-        ai_feedback = normalized.get("ai_feedback")
+        ai_score = extracted_score
+        ai_feedback = extracted_feedback
 
         submission.ai_processed = True
         submission.ai_score = ai_score
         submission.ai_feedback = ai_feedback
-        submission.ai_strengths = normalized.get("ai_strengths")
-        submission.ai_improvements = normalized.get("ai_improvements")
-        submission.ai_corrections = normalized.get("ai_corrections")
+        submission.ai_strengths = None  # Not using normalized fields
+        submission.ai_improvements = None  # Not using normalized fields
+        submission.ai_corrections = None  # Not using normalized fields
         submission.processed_at = datetime.utcnow()
 
         if submission.session_id:
@@ -2145,7 +2247,7 @@ async def process_submission_with_gemini_ai(
             if session:
                 session.ai_score = ai_score
                 session.ai_feedback = ai_feedback
-                session.ai_recommendations = normalized.get("ai_improvements")
+                session.ai_recommendations = None  # Not using normalized fields
                 session.updated_at = datetime.utcnow()
 
         if submission.assignment_id:
@@ -2176,7 +2278,7 @@ async def process_submission_with_gemini_ai(
             "submission_id": submission_id,
             "grade_result": {
                 **grade_result,
-                "normalized": normalized,
+                "raw": grade_result,  # Return raw data instead of normalized
                 "percentage": ai_score,
                 "detailed_feedback": ai_feedback,
             },

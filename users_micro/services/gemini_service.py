@@ -320,18 +320,30 @@ class GeminiService:
         elif t.startswith("```") and t.endswith("```"):
             t = t[3:-3].strip()
         
-        # Fix common malformations:
-        # 1. Remove trailing commas inside string values: "value", -> "value"
-        # Pattern: "string_value", or 'string_value', (where comma is before closing quote)
-        t = re.sub(r'(["\'])\s*,\s*(["\'])', r'\1\2', t)
+        # Fix common malformations from Gemini's JSON output
+        # The most common issue is: {"\"key\"": "value,"} where keys have escaped quotes
+        # and values have trailing commas
         
-        # 2. Remove escaped quotes around keys: "\"key\"" -> "key"
-        # Pattern: "\"word\"": -> "word":
-        t = re.sub(r'"\\"([^"]+)\\""(\s*:)', r'"\1"\2', t)
+        # Step 1: Remove ALL escaped quote patterns \"
+        # This handles {"\"score\"": ...} -> {"score": ...}
+        t = t.replace('\\"', '"')
         
-        # 3. Remove escaped quotes around string values: : "\"value\"" -> : "value"
-        # Pattern: : "\"word\"" -> : "word"
-        t = re.sub(r':\s*"\\"([^"]+)\\""', r': "\1"', t)
+        # Step 2: Fix the resulting doubled quotes ""key"" -> "key"
+        # After replacing \", we get {"score": ...} but sometimes {"" score""}: ...}
+        t = re.sub(r'""([^"]+)""', r'"\1"', t)
+        
+        # Step 3: Remove trailing commas from string values before quotes
+        # "85," -> "85"
+        # "B+", -> "B+"
+        t = re.sub(r'(["\'])([^"\']*),\s*(["\'])', r'\1\2\3', t)
+        
+        # Step 4: Remove trailing commas before closing brackets/braces
+        t = re.sub(r',\s*([}\]])', r'\1', t)
+        
+        # Step 5: Fix incomplete array/object markers at end of strings
+        # Sometimes Gemini truncates: "strengths": "[" -> "strengths": []
+        t = re.sub(r':\s*"\["\s*([,}])', r': []\1', t)
+        t = re.sub(r':\s*"\{"\s*([,}])', r': {}\1', t)
         
         # Try direct parse first
         try:
@@ -2068,8 +2080,22 @@ class GeminiService:
                 return uploaded_file.name  # Return the file URI for Gemini
                 
             finally:
-                # Clean up temporary file
-                os.unlink(temp_file_path)
+                # Clean up temporary file with retry for Windows file locking
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        os.unlink(temp_file_path)
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)  # Wait before retry
+                        else:
+                            # Log warning but don't fail the request
+                            print(f"⚠️ Could not delete temp file {temp_file_path} after {max_retries} attempts")
+                    except Exception as e:
+                        print(f"⚠️ Error deleting temp file: {e}")
+                        break
                 
         except Exception as e:
             raise Exception(f"Error uploading file '{filename}' to Gemini: {str(e)}")
