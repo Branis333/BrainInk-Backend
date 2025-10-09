@@ -79,6 +79,41 @@ async def save_uploaded_file(file: UploadFile, file_path: Path) -> bool:
 # Removed simulation; real grading is performed via services.gemini_service
 
 # Normalize Gemini grading payload to our AISubmission fields
+def _clean_malformed_json(grading: dict) -> dict:
+    """Clean malformed JSON from Gemini where keys/values have extra quotes and trailing commas."""
+    if not isinstance(grading, dict):
+        return grading
+    
+    cleaned = {}
+    for key, value in grading.items():
+        # Remove extra quotes from keys
+        clean_key = key.strip('"').strip("'")
+        
+        # Clean values
+        if isinstance(value, str):
+            # Remove trailing commas and extra quotes
+            clean_value = value.rstrip(',').strip().strip('"').strip("'")
+            
+            # Try to convert to appropriate type
+            if clean_value.lower() in ('null', 'none', ''):
+                clean_value = None
+            elif clean_value.replace('.', '', 1).replace('-', '', 1).isdigit():
+                # It's a number
+                try:
+                    clean_value = float(clean_value) if '.' in clean_value else int(clean_value)
+                except:
+                    pass
+            elif clean_value in ('[', '{'):
+                # Incomplete array/object
+                clean_value = [] if clean_value == '[' else {}
+            
+            cleaned[clean_key] = clean_value
+        else:
+            cleaned[clean_key] = value
+    
+    return cleaned
+
+
 def _extract_numeric_percentage(value) -> Optional[float]:
     """Attempt to coerce various representations into a float percentage."""
     if value is None:
@@ -110,6 +145,9 @@ def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
     """
     if not isinstance(grading, dict):
         return {"error": "Invalid grading payload"}
+    
+    # First, clean any malformed JSON from Gemini
+    grading = _clean_malformed_json(grading)
 
     # Prefer explicit percentage; otherwise compute from score/max_points or rubric breakdown
     percent_candidates = [
