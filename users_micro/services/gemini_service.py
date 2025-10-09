@@ -301,7 +301,7 @@ class GeminiService:
     def _safe_parse_json(self, text: str) -> Dict[str, Any]:
         """Parse JSON from Gemini response text robustly.
         - Strips ```json fences
-        - Attempts direct json.loads
+        - Attempts direct json.loads FIRST (don't break clean JSON!)
         - Handles escaped JSON strings (e.g., "\"key\": \"value\"")
         - Handles trailing commas in string values (e.g., "0," -> "0")
         - Falls back to slicing first {...} block
@@ -320,7 +320,14 @@ class GeminiService:
         elif t.startswith("```") and t.endswith("```"):
             t = t[3:-3].strip()
         
-        # Fix common malformations from Gemini's JSON output
+        # ⭐ CRITICAL: Try direct parse FIRST before any string manipulation
+        # If Gemini returns clean JSON, don't break it!
+        try:
+            return _json.loads(t)
+        except Exception:
+            pass  # Continue to fixing attempts
+        
+        # If direct parse failed, NOW try fixing common malformations
         # The most common issue is: {"\"key\"": "value,"} where keys have escaped quotes
         # and values have trailing commas
         
@@ -345,7 +352,7 @@ class GeminiService:
         t = re.sub(r':\s*"\["\s*([,}])', r': []\1', t)
         t = re.sub(r':\s*"\{"\s*([,}])', r': {}\1', t)
         
-        # Try direct parse first
+        # Try parse after fixes
         try:
             return _json.loads(t)
         except Exception:

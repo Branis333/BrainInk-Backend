@@ -466,10 +466,21 @@ async def bulk_upload_images_to_pdf_session(
             
             # DEBUG: Print raw response for troubleshooting
             print(f"\n{'='*80}")
-            print(f"🔍 RAW GEMINI RESPONSE")
+            print(f"🔍 RAW GEMINI RESPONSE AFTER PARSING")
             print(f"{'='*80}")
             print(f"Type: {type(raw_grading)}")
             print(f"Keys: {list(raw_grading.keys()) if isinstance(raw_grading, dict) else 'N/A'}")
+            if isinstance(raw_grading, dict):
+                print(f"📊 Score value: {raw_grading.get('score')} (type: {type(raw_grading.get('score'))})")
+                print(f"📊 Percentage value: {raw_grading.get('percentage')} (type: {type(raw_grading.get('percentage'))})")
+                print(f"📊 Feedback value: {raw_grading.get('overall_feedback', 'N/A')[:100]}...")
+                print(f"❌ Error key present: {'error' in raw_grading}")
+                if 'error' in raw_grading:
+                    print(f"❌ Error value: {raw_grading.get('error')}")
+                # CRITICAL DEBUG: Check if keys are actually clean or have quotes
+                print(f"🔑 First key (raw): {repr(list(raw_grading.keys())[0]) if raw_grading.keys() else 'N/A'}")
+                print(f"🔑 Is 'score' a key?: {'score' in raw_grading}")
+                print(f"🔑 Is '\"score\"' a key?: {'\"score\"' in raw_grading}")
             print(f"{'='*80}\n")
 
             # Extract score for database (best effort, but raw is source of truth)
