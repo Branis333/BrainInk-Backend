@@ -79,6 +79,41 @@ async def save_uploaded_file(file: UploadFile, file_path: Path) -> bool:
 # Removed simulation; real grading is performed via services.gemini_service
 
 # Normalize Gemini grading payload to our AISubmission fields
+def _clean_malformed_json(grading: dict) -> dict:
+    """Clean malformed JSON from Gemini where keys/values have extra quotes and trailing commas."""
+    if not isinstance(grading, dict):
+        return grading
+    
+    cleaned = {}
+    for key, value in grading.items():
+        # Remove extra quotes from keys
+        clean_key = key.strip('"').strip("'")
+        
+        # Clean values
+        if isinstance(value, str):
+            # Remove trailing commas and extra quotes
+            clean_value = value.rstrip(',').strip().strip('"').strip("'")
+            
+            # Try to convert to appropriate type
+            if clean_value.lower() in ('null', 'none', ''):
+                clean_value = None
+            elif clean_value.replace('.', '', 1).replace('-', '', 1).isdigit():
+                # It's a number
+                try:
+                    clean_value = float(clean_value) if '.' in clean_value else int(clean_value)
+                except:
+                    pass
+            elif clean_value in ('[', '{'):
+                # Incomplete array/object
+                clean_value = [] if clean_value == '[' else {}
+            
+            cleaned[clean_key] = clean_value
+        else:
+            cleaned[clean_key] = value
+    
+    return cleaned
+
+
 def _extract_numeric_percentage(value) -> Optional[float]:
     """Attempt to coerce various representations into a float percentage."""
     if value is None:
@@ -101,104 +136,25 @@ def _extract_numeric_percentage(value) -> Optional[float]:
     return None
 
 
-def normalize_ai_grading(grading: dict, max_points: int = 100) -> dict:
-    """Normalize Gemini grading payload to our AISubmission fields and types.
+# ==============================================================================
+# DEPRECATED: normalize_ai_grading() function removed (2025-01-09)
+# 
+# This function was previously used to normalize Gemini AI grading responses
+# into a structured format with ai_score, ai_feedback, ai_strengths, etc.
+# 
+# REMOVED BECAUSE: Gemini returns malformed JSON with escaped quotes and 
+# trailing commas, making normalization unreliable and causing 0% scores.
+# 
+# NEW APPROACH: All endpoints now return RAW Gemini data only. Frontend 
+# handles parsing with robust error handling. Database fields (ai_score, 
+# ai_feedback) are populated via best-effort extraction for legacy compatibility.
+# 
+# If you need this function, use raw data extraction instead:
+#   score_val = raw.get('score') or raw.get('"score"')
+#   if isinstance(score_val, str):
+#       score_val = score_val.rstrip(',').strip()
+# ==============================================================================
 
-    - ai_score: float 0-100 if available
-    - ai_feedback: string
-    - ai_strengths/improvements/corrections: strings (bullet-joined if list)
-    """
-    if not isinstance(grading, dict):
-        return {"error": "Invalid grading payload"}
-
-    # Prefer explicit percentage; otherwise compute from score/max_points or rubric breakdown
-    percent_candidates = [
-        grading.get("percentage"), grading.get("percent"), grading.get("score_percentage"), grading.get("score_percent"),
-    ]
-    score = grading.get("score")
-    ai_score: Optional[float] = None
-    try:
-        # Check direct numeric percentage
-        for p in percent_candidates:
-            parsed = _extract_numeric_percentage(p)
-            if parsed is not None:
-                ai_score = parsed
-                break
-        # If percentage missing, compute from score/max_points
-        if ai_score is None and isinstance(score, (int, float)):
-            if isinstance(max_points, (int, float)) and max_points > 0:
-                ai_score = (float(score) / float(max_points)) * 100
-        # If still missing, try rubric_breakdown aggregation
-        if ai_score is None and isinstance(grading.get("rubric_breakdown"), dict):
-            rb = grading.get("rubric_breakdown")
-            try:
-                total_scored = 0.0
-                total_max = 0.0
-                for _, crit in rb.items():
-                    s = crit.get("score") if isinstance(crit, dict) else None
-                    m = crit.get("max") if isinstance(crit, dict) else None
-                    if isinstance(s, (int, float)) and isinstance(m, (int, float)) and m > 0:
-                        total_scored += float(s)
-                        total_max += float(m)
-                if total_max > 0:
-                    ai_score = (total_scored / total_max) * 100.0
-            except Exception:
-                pass
-        # Clamp and round
-        if ai_score is not None:
-            ai_score = max(0.0, min(100.0, round(ai_score, 2)))
-    except Exception:
-        ai_score = None
-
-    # Compose feedback fields
-    overall_feedback = grading.get("overall_feedback") or grading.get("detailed_feedback") or grading.get("feedback")
-
-    def to_text(value) -> Optional[str]:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            return value
-        if isinstance(value, list):
-            # Join list items as bullets
-            try:
-                items = [str(v).strip() for v in value if v is not None]
-                items = [i for i in items if i]
-                return "\n".join([f"- {i}" for i in items]) if items else None
-            except Exception:
-                return "\n".join(map(str, value))
-        # Fallback string conversion for dict/other types
-        try:
-            import json as _json
-            return _json.dumps(value, ensure_ascii=False)
-        except Exception:
-            return str(value)
-
-    strengths_raw = grading.get("strengths") or []
-    improvements_raw = grading.get("improvements") or grading.get("recommendations") or []
-    corrections_raw = grading.get("corrections") or []
-
-    # If no feedback present, derive an explanatory message (especially helpful when score is 0)
-    feedback_text = to_text(overall_feedback)
-    if not feedback_text:
-        if grading.get("error"):
-            feedback_text = f"AI processing issue: {grading.get('error')}"
-        elif ai_score == 0:
-            feedback_text = (
-                "The AI returned a score of 0. This often happens when the document has low readable content, "
-                "blurry images, or content unrelated to the assignment. Please ensure photos are clear and the work is visible."
-            )
-        else:
-            feedback_text = "AI processed the submission but did not return detailed feedback."
-
-    normalized = {
-        "ai_score": ai_score,
-        "ai_feedback": feedback_text,
-        "ai_strengths": to_text(strengths_raw),
-        "ai_improvements": to_text(improvements_raw),
-        "ai_corrections": to_text(corrections_raw),
-        "raw": grading,
-    }
-    return normalized
 
 def resize_image_for_pdf(image: Image.Image, max_width: float, max_height: float) -> tuple:
     """
@@ -297,9 +253,9 @@ async def bulk_upload_images_to_pdf_session(
     submission_type: str = Form("homework", description="Type of submission"),
     files: List[UploadFile] = File(..., description="Multiple image files to combine into PDF"),
     # Contextual metadata
-    lesson_id: Optional[int] = Form(None, description="Lesson ID (for legacy courses)"),
-    block_id: Optional[int] = Form(None, description="Block ID (for AI-generated courses)"),
-    assignment_id: Optional[int] = Form(None, description="Assignment ID (optional)"),
+    lesson_id: Optional[str] = Form(None, description="Lesson ID (for legacy courses) - leave empty if using block_id"),
+    block_id: Optional[str] = Form(None, description="Block ID (for AI-generated courses) - leave empty if using lesson_id"),
+    assignment_id: Optional[str] = Form(None, description="Assignment ID (optional) - leave empty if not needed"),
     storage_mode: str = Form("database", description="Storage mode: 'database' (default)"),
     skip_db: bool = Form(False, description="If true, only generate PDF and return; do not persist (debug)")
 ):
@@ -325,8 +281,21 @@ async def bulk_upload_images_to_pdf_session(
     try:
         user_id = current_user["user_id"]
         
+        # Convert string parameters to integers, handling empty strings and "null"
+        def parse_optional_int(value: Optional[str]) -> Optional[int]:
+            if value is None or value == "" or value.lower() == "null":
+                return None
+            try:
+                return int(value)
+            except (ValueError, AttributeError):
+                return None
+        
+        lesson_id_int = parse_optional_int(lesson_id)
+        block_id_int = parse_optional_int(block_id)
+        assignment_id_int = parse_optional_int(assignment_id)
+        
         # Validate that either lesson_id or block_id is provided
-        if not lesson_id and not block_id:
+        if not lesson_id_int and not block_id_int:
             raise HTTPException(status_code=400, detail="Either lesson_id or block_id must be provided")
         
         # Get and validate course
@@ -341,9 +310,9 @@ async def bulk_upload_images_to_pdf_session(
         block = None
         lesson = None
         
-        if block_id:
+        if block_id_int:
             block = db.query(CourseBlock).filter(
-                CourseBlock.id == block_id,
+                CourseBlock.id == block_id_int,
                 CourseBlock.course_id == course_id,
                 CourseBlock.is_active == True
             ).first()
@@ -353,9 +322,9 @@ async def bulk_upload_images_to_pdf_session(
                     detail="Course block not found or inactive"
                 )
         
-        if lesson_id:
+        if lesson_id_int:
             lesson = db.query(CourseLesson).filter(
-                CourseLesson.id == lesson_id,
+                CourseLesson.id == lesson_id_int,
                 CourseLesson.course_id == course_id,
                 CourseLesson.is_active == True
             ).first()
@@ -406,10 +375,10 @@ async def bulk_upload_images_to_pdf_session(
         course_title = course.title.replace(" ", "_").replace("/", "_")
         if lesson is not None:
             anchor_title = lesson.title.replace(" ", "_").replace("/", "_")
-            upload_id = f"lesson_{lesson_id}"
+            upload_id = f"lesson_{lesson_id_int}"
         elif block is not None:
             anchor_title = f"week{block.week}_block{block.block_number}_" + block.title.replace(" ", "_").replace("/", "_")
-            upload_id = f"block_{block_id}"
+            upload_id = f"block_{block_id_int}"
         else:
             anchor_title = "upload"
             upload_id = "unknown"
@@ -439,7 +408,7 @@ async def bulk_upload_images_to_pdf_session(
             )
 
         # Save PDF file to uploads directory
-        unique_filename = generate_unique_filename(pdf_filename, user_id, block_id or lesson_id or 0)
+        unique_filename = generate_unique_filename(pdf_filename, user_id, block_id_int or lesson_id_int or 0)
         file_path = UPLOAD_DIR / unique_filename
         
         try:
@@ -452,10 +421,10 @@ async def bulk_upload_images_to_pdf_session(
         submission = AISubmission(
             user_id=user_id,
             course_id=course_id,
-            lesson_id=lesson_id,
-            block_id=block_id,
+            lesson_id=lesson_id_int,
+            block_id=block_id_int,
             session_id=None,  # Not using sessions for this workflow
-            assignment_id=assignment_id,
+            assignment_id=assignment_id_int,
             submission_type=submission_type,
             original_filename=pdf_filename,
             file_path=str(file_path),
@@ -468,15 +437,16 @@ async def bulk_upload_images_to_pdf_session(
         db.commit()
         db.refresh(submission)
         
-    # Process with AI (real grading via Gemini)
+        # Process with AI (real grading via Gemini)
+        # Returns RAW Gemini response only - frontend handles parsing
         try:
             # Prepare assignment context if available
             assignment_title = f"{submission_type.capitalize()} Submission"
             assignment_description = ""
             rubric = ""
             max_points = 100
-            if assignment_id:
-                assignment: Optional[CourseAssignment] = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+            if assignment_id_int:
+                assignment: Optional[CourseAssignment] = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id_int).first()
                 if assignment:
                     assignment_title = assignment.title or assignment_title
                     assignment_description = assignment.description or ""
@@ -484,7 +454,7 @@ async def bulk_upload_images_to_pdf_session(
                     max_points = getattr(assignment, 'points', 100) or 100
 
             # Grade using Gemini's native file processing (handles OCR for scanned/image PDFs)
-            grading = await gemini_service.grade_submission_from_file(
+            raw_grading = await gemini_service.grade_submission_from_file(
                 file_bytes=pdf_bytes,
                 filename=pdf_filename,
                 assignment_title=assignment_title,
@@ -493,82 +463,59 @@ async def bulk_upload_images_to_pdf_session(
                 max_points=max_points,
                 submission_type=submission_type
             )
-
-            # Normalize and update submission with AI results
-            normalized = normalize_ai_grading(grading, max_points=max_points)
             
-            logger.info(
-                "Initial AI grading attempt",
-                extra={
-                    "submission_id": submission.id,
-                    "ai_score": normalized.get("ai_score"),
-                    "has_percentage": "percentage" in grading or "percent" in grading,
-                    "has_score": "score" in grading,
-                    "grading_keys": list(grading.keys()) if isinstance(grading, dict) else None
-                }
-            )
+            # DEBUG: Print raw response for troubleshooting
+            print(f"\n{'='*80}")
+            print(f"🔍 RAW GEMINI RESPONSE")
+            print(f"{'='*80}")
+            print(f"Type: {type(raw_grading)}")
+            print(f"Keys: {list(raw_grading.keys()) if isinstance(raw_grading, dict) else 'N/A'}")
+            print(f"{'='*80}\n")
 
-            # If first pass didn't yield a numeric percentage, attempt a strict pass
-            if normalized.get("ai_score") is None:
-                try:
-                    strict = await gemini_service.grade_submission_from_file_strict(
-                        file_bytes=pdf_bytes,
-                        filename=pdf_filename,
-                        assignment_title=assignment_title,
-                        assignment_description=assignment_description,
-                        max_points=max_points,
-                        submission_type=submission_type,
-                    )
-                    strict_normalized = normalize_ai_grading(strict, max_points=max_points)
-                    for key, value in strict_normalized.items():
-                        if key == "raw":
-                            continue
-                        if normalized.get(key) in (None, "", []):
-                            normalized[key] = value
-                except Exception as _strict_err:
-                    print(f"Strict grading fallback failed: {_strict_err}")
+            # Extract score for database (best effort, but raw is source of truth)
+            # Frontend will parse the raw data directly
+            extracted_score = None
+            extracted_feedback = None
+            
+            if isinstance(raw_grading, dict):
+                # Try to get score from raw data (handle both clean and malformed keys)
+                score_val = raw_grading.get('score') or raw_grading.get('"score"') or raw_grading.get('percentage') or raw_grading.get('"percentage"')
+                if isinstance(score_val, (int, float)):
+                    extracted_score = float(score_val)
+                elif isinstance(score_val, str):
+                    # Remove trailing commas and convert
+                    cleaned = score_val.rstrip(',').strip()
+                    try:
+                        extracted_score = float(cleaned)
+                    except:
+                        pass
+                
+                # Try to get feedback
+                feedback_val = raw_grading.get('overall_feedback') or raw_grading.get('"overall_feedback"') or raw_grading.get('detailed_feedback') or raw_grading.get('"detailed_feedback"')
+                if isinstance(feedback_val, str):
+                    # Remove trailing quotes and commas
+                    extracted_feedback = feedback_val.strip('"').strip(',').strip()
+            
+            # Update database with extracted values (for legacy compatibility and search)
             submission.ai_processed = True
-            submission.ai_score = normalized.get("ai_score")
-            submission.ai_feedback = normalized.get("ai_feedback")
-            submission.ai_strengths = normalized.get("ai_strengths")
-            submission.ai_improvements = normalized.get("ai_improvements")
-            submission.ai_corrections = normalized.get("ai_corrections")
+            submission.ai_score = extracted_score
+            submission.ai_feedback = extracted_feedback
             submission.processed_at = datetime.utcnow()
             db.commit()
-            ai_results = normalized
             
-            # Log AI grading results for debugging
-            logger.info(
-                "AI grading completed",
-                extra={
-                    "submission_id": submission.id,
-                    "ai_score": normalized.get("ai_score"),
-                    "score_type": type(normalized.get("ai_score")).__name__,
-                    "has_feedback": bool(normalized.get("ai_feedback")),
-                    "feedback_preview": normalized.get("ai_feedback")[:100] if normalized.get("ai_feedback") else None
-                }
-            )
+            # Return ONLY raw data - frontend handles all parsing
+            ai_results = {"raw": raw_grading}
             
-            # If score is still null after all attempts, log warning
-            if normalized.get("ai_score") is None:
-                logger.warning(
-                    "AI grading failed to extract score",
-                    extra={
-                        "submission_id": submission.id,
-                        "grading_response": grading,
-                        "assignment_id": assignment_id
-                    }
-                )
         except Exception as ai_err:
             # Don't fail the whole request if AI grading has an issue
             print(f"AI grading error: {ai_err}")
-            ai_results = {"error": str(ai_err)}
+            ai_results = {"raw": {"error": str(ai_err)}}
         
         # If this upload is for an assignment, propagate status/grade to StudentAssignment
         try:
-            if assignment_id:
+            if assignment_id_int and extracted_score is not None:
                 student_assignment = db.query(StudentAssignment).filter(
-                    StudentAssignment.assignment_id == assignment_id,
+                    StudentAssignment.assignment_id == assignment_id_int,
                     StudentAssignment.user_id == user_id
                 ).first()
 
@@ -577,7 +524,7 @@ async def bulk_upload_images_to_pdf_session(
                     due_days = getattr(assignment, 'due_days_after_assignment', 7) if 'assignment' in locals() and assignment else 7
                     student_assignment = StudentAssignment(
                         user_id=user_id,
-                        assignment_id=assignment_id,
+                        assignment_id=assignment_id_int,
                         course_id=course_id,
                         due_date=datetime.utcnow() + timedelta(days=due_days),
                         status='assigned'
@@ -590,40 +537,25 @@ async def bulk_upload_images_to_pdf_session(
                 student_assignment.submission_content = f"PDF submission with {len(valid_files)} page(s)"
                 student_assignment.submitted_at = datetime.utcnow()
 
-                # When AI produced a score, mark graded, else leave as submitted (pending)
-                ai_score_val = submission.ai_score
-                if isinstance(ai_score_val, (int, float)):
-                    student_assignment.ai_grade = float(ai_score_val)
-                    student_assignment.grade = float(ai_score_val)
-                    student_assignment.status = "graded"
-                else:
-                    student_assignment.status = "submitted"
+                # Set grade from extracted score
+                student_assignment.ai_grade = float(extracted_score)
+                student_assignment.grade = float(extracted_score)
+                student_assignment.status = "graded"
 
                 # Feedback if available
-                if submission.ai_feedback:
-                    student_assignment.feedback = submission.ai_feedback
+                if extracted_feedback:
+                    student_assignment.feedback = extracted_feedback
 
                 student_assignment.updated_at = datetime.utcnow()
                 db.commit()
         except Exception as assign_err:
             # Non-fatal: log and continue response
-            print(f"⚠️ Could not update StudentAssignment for assignment_id={assignment_id}: {assign_err}")
+            print(f"⚠️ Could not update StudentAssignment for assignment_id={assignment_id_int}: {assign_err}")
 
         # Final commit to ensure all changes persisted
         db.commit()
         
-        # Log what we're returning for debugging
-        logger.info(
-            "Returning bulk upload response",
-            extra={
-                "submission_id": submission.id,
-                "ai_score": ai_results.get("ai_score") if isinstance(ai_results, dict) else None,
-                "ai_processed": submission.ai_processed,
-                "has_feedback": bool(submission.ai_feedback)
-            }
-        )
-        
-        # Return JSON summary instead of raw PDF content to better support mobile clients
+        # Return JSON summary with ONLY raw Gemini data
         return JSONResponse({
             "success": True,
             "message": "PDF created and AI processed",
@@ -632,7 +564,7 @@ async def bulk_upload_images_to_pdf_session(
             "pdf_size": pdf_size,
             "content_hash": content_hash,
             "total_images": len(valid_files),
-            "ai_processing_results": ai_results
+            "ai_processing_results": ai_results  # Only contains {"raw": {...}}
         })
         
     except HTTPException:
@@ -926,7 +858,7 @@ async def reprocess_submission_by_id(
                 max_points = getattr(assignment, 'points', 100) or 100
 
         # Always use native file grading to avoid misinterpreting base64 as text
-        grading = await gemini_service.grade_submission_from_file(
+        raw_grading = await gemini_service.grade_submission_from_file(
             file_bytes=pdf_bytes,
             filename=submission.original_filename or "submission.pdf",
             assignment_title=assignment_title,
@@ -936,38 +868,53 @@ async def reprocess_submission_by_id(
             submission_type=submission.submission_type
         )
 
-        # Normalize and update submission
-        normalized = normalize_ai_grading(grading, max_points=max_points)
-        submission.ai_score = normalized.get("ai_score")
-        submission.ai_feedback = normalized.get("ai_feedback")
-        submission.ai_strengths = normalized.get("ai_strengths")
-        submission.ai_improvements = normalized.get("ai_improvements")
-        submission.ai_corrections = normalized.get("ai_corrections")
+        # Extract score and feedback for database (best effort)
+        extracted_score = None
+        extracted_feedback = None
+        
+        if isinstance(raw_grading, dict):
+            # Try to get score from raw data (handle both clean and malformed keys)
+            score_val = raw_grading.get('score') or raw_grading.get('"score"') or raw_grading.get('percentage') or raw_grading.get('"percentage"')
+            if isinstance(score_val, (int, float)):
+                extracted_score = float(score_val)
+            elif isinstance(score_val, str):
+                cleaned = score_val.rstrip(',').strip()
+                try:
+                    extracted_score = float(cleaned)
+                except:
+                    pass
+            
+            # Try to get feedback
+            feedback_val = raw_grading.get('overall_feedback') or raw_grading.get('"overall_feedback"') or raw_grading.get('detailed_feedback') or raw_grading.get('"detailed_feedback"')
+            if isinstance(feedback_val, str):
+                extracted_feedback = feedback_val.strip('"').strip(',').strip()
+
+        # Update submission with extracted values
+        submission.ai_score = extracted_score
+        submission.ai_feedback = extracted_feedback
         submission.processed_at = datetime.utcnow()
         submission.ai_processed = True
         db.commit()
-        ai_results = normalized
+        
     except Exception as ai_err:
         raise HTTPException(status_code=500, detail=f"AI grading error: {ai_err}")
     
-    # Update associated study session
-    session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
-    if session:
-        if isinstance(ai_results, dict) and "ai_score" in ai_results:
-            session.ai_score = ai_results.get("ai_score")
-            session.ai_feedback = ai_results.get("ai_feedback")
-            session.ai_recommendations = ai_results.get("ai_improvements")
-        session.updated_at = datetime.utcnow()
-    
-    db.commit()
+    # Update associated study session if exists
+    if submission.session_id:
+        session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
+        if session and extracted_score is not None:
+            session.ai_score = extracted_score
+            session.ai_feedback = extracted_feedback
+            session.updated_at = datetime.utcnow()
+            db.commit()
     
     return AIGradingResponse(
         submission_id=submission.id,
-        ai_score=submission.ai_score if submission.ai_score is not None else 0.0,
-        ai_feedback=submission.ai_feedback or "",
-        ai_corrections=submission.ai_corrections,
-        ai_strengths=submission.ai_strengths,
-        ai_improvements=submission.ai_improvements,
+        ai_score=extracted_score if extracted_score is not None else 0.0,
+        ai_feedback=extracted_feedback or "",
+        ai_corrections=None,
+        ai_strengths=None,
+        ai_improvements=None,
         processed_at=submission.processed_at
     )
 

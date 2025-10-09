@@ -4,6 +4,7 @@ import json
 import asyncio
 import tempfile
 import mimetypes
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -12,6 +13,9 @@ import google.generativeai as genai
 from pydantic import BaseModel
 import httpx
 from urllib.parse import quote_plus, urlencode
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 # Configuration for Gemini API
 class GeminiConfig:
@@ -136,30 +140,10 @@ class GeneratedCourse(BaseModel):
 class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
-    
-    def _default_safety_settings(self):
-        """Return permissive safety settings to reduce false positives for educational content."""
-        try:
-            from google.generativeai.types import HarmCategory, HarmBlockThreshold
-            # Use the proper enums for safety settings
-            return {
-                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-            }
-        except Exception as e:
-            print(f"⚠️ Could not create safety settings: {e}")
-            # Fallback to string-based dict if imports fail
-            return {
-                "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-                "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-                "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-            }
 
     def _collect_candidate_text(self, response) -> str:
-        """Safely collect text from a Gemini response object."""
+        """Safely collect text from a Gemini response object - NO SAFETY CHECKS."""
+        # Try to get text from response.text first
         try:
             text = getattr(response, "text", None)
             if isinstance(text, str) and text.strip():
@@ -167,21 +151,27 @@ class GeminiService:
         except Exception:
             pass
 
+        # Try to extract from candidates
         candidates = getattr(response, "candidates", None) or []
         collected: List[str] = []
+        
         for candidate in candidates:
             if not candidate:
                 continue
+            
             content = getattr(candidate, "content", None)
             parts = getattr(content, "parts", None) if content else None
             if not parts:
                 continue
+                
             for part in parts:
                 part_text = getattr(part, "text", None)
                 if part_text:
                     collected.append(part_text)
+        
         if collected:
             return "\n".join(collected)
+            
         raise ValueError("No text returned by Gemini response")
 
     async def _generate_json_response(
@@ -200,6 +190,18 @@ class GeminiService:
                 payload = list(attachments) + [prompt]
             else:
                 payload = prompt
+            
+            # Log what we're about to send to Gemini
+            logger.info(
+                "🚀 Calling Gemini API (NO SAFETY FILTERS)",
+                extra={
+                    "has_attachments": bool(attachments),
+                    "attachment_count": len(attachments) if attachments else 0,
+                    "prompt_length": len(prompt),
+                    "temperature": temperature,
+                    "max_output_tokens": max_output_tokens,
+                }
+            )
 
             return self.config.model.generate_content(
                 payload,
@@ -208,12 +210,27 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
-                safety_settings=self._default_safety_settings(),
             )
 
         response = await asyncio.to_thread(_call_model)
         try:
             response_text = self._collect_candidate_text(response)
+            
+            # DEBUG: Log the raw response text before parsing
+            logger.info(
+                "📥 RAW GEMINI RESPONSE TEXT",
+                extra={
+                    "response_text_preview": response_text[:500] if response_text else None,
+                    "response_text_length": len(response_text) if response_text else 0,
+                    "first_char": response_text[0] if response_text else None,
+                    "last_char": response_text[-1] if response_text else None,
+                }
+            )
+            print(f"\n{'='*80}")
+            print(f"📥 RAW GEMINI RESPONSE TEXT (full):")
+            print(response_text)
+            print(f"{'='*80}\n")
+            
         except ValueError as missing_text:
             # If Gemini returned nothing, attempt a looser retry that does not force JSON
             # so we can salvage any textual feedback rather than failing outright.
@@ -235,7 +252,6 @@ class GeminiService:
                         temperature=temperature,
                         max_output_tokens=max_output_tokens,
                     ),
-                    safety_settings=self._default_safety_settings(),
                 )
 
             response_plain = await asyncio.to_thread(_call_model_plain)
@@ -286,23 +302,72 @@ class GeminiService:
         """Parse JSON from Gemini response text robustly.
         - Strips ```json fences
         - Attempts direct json.loads
+        - Handles escaped JSON strings (e.g., "\"key\": \"value\"")
+        - Handles trailing commas in string values (e.g., "0," -> "0")
         - Falls back to slicing first {...} block
         Returns a dict or raises ValueError.
         """
         import json as _json
+        import re
+        
         if text is None:
             raise ValueError("Empty response text")
         t = text.strip()
+        
         # Strip code fences if present
         if t.startswith("```json") and t.endswith("```"):
             t = t[7:-3].strip()
         elif t.startswith("```") and t.endswith("```"):
             t = t[3:-3].strip()
-        # Try direct parse
+        
+        # Fix common malformations from Gemini's JSON output
+        # The most common issue is: {"\"key\"": "value,"} where keys have escaped quotes
+        # and values have trailing commas
+        
+        # Step 1: Remove ALL escaped quote patterns \"
+        # This handles {"\"score\"": ...} -> {"score": ...}
+        t = t.replace('\\"', '"')
+        
+        # Step 2: Fix the resulting doubled quotes ""key"" -> "key"
+        # After replacing \", we get {"score": ...} but sometimes {"" score""}: ...}
+        t = re.sub(r'""([^"]+)""', r'"\1"', t)
+        
+        # Step 3: Remove trailing commas from string values before quotes
+        # "85," -> "85"
+        # "B+", -> "B+"
+        t = re.sub(r'(["\'])([^"\']*),\s*(["\'])', r'\1\2\3', t)
+        
+        # Step 4: Remove trailing commas before closing brackets/braces
+        t = re.sub(r',\s*([}\]])', r'\1', t)
+        
+        # Step 5: Fix incomplete array/object markers at end of strings
+        # Sometimes Gemini truncates: "strengths": "[" -> "strengths": []
+        t = re.sub(r':\s*"\["\s*([,}])', r': []\1', t)
+        t = re.sub(r':\s*"\{"\s*([,}])', r': {}\1', t)
+        
+        # Try direct parse first
         try:
             return _json.loads(t)
         except Exception:
             pass
+        
+        # Handle case where Gemini returns JSON as an escaped string
+        # E.g., "{\"score\": 0, \"percentage\": 0.0}" instead of {"score": 0, "percentage": 0.0}
+        if t.startswith('"{') and t.endswith('}"'):
+            try:
+                # Remove outer quotes and unescape
+                unescaped = t[1:-1].replace('\\"', '"').replace('\\\\', '\\')
+                return _json.loads(unescaped)
+            except Exception:
+                pass
+        
+        # Also try unescaping even without outer quotes (malformed JSON with escaped quotes)
+        try:
+            unescaped = t.replace('\\"', '"')
+            return _json.loads(unescaped)
+        except Exception:
+            pass
+        
         # Try to find the first JSON object substring
         start = t.find('{')
         end = t.rfind('}')
@@ -311,7 +376,13 @@ class GeminiService:
             try:
                 return _json.loads(candidate)
             except Exception:
-                pass
+                # Try unescaping the candidate too
+                try:
+                    unescaped_candidate = candidate.replace('\\"', '"')
+                    return _json.loads(unescaped_candidate)
+                except Exception:
+                    pass
+        
         # As last resort, attempt to replace single quotes and parse
         try:
             return _json.loads(t.replace("'", '"'))
@@ -2009,8 +2080,22 @@ class GeminiService:
                 return uploaded_file.name  # Return the file URI for Gemini
                 
             finally:
-                # Clean up temporary file
-                os.unlink(temp_file_path)
+                # Clean up temporary file with retry for Windows file locking
+                import time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        os.unlink(temp_file_path)
+                        break
+                    except PermissionError:
+                        if attempt < max_retries - 1:
+                            time.sleep(0.5)  # Wait before retry
+                        else:
+                            # Log warning but don't fail the request
+                            print(f"⚠️ Could not delete temp file {temp_file_path} after {max_retries} attempts")
+                    except Exception as e:
+                        print(f"⚠️ Error deleting temp file: {e}")
+                        break
                 
         except Exception as e:
             raise Exception(f"Error uploading file '{filename}' to Gemini: {str(e)}")
