@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from datetime import datetime
@@ -32,6 +33,9 @@ from schemas.ai_tutor_schemas import (
     TutorCheckpointResponse,
 )
 from services.gemini_service import gemini_service
+
+
+logger = logging.getLogger(__name__)
 
 
 class AITutorService:
@@ -340,14 +344,30 @@ class AITutorService:
             for interaction in session.interactions[-10:]
         ]
 
-        tutor_response = await self.gemini.generate_ai_tutor_turn(
-            persona=session.persona_config,
-            content_segment=current_segment,
-            history=history_payload,
-            learner_message=learner_message,
-            total_segments=len(session.content_segments),
-            current_index=session.current_segment_index,
-        )
+        try:
+            tutor_response = await self.gemini.generate_ai_tutor_turn(
+                persona=session.persona_config,
+                content_segment=current_segment,
+                history=history_payload,
+                learner_message=learner_message,
+                total_segments=len(session.content_segments),
+                current_index=session.current_segment_index,
+            )
+        except ValueError as empty_response_error:
+            logger.warning(
+                "Gemini returned no text for session %s segment %s: %s",
+                session.id,
+                session.current_segment_index,
+                empty_response_error,
+            )
+            tutor_response = self._fallback_tutor_turn()
+        except Exception:
+            logger.exception(
+                "Gemini call failed for session %s segment %s; using fallback narrator",
+                session.id,
+                session.current_segment_index,
+            )
+            tutor_response = self._fallback_tutor_turn()
 
         tutor_turn = TutorTurn(**tutor_response)
 
@@ -383,6 +403,17 @@ class AITutorService:
 
         session.updated_at = datetime.utcnow()
         return tutor_turn
+
+    def _fallback_tutor_turn(self) -> Dict[str, Any]:
+        return {
+            "narration": (
+                "I'm having trouble generating a new explanation right now, so let's recap the key idea we just covered."
+            ),
+            "comprehension_check": "Can you summarize the most important point from the last section in your own words?",
+            "follow_up_prompts": [],
+            "checkpoint": None,
+            "advance_segment": False,
+        }
 
     def _require_session(self, db: Session, session_id: int, student_id: int) -> AITutorSession:
         session = (
