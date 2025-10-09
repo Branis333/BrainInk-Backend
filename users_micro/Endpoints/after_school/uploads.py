@@ -480,7 +480,8 @@ async def bulk_upload_images_to_pdf_session(
                 # CRITICAL DEBUG: Check if keys are actually clean or have quotes
                 print(f"🔑 First key (raw): {repr(list(raw_grading.keys())[0]) if raw_grading.keys() else 'N/A'}")
                 print(f"🔑 Is 'score' a key?: {'score' in raw_grading}")
-                print(f"🔑 Is '\"score\"' a key?: {'\"score\"' in raw_grading}")
+                quoted_score_key = '"score"'
+                print(f"🔑 Is '\"score\"' a key?: {quoted_score_key in raw_grading}")
             print(f"{'='*80}\n")
 
             # Extract score for database (best effort, but raw is source of truth)
