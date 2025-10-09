@@ -439,6 +439,11 @@ async def bulk_upload_images_to_pdf_session(
         
         # Process with AI (real grading via Gemini)
         # Returns RAW Gemini response only - frontend handles parsing
+        # Initialize these outside try block to avoid UnboundLocalError
+        extracted_score = None
+        extracted_feedback = None
+        ai_results = {"raw": {"error": "Processing not started"}}
+        
         try:
             # Prepare assignment context if available
             assignment_title = f"{submission_type.capitalize()} Submission"
@@ -486,25 +491,35 @@ async def bulk_upload_images_to_pdf_session(
 
             # Extract score for database (best effort, but raw is source of truth)
             # Frontend will parse the raw data directly
-            extracted_score = None
-            extracted_feedback = None
             
             if isinstance(raw_grading, dict):
                 # Try to get score from raw data (handle both clean and malformed keys)
-                score_val = raw_grading.get('score') or raw_grading.get('"score"') or raw_grading.get('percentage') or raw_grading.get('"percentage"')
-                if isinstance(score_val, (int, float)):
-                    extracted_score = float(score_val)
-                elif isinstance(score_val, str):
-                    # Remove trailing commas and convert
-                    cleaned = score_val.rstrip(',').strip()
-                    try:
-                        extracted_score = float(cleaned)
-                    except:
-                        pass
+                # Use explicit iteration to avoid None issues with 'or' chains
+                score_val = None
+                for key in ['score', '"score"', 'percentage', '"percentage"']:
+                    if key in raw_grading and raw_grading[key] is not None:
+                        score_val = raw_grading[key]
+                        break
                 
-                # Try to get feedback
-                feedback_val = raw_grading.get('overall_feedback') or raw_grading.get('"overall_feedback"') or raw_grading.get('detailed_feedback') or raw_grading.get('"detailed_feedback"')
-                if isinstance(feedback_val, str):
+                if score_val is not None:
+                    if isinstance(score_val, (int, float)):
+                        extracted_score = float(score_val)
+                    elif isinstance(score_val, str):
+                        # Remove trailing commas and convert
+                        cleaned = score_val.rstrip(',').strip()
+                        try:
+                            extracted_score = float(cleaned)
+                        except:
+                            pass
+                
+                # Try to get feedback - use explicit iteration
+                feedback_val = None
+                for key in ['overall_feedback', '"overall_feedback"', 'detailed_feedback', '"detailed_feedback"']:
+                    if key in raw_grading and raw_grading[key] is not None:
+                        feedback_val = raw_grading[key]
+                        break
+                
+                if feedback_val is not None and isinstance(feedback_val, str):
                     # Remove trailing quotes and commas
                     extracted_feedback = feedback_val.strip('"').strip(',').strip()
             
@@ -851,6 +866,10 @@ async def reprocess_submission_by_id(
         )
     
     # Reprocess with AI (real grading via Gemini)
+    # Initialize these outside try block to avoid UnboundLocalError
+    extracted_score = None
+    extracted_feedback = None
+    
     try:
         # Read the file bytes
         with open(submission.file_path, 'rb') as f:
@@ -881,24 +900,34 @@ async def reprocess_submission_by_id(
         )
 
         # Extract score and feedback for database (best effort)
-        extracted_score = None
-        extracted_feedback = None
         
         if isinstance(raw_grading, dict):
             # Try to get score from raw data (handle both clean and malformed keys)
-            score_val = raw_grading.get('score') or raw_grading.get('"score"') or raw_grading.get('percentage') or raw_grading.get('"percentage"')
-            if isinstance(score_val, (int, float)):
-                extracted_score = float(score_val)
-            elif isinstance(score_val, str):
-                cleaned = score_val.rstrip(',').strip()
-                try:
-                    extracted_score = float(cleaned)
-                except:
-                    pass
+            # Use explicit iteration to avoid None issues with 'or' chains
+            score_val = None
+            for key in ['score', '"score"', 'percentage', '"percentage"']:
+                if key in raw_grading and raw_grading[key] is not None:
+                    score_val = raw_grading[key]
+                    break
             
-            # Try to get feedback
-            feedback_val = raw_grading.get('overall_feedback') or raw_grading.get('"overall_feedback"') or raw_grading.get('detailed_feedback') or raw_grading.get('"detailed_feedback"')
-            if isinstance(feedback_val, str):
+            if score_val is not None:
+                if isinstance(score_val, (int, float)):
+                    extracted_score = float(score_val)
+                elif isinstance(score_val, str):
+                    cleaned = score_val.rstrip(',').strip()
+                    try:
+                        extracted_score = float(cleaned)
+                    except:
+                        pass
+            
+            # Try to get feedback - use explicit iteration
+            feedback_val = None
+            for key in ['overall_feedback', '"overall_feedback"', 'detailed_feedback', '"detailed_feedback"']:
+                if key in raw_grading and raw_grading[key] is not None:
+                    feedback_val = raw_grading[key]
+                    break
+            
+            if feedback_val is not None and isinstance(feedback_val, str):
                 extracted_feedback = feedback_val.strip('"').strip(',').strip()
 
         # Update submission with extracted values
