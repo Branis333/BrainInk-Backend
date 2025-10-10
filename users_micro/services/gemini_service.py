@@ -46,7 +46,7 @@ class GeminiConfig:
         Enforce free-only models unless ALLOW_PAID_MODELS=true.
         Free-preferred order:
           1) preferred_first (if allowed by policy)
-          2) gemini-2.5-flash-latest, gemini-2.5-flash
+          2) gemini-1.5-flash-latest, gemini-1.5-flash
           3) gemini-2.0-flash-latest, gemini-2.0-flash
           4) gemini-1.5-flash-latest, gemini-1.5-flash, gemini-1.5-flash-8b
         If paid models are allowed, extend with:
@@ -232,46 +232,81 @@ class GeminiService:
             print(f"{'='*80}\n")
             
         except ValueError as missing_text:
-            # If Gemini returned nothing, attempt a looser retry that does not force JSON
-            # so we can salvage any textual feedback rather than failing outright.
-            retry_prompt = (
+            # If Gemini returned nothing, attempt a robust retry that relaxes JSON
+            fallback_payloads: List[str] = []
+
+            retry_prompt_plain = (
                 prompt
-                + "\n\nIf you cannot output structured JSON, provide plain text with a percentage score"
+                + "\n\nIf you cannot output structured JSON, provide plain text grading details including a percentage score."
             )
+            fallback_payloads.append(retry_prompt_plain)
 
-            def _call_model_plain():
-                payload: Any
-                if attachments:
-                    payload = list(attachments) + [retry_prompt]
-                else:
-                    payload = retry_prompt
-
-                return self.config.model.generate_content(
-                    payload,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                    ),
+            if attachments:
+                fallback_payloads.append(
+                    "Provide at least 3 sentences of feedback summarizing the student's work and a numeric percentage score."
+                    + "\n"
+                    + prompt
+                )
+            else:
+                fallback_payloads.append(
+                    "Summarize the submission with detailed feedback and include a numeric percentage."
                 )
 
-            response_plain = await asyncio.to_thread(_call_model_plain)
-            try:
-                response_text = self._collect_candidate_text(response_plain)
-            except Exception:
-                raise missing_text
+            for idx, retry_prompt in enumerate(fallback_payloads):
+                def _call_model_plain(prompt_override: str = retry_prompt):
+                    payload: Any
+                    if attachments:
+                        payload = list(attachments) + [prompt_override]
+                    else:
+                        payload = prompt_override
 
-            # Attempt to coerce plain text into JSON-compatible shape
-            parsed = self._safe_parse_json_soft(response_text)
-            if parsed is None:
-                raise missing_text
-            return parsed
+                    return self.config.model.generate_content(
+                        payload,
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_output_tokens,
+                        ),
+                    )
+
+                response_plain = await asyncio.to_thread(_call_model_plain)
+                try:
+                    response_text = self._collect_candidate_text(response_plain)
+                except Exception:
+                    if idx == len(fallback_payloads) - 1:
+                        raise missing_text
+                    continue
+
+                parsed = self._safe_parse_json_soft(response_text)
+                if parsed is not None:
+                    return parsed
+
+                # Build best-effort structured payload from plain text so caller still gets feedback
+                text = (response_text or "").strip()
+                if text:
+                    return {
+                        "score": None,
+                        "percentage": self._parse_percentage_token(text),
+                        "grade_letter": None,
+                        "overall_feedback": text,
+                        "detailed_feedback": text,
+                        "strengths": [],
+                        "improvements": [],
+                        "corrections": [],
+                        "recommendations": [],
+                        "graded_by": "Gemini AI",
+                        "graded_at": datetime.utcnow().isoformat(),
+                        "fallback": "plain_text"
+                    }
+
+            raise missing_text
 
         try:
-            return self._safe_parse_json(response_text)
+            parsed = self._safe_parse_json(response_text)
+            return self._normalise_gemini_payload(parsed)
         except ValueError:
             parsed_soft = self._safe_parse_json_soft(response_text)
             if parsed_soft is not None:
-                return parsed_soft
+                return self._normalise_gemini_payload(parsed_soft)
             raise
 
     def _extract_text_from_pdf_bytes(self, file_bytes: bytes) -> str:
@@ -346,11 +381,6 @@ class GeminiService:
         
         # Step 4: Remove trailing commas before closing brackets/braces
         t = re.sub(r',\s*([}\]])', r'\1', t)
-        
-        # Step 5: Fix incomplete array/object markers at end of strings
-        # Sometimes Gemini truncates: "strengths": "[" -> "strengths": []
-        t = re.sub(r':\s*"\["\s*([,}])', r': []\1', t)
-        t = re.sub(r':\s*"\{"\s*([,}])', r': {}\1', t)
         
         # Try parse after fixes
         try:
@@ -434,6 +464,50 @@ class GeminiService:
                 continue
 
         return result or None
+
+    def _normalise_gemini_payload(self, value: Any) -> Any:
+        """Recursively clean Gemini payloads to remove quoted keys and parse embedded JSON."""
+        import json as _json
+
+        if isinstance(value, dict):
+            cleaned: Dict[str, Any] = {}
+            for raw_key, raw_val in value.items():
+                key = raw_key
+                if isinstance(key, str):
+                    key = key.strip()
+                    if len(key) >= 2 and key[0] == key[-1] == '"':
+                        key = key[1:-1].strip()
+                cleaned[key] = self._normalise_gemini_payload(raw_val)
+            return cleaned
+
+        if isinstance(value, list):
+            return [self._normalise_gemini_payload(item) for item in value]
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+
+            text = text.rstrip(',').strip()
+
+            if len(text) >= 2 and text[0] == text[-1] == '"':
+                text = text[1:-1].strip()
+
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+                numeric = self._to_float(text)
+                if numeric is not None:
+                    return numeric
+
+            if (text.startswith('[') and text.endswith(']')) or (text.startswith('{') and text.endswith('}')):
+                try:
+                    embedded = _json.loads(text)
+                except Exception:
+                    return text
+                return self._normalise_gemini_payload(embedded)
+
+            return text
+
+        return value
 
     def _clamp_percentage(self, value: float) -> float:
         return max(0.0, min(100.0, round(float(value), 2)))
@@ -2036,76 +2110,79 @@ class GeminiService:
             }
 
     async def upload_file_to_gemini(self, file_content: bytes, filename: str, mime_type: str = None) -> str:
-        """
-        Upload file directly to Gemini using the File API for native processing
-        This allows Gemini to read PDFs with images, scanned documents, and mixed content directly
-        """
-        try:
-            import tempfile
-            
-            # Determine MIME type if not provided
-            if not mime_type:
-                file_extension = Path(filename).suffix.lower()
-                mime_types = {
-                    '.pdf': 'application/pdf',
-                    '.txt': 'text/plain',
-                    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                    '.doc': 'application/msword',
-                    '.png': 'image/png',
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.gif': 'image/gif',
-                    '.webp': 'image/webp'
-                }
-                mime_type = mime_types.get(file_extension, 'application/octet-stream')
-            
-            # Create temporary file for Gemini upload
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as temp_file:
-                temp_file.write(file_content)
-                temp_file_path = temp_file.name
-            
+        """Upload a file for Gemini processing with resilient retries to handle transient IO issues."""
+        import tempfile
+        import time
+
+        # Determine MIME type if not provided
+        if not mime_type:
+            file_extension = Path(filename).suffix.lower()
+            mime_types = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types.get(file_extension, 'application/octet-stream')
+
+        last_error: Optional[Exception] = None
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            temp_file_path: Optional[str] = None
             try:
-                # Upload file to Gemini
-                print(f"📤 Uploading {filename} to Gemini AI for native processing...")
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as temp_file:
+                    temp_file.write(file_content)
+                    temp_file_path = temp_file.name
+
+                print(f"📤 Uploading {filename} to Gemini AI for native processing... (attempt {attempt}/{max_attempts})")
                 uploaded_file = genai.upload_file(path=temp_file_path, display_name=filename)
-                
+
                 print(f"✅ File uploaded successfully: {uploaded_file.name}")
                 print(f"📋 MIME type: {uploaded_file.mime_type}")
                 print(f"📊 File size: {uploaded_file.size_bytes} bytes")
-                
-                # Wait for file processing to complete
-                import time
+
                 while uploaded_file.state.name == "PROCESSING":
                     print("⏳ Waiting for file processing...")
                     time.sleep(2)
                     uploaded_file = genai.get_file(uploaded_file.name)
-                
+
                 if uploaded_file.state.name == "FAILED":
                     raise Exception(f"File processing failed: {uploaded_file.error}")
-                
+
                 print(f"🎉 File processing complete! State: {uploaded_file.state.name}")
-                return uploaded_file.name  # Return the file URI for Gemini
-                
+                return uploaded_file.name
+
+            except Exception as exc:
+                last_error = exc
+                print(f"⚠️ Gemini upload attempt {attempt} failed: {exc}")
+                if attempt < max_attempts:
+                    backoff = 1.5 * attempt
+                    print(f"🔁 Retrying in {backoff:.1f}s...")
+                    time.sleep(backoff)
+                continue
             finally:
-                # Clean up temporary file with retry for Windows file locking
-                import time
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        os.unlink(temp_file_path)
-                        break
-                    except PermissionError:
-                        if attempt < max_retries - 1:
-                            time.sleep(0.5)  # Wait before retry
-                        else:
-                            # Log warning but don't fail the request
-                            print(f"⚠️ Could not delete temp file {temp_file_path} after {max_retries} attempts")
-                    except Exception as e:
-                        print(f"⚠️ Error deleting temp file: {e}")
-                        break
-                
-        except Exception as e:
-            raise Exception(f"Error uploading file '{filename}' to Gemini: {str(e)}")
+                if temp_file_path and Path(temp_file_path).exists():
+                    for cleanup_attempt in range(3):
+                        try:
+                            os.unlink(temp_file_path)
+                            break
+                        except PermissionError:
+                            if cleanup_attempt < 2:
+                                time.sleep(0.5)
+                                continue
+                            print(f"⚠️ Could not delete temp file {temp_file_path} after retries")
+                            break
+                        except Exception as cleanup_exc:
+                            print(f"⚠️ Error deleting temp file {temp_file_path}: {cleanup_exc}")
+                            break
+
+        raise Exception(f"Error uploading file '{filename}' to Gemini after {max_attempts} attempts: {last_error}")
 
     async def process_uploaded_textbook_file(self, file_content: bytes, filename: str) -> str:
         """

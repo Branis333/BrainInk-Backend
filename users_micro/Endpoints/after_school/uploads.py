@@ -532,12 +532,60 @@ async def bulk_upload_images_to_pdf_session(
                     # Remove trailing quotes and commas
                     extracted_feedback = feedback_val.strip('"').strip(',').strip()
             
+            # Extract arrays for detailed feedback (store as JSON strings)
+            import json
+            extracted_strengths = None
+            extracted_improvements = None
+            extracted_corrections = None
+            
+            if isinstance(raw_grading, dict):
+                # Helper to extract and serialize arrays
+                def extract_array(keys):
+                    for key in keys:
+                        if key in raw_grading:
+                            val = raw_grading[key]
+                            if isinstance(val, list):
+                                return json.dumps(val) if val else None
+                            elif isinstance(val, str) and val.strip() and val.strip() not in ['[', '{', '[]', '{}']:
+                                # Try parsing stringified array
+                                try:
+                                    parsed = json.loads(val)
+                                    if isinstance(parsed, list):
+                                        return json.dumps(parsed) if parsed else None
+                                except:
+                                    pass
+                    return None
+                
+                extracted_strengths = extract_array(['strengths', '"strengths"'])
+                extracted_improvements = extract_array(['improvements', '"improvements"', 'recommendations', '"recommendations"'])
+                extracted_corrections = extract_array(['corrections', '"corrections"'])
+            
             # Update database with extracted values (for legacy compatibility and search)
-            submission.ai_processed = True
-            submission.ai_score = extracted_score
-            submission.ai_feedback = extracted_feedback
-            submission.processed_at = datetime.utcnow()
-            db.commit()
+            # Add retry logic for database connection failures
+            max_db_retries = 3
+            for retry_attempt in range(max_db_retries):
+                try:
+                    submission.ai_processed = True
+                    submission.ai_score = extracted_score
+                    submission.ai_feedback = extracted_feedback
+                    submission.ai_strengths = extracted_strengths
+                    submission.ai_improvements = extracted_improvements
+                    submission.ai_corrections = extracted_corrections
+                    submission.processed_at = datetime.utcnow()
+                    db.commit()
+                    print(f"✅ Database updated successfully (attempt {retry_attempt + 1})")
+                    break
+                except Exception as db_err:
+                    print(f"⚠️ Database update attempt {retry_attempt + 1} failed: {db_err}")
+                    db.rollback()  # Rollback failed transaction
+                    if retry_attempt < max_db_retries - 1:
+                        import time
+                        time.sleep(1)  # Wait 1 second before retry
+                        # Refresh the session to get a new connection
+                        db.expire_all()
+                    else:
+                        print(f"❌ Database update failed after {max_db_retries} attempts")
+                        raise
             
             # Return ONLY raw data - frontend handles all parsing
             ai_results = {"raw": raw_grading}
