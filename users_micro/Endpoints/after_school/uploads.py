@@ -476,9 +476,18 @@ async def bulk_upload_images_to_pdf_session(
             print(f"Type: {type(raw_grading)}")
             print(f"Keys: {list(raw_grading.keys()) if isinstance(raw_grading, dict) else 'N/A'}")
             if isinstance(raw_grading, dict):
-                print(f"📊 Score value: {raw_grading.get('score')} (type: {type(raw_grading.get('score'))})")
-                print(f"📊 Percentage value: {raw_grading.get('percentage')} (type: {type(raw_grading.get('percentage'))})")
-                print(f"📊 Feedback value: {raw_grading.get('overall_feedback', 'N/A')[:100]}...")
+                score_value = raw_grading.get('score')
+                percentage_value = raw_grading.get('percentage')
+                feedback_value = raw_grading.get('overall_feedback', 'N/A')
+
+                print(f"📊 Score value: {score_value} (type: {type(score_value)})")
+                print(f"📊 Percentage value: {percentage_value} (type: {type(percentage_value)})")
+
+                if isinstance(feedback_value, str):
+                    feedback_preview = f"{feedback_value[:100]}..."
+                else:
+                    feedback_preview = repr(feedback_value)
+                print(f"📊 Feedback value: {feedback_preview}")
                 print(f"❌ Error key present: {'error' in raw_grading}")
                 if 'error' in raw_grading:
                     print(f"❌ Error value: {raw_grading.get('error')}")
