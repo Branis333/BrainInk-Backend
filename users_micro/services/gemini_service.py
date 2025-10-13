@@ -2046,10 +2046,49 @@ class GeminiService:
         except Exception as e:
             fallback_error = str(e)
 
+            # Retry with strict minimal schema to force a percentage before falling back to OCR
+            try:
+                strict_grade = await self.grade_submission_from_file_strict(
+                    file_bytes=file_bytes,
+                    filename=filename,
+                    assignment_title=assignment_title,
+                    assignment_description=assignment_description,
+                    max_points=max_points,
+                    submission_type=submission_type,
+                )
+
+                percentage = self._parse_percentage_token(strict_grade.get("percentage"))
+                if percentage is not None:
+                    score = round((percentage / 100.0) * max_points, 2)
+                else:
+                    score = None
+
+                strict_normalized = {
+                    "score": score,
+                    "percentage": percentage,
+                    "grade_letter": None,
+                    "overall_feedback": strict_grade.get("overall_feedback"),
+                    "detailed_feedback": strict_grade.get("overall_feedback"),
+                    "strengths": [],
+                    "improvements": [],
+                    "corrections": [],
+                    "recommendations": [],
+                    "rubric_breakdown": None,
+                    "graded_by": "Gemini AI (strict fallback)",
+                    "graded_at": datetime.utcnow().isoformat(),
+                    "max_points": max_points,
+                }
+
+                if strict_normalized["score"] is not None or strict_normalized["overall_feedback"]:
+                    return strict_normalized
+
+            except Exception as strict_exc:
+                fallback_error = f"{fallback_error} | strict_retry_failed={strict_exc}"
+
             # Attempt plaintext extraction fallback
             try:
                 extracted_text = self._extract_text_from_pdf_bytes(file_bytes)
-                if extracted_text:
+                if extracted_text and extracted_text.strip():
                     text_grade = await self.grade_submission(
                         submission_content=extracted_text,
                         assignment_title=assignment_title,
@@ -2061,7 +2100,7 @@ class GeminiService:
                     text_grade["graded_by"] = "Gemini AI (file fallback)"
                     return text_grade
             except Exception as fallback_exc:
-                fallback_error = f"{fallback_error} | fallback_failed={fallback_exc}"
+                fallback_error = f"{fallback_error} | text_fallback_failed={fallback_exc}"
 
             # Fallback payload to avoid blowing up the caller
             return {
@@ -2074,6 +2113,7 @@ class GeminiService:
                 "improvements": [],
                 "corrections": [],
                 "recommendations": [],
+                "rubric_breakdown": None,
                 "graded_by": "Gemini AI",
                 "graded_at": datetime.utcnow().isoformat(),
                 "max_points": max_points,
