@@ -639,7 +639,19 @@ async def bulk_upload_images_to_pdf_session(
         # Final commit to ensure all changes persisted
         db.commit()
         
-        # Return JSON summary with ONLY raw Gemini data
+        # Normalize AI results to match BrainInk's structured format
+        normalized_results = {
+            "raw": ai_results.get("raw", {}),
+            "normalized": {
+                "score": extracted_score,
+                "percentage": extracted_score,
+                "feedback": extracted_feedback,
+                "ai_processed": submission.ai_processed,
+                "requires_review": submission.requires_review
+            }
+        }
+        
+        # Return JSON summary with normalized Gemini data
         return JSONResponse({
             "success": True,
             "message": "PDF created and AI processed",
@@ -648,7 +660,10 @@ async def bulk_upload_images_to_pdf_session(
             "pdf_size": pdf_size,
             "content_hash": content_hash,
             "total_images": len(valid_files),
-            "ai_processing_results": ai_results  # Only contains {"raw": {...}}
+            "ai_processing_results": normalized_results,
+            # Add immediate availability flag
+            "grade_available": extracted_score is not None,
+            "feedback_available": extracted_feedback is not None
         })
         
     except HTTPException:
@@ -892,6 +907,41 @@ async def delete_submission_by_id(
     return MessageResponse(
         message=f"Submission '{deleted_filename}' deleted successfully"
     )
+
+@router.get("/submissions/{submission_id}/check-grade")
+async def check_submission_grade(
+    submission_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Check if a submission has been graded (similar to BrainInk's grade check)
+    Returns grade status and details if available
+    """
+    user_id = current_user["user_id"]
+    
+    submission = db.query(AISubmission).filter(
+        AISubmission.id == submission_id,
+        AISubmission.user_id == user_id
+    ).first()
+    
+    if not submission:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Submission not found"
+        )
+    
+    return {
+        "already_graded": submission.ai_processed and submission.ai_score is not None,
+        "submission_id": submission.id,
+        "ai_score": submission.ai_score,
+        "ai_feedback": submission.ai_feedback,
+        "ai_strengths": submission.ai_strengths,
+        "ai_improvements": submission.ai_improvements,
+        "ai_corrections": submission.ai_corrections,
+        "processed_at": submission.processed_at,
+        "requires_review": submission.requires_review
+    }
 
 @router.post("/submissions/{submission_id}/reprocess", response_model=AIGradingResponse)
 async def reprocess_submission_by_id(
