@@ -46,7 +46,7 @@ class GeminiConfig:
         Enforce free-only models unless ALLOW_PAID_MODELS=true.
         Free-preferred order:
           1) preferred_first (if allowed by policy)
-          2) gemini-1.5-flash-latest, gemini-1.5-flash
+          2) gemini-2.5-flash-latest, gemini-2.5-flash
           3) gemini-2.0-flash-latest, gemini-2.0-flash
           4) gemini-1.5-flash-latest, gemini-1.5-flash, gemini-1.5-flash-8b
         If paid models are allowed, extend with:
