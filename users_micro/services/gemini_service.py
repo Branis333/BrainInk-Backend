@@ -5,6 +5,7 @@ import asyncio
 import tempfile
 import mimetypes
 import logging
+import base64
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -151,27 +152,87 @@ class GeminiService:
         except Exception:
             pass
 
-        # Try to extract from candidates
         candidates = getattr(response, "candidates", None) or []
         collected: List[str] = []
-        
+
+        def add_text(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    value = value.decode("latin-1", errors="ignore")
+            elif not isinstance(value, str):
+                value = str(value)
+
+            trimmed = value.strip()
+            if trimmed:
+                collected.append(trimmed)
+                return True
+            return False
+
         for candidate in candidates:
             if not candidate:
                 continue
-            
+
+            # Some SDK responses expose candidate.text directly
+            add_text(getattr(candidate, "text", None))
+
             content = getattr(candidate, "content", None)
             parts = getattr(content, "parts", None) if content else None
+
             if not parts:
+                add_text(content if isinstance(content, str) else None)
                 continue
-                
+
             for part in parts:
-                part_text = getattr(part, "text", None)
-                if part_text:
-                    collected.append(part_text)
-        
+                if not part:
+                    continue
+
+                if add_text(getattr(part, "text", None)):
+                    continue
+
+                inline_data = getattr(part, "inline_data", None)
+                if inline_data:
+                    data = getattr(inline_data, "data", None)
+                    if data:
+                        try:
+                            decoded = base64.b64decode(data)
+                            if add_text(decoded):
+                                continue
+                        except Exception:
+                            pass
+
+                function_call = getattr(part, "function_call", None)
+                if function_call:
+                    payload = {
+                        "function": getattr(function_call, "name", None),
+                        "args": getattr(function_call, "args", None),
+                    }
+                    add_text(json.dumps(payload))
+                    continue
+
+                if isinstance(part, dict):
+                    if add_text(part.get("text")):
+                        continue
+                    inline_dict = part.get("inline_data") or {}
+                    data = inline_dict.get("data")
+                    if data:
+                        try:
+                            decoded = base64.b64decode(data)
+                            if add_text(decoded):
+                                continue
+                        except Exception:
+                            pass
+
         if collected:
             return "\n".join(collected)
-            
+
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        if isinstance(prompt_feedback, str) and prompt_feedback.strip():
+            return prompt_feedback.strip()
+
         raise ValueError("No text returned by Gemini response")
 
     async def _generate_json_response(
