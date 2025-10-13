@@ -229,6 +229,63 @@ class GeminiService:
         if collected:
             return "\n".join(collected)
 
+        # Deep fallback: walk any serialisable structure for textual fragments
+        seen_ids = set()
+
+        def walk(obj: Any) -> None:
+            obj_id = id(obj)
+            if obj_id in seen_ids:
+                return
+            seen_ids.add(obj_id)
+
+            if isinstance(obj, str):
+                snippet = obj.strip()
+                if snippet and snippet not in collected:
+                    collected.append(snippet)
+                return
+
+            if isinstance(obj, bytes):
+                try:
+                    walk(obj.decode("utf-8"))
+                except Exception:
+                    return
+                return
+
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, (str, bytes)) and len(str(value)) > 16384:
+                        # Likely binary/base64 payload; skip to avoid noise
+                        continue
+                    walk(value)
+                return
+
+            if isinstance(obj, (list, tuple, set)):
+                for item in obj:
+                    walk(item)
+                return
+
+            for attr in ("text", "message", "content", "parts", "response", "result"):
+                if hasattr(obj, attr):
+                    try:
+                        walk(getattr(obj, attr))
+                    except Exception:
+                        continue
+
+            if hasattr(obj, "to_dict"):
+                try:
+                    walk(obj.to_dict())
+                    return
+                except Exception:
+                    pass
+
+            if hasattr(obj, "__dict__"):
+                walk(vars(obj))
+
+        walk(response)
+
+        if collected:
+            return "\n".join(collected)
+
         prompt_feedback = getattr(response, "prompt_feedback", None)
         if isinstance(prompt_feedback, str) and prompt_feedback.strip():
             return prompt_feedback.strip()

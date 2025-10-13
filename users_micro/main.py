@@ -111,6 +111,7 @@ app.include_router(calendar.router, prefix="/study-area/calendar")
 app.include_router(course.router)  # Already has prefix /after-school/courses
 app.include_router(after_school_grades.router)  # Already has prefix /after-school/sessions  
 app.include_router(after_school_uploads.router)  # Already has prefix /after-school/uploads
+app.include_router(after_school_uploads.legacy_router)  # Legacy compatibility for older mobile clients
 app.include_router(reading_assistant.router)  # Already has prefix /after-school/reading-assistant
 app.include_router(after_school_assignments.router)  # New: /after-school/assignments
 app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor

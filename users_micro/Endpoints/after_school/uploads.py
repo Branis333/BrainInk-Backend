@@ -26,6 +26,7 @@ from schemas.afterschool_schema import (
 from services.gemini_service import gemini_service
 import base64
 router = APIRouter(prefix="/after-school/uploads", tags=["After-School File Uploads"])
+legacy_router = APIRouter(prefix="/after-school", tags=["After-School File Uploads"])
 logger = logging.getLogger(__name__)
 
 # Dependency for current user
@@ -768,6 +769,21 @@ async def get_session_submissions_summary(
         "session_status": session.status
     }
 
+def _get_submission_or_404(db: Session, submission_id: int, user_id: int) -> AISubmission:
+    submission = db.query(AISubmission).filter(
+        AISubmission.id == submission_id,
+        AISubmission.user_id == user_id
+    ).first()
+
+    if not submission:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="AI submission not found or access denied"
+        )
+
+    return submission
+
+
 @router.get("/submissions/{submission_id}", response_model=AISubmissionOut)
 async def get_submission_details(
     submission_id: int,
@@ -777,20 +793,22 @@ async def get_submission_details(
     """
     Get detailed information about a specific AI submission
     """
-    user_id = current_user["user_id"]
-    
-    # Get the submission and verify it belongs to the user
-    submission = db.query(AISubmission).filter(
-        AISubmission.id == submission_id,
-        AISubmission.user_id == user_id
-    ).first()
-    
-    if not submission:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="AI submission not found or access denied"
-        )
-    
+    submission = _get_submission_or_404(db, submission_id, current_user["user_id"])
+    return submission
+
+
+@legacy_router.get(
+    "/submissions/{submission_id}",
+    response_model=AISubmissionOut,
+    include_in_schema=False
+)
+async def get_submission_details_legacy(
+    submission_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """Legacy path kept for compatibility with older mobile builds."""
+    submission = _get_submission_or_404(db, submission_id, current_user["user_id"])
     return submission
 
 @router.get("/submissions/{submission_id}/download")
