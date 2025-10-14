@@ -49,6 +49,7 @@ class GeminiConfig:
             self.model_name,
             safety_settings=self.get_safety_settings()
         )
+        self._model_cache: Dict[str, Any] = {self.model_name: self.model}
 
     def _build_safety_settings(self) -> Any:
         """Build safety settings payload compatible with the installed SDK version."""
@@ -56,27 +57,29 @@ class GeminiConfig:
         category_enum = getattr(genai.types, "HarmCategory", None)
         threshold_enum = getattr(genai.types, "HarmBlockThreshold", None)
 
-        categories = [
+        if safety_cls and category_enum and threshold_enum:
+            try:
+                members = getattr(category_enum, "__members__", {})
+                if members:
+                    return [
+                        safety_cls(
+                            category=member,
+                            threshold=threshold_enum.BLOCK_NONE,
+                        )
+                        for name, member in members.items()
+                        if name != "HARM_CATEGORY_UNSPECIFIED"
+                    ]
+            except Exception:
+                pass
+
+        # Fallback for older SDKs that accept simple dict mapping
+        fallback_categories = [
             "HARM_CATEGORY_HARASSMENT",
             "HARM_CATEGORY_HATE_SPEECH",
             "HARM_CATEGORY_SEXUALLY_EXPLICIT",
             "HARM_CATEGORY_DANGEROUS_CONTENT",
         ]
-
-        if safety_cls and category_enum and threshold_enum:
-            try:
-                return [
-                    safety_cls(
-                        category=getattr(category_enum, category_name),
-                        threshold=threshold_enum.BLOCK_NONE,
-                    )
-                    for category_name in categories
-                ]
-            except Exception:
-                pass
-
-        # Fallback for older SDKs that accept simple dict mapping
-        return {category: "BLOCK_NONE" for category in categories}
+        return {category: "BLOCK_NONE" for category in fallback_categories}
 
     def get_safety_settings(self) -> Any:
         """Return a copy of the configured safety settings for request usage."""
@@ -91,6 +94,41 @@ class GeminiConfig:
         if isinstance(self.safety_settings, dict):
             return dict(self.safety_settings)
         return self.safety_settings
+
+    def get_model(self, model_name: Optional[str] = None):
+        """Return a cached GenerativeModel instance for the requested model."""
+        name = model_name or self.model_name
+        if name not in self._model_cache:
+            self._model_cache[name] = genai.GenerativeModel(
+                name,
+                safety_settings=self.get_safety_settings()
+            )
+        return self._model_cache[name]
+
+    def get_model_sequence(self) -> List[str]:
+        """Provide primary + fallback model names to try in order."""
+        sequence: List[str] = [self.model_name]
+
+        fallback_candidates = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash-latest",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+        ]
+        if self.allow_paid:
+            fallback_candidates.extend([
+                "gemini-1.5-pro-latest",
+                "gemini-1.0-pro-vision-latest",
+                "gemini-pro-vision",
+            ])
+
+        for candidate in fallback_candidates:
+            if candidate and candidate not in sequence:
+                sequence.append(candidate)
+
+        return sequence
 
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
@@ -192,51 +230,90 @@ class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
 
-    def _coerce_attachment_part(self, attachment: Any) -> Optional[Dict[str, Any]]:
-        """Convert various attachment representations into Gemini part dictionaries."""
-        if attachment is None:
-            return None
-
-        if isinstance(attachment, dict):
-            if any(key in attachment for key in ("file_data", "inline_data", "text")):
-                return attachment
-
-        # Prefer URI if available; fall back to name which is also acceptable
-        file_uri = getattr(attachment, "uri", None) or getattr(attachment, "name", None)
-        mime_type = getattr(attachment, "mime_type", None)
-
-        if hasattr(attachment, "to_dict"):
-            try:
-                payload = attachment.to_dict()
-                if payload and any(key in payload for key in ("file_data", "inline_data", "text")):
-                    return payload
-            except Exception:
-                pass
-
-        if file_uri:
-            file_data: Dict[str, Any] = {"file_uri": file_uri}
-            if mime_type:
-                file_data["mime_type"] = mime_type
-            return {"file_data": file_data}
-
-        if isinstance(attachment, str):
-            return {"text": attachment}
-
-        return None
-
     def _build_content_payload(self, prompt: str, attachments: Optional[List[Any]]) -> Any:
-        """Construct the payload expected by generate_content, bundling attachments with the prompt."""
+        """Construct payload for generate_content, preserving native attachment objects."""
         if attachments:
-            parts: List[Any] = []
+            payload: List[Any] = []
             for attachment in attachments:
-                part = self._coerce_attachment_part(attachment)
-                if part is not None:
-                    parts.append(part)
-            parts.append({"text": prompt})
-            return [{"role": "user", "parts": parts}]
+                if attachment is None:
+                    continue
+                payload.append(attachment)
+            payload.append(prompt)
+            return payload
 
-        # Without attachments we can send plain text for compatibility
         return prompt
+
+    def _log_candidate_metadata(self, response: Any, *, model_name: str) -> None:
+        candidates = getattr(response, "candidates", None) or []
+        for idx, candidate in enumerate(candidates):
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason:
+                reason_name = getattr(finish_reason, "name", str(finish_reason))
+                if reason_name and reason_name.upper() != "STOP":
+                    logger.warning(
+                        "⚠️ Gemini candidate ended without STOP",
+                        extra={
+                            "model_name": model_name,
+                            "candidate_index": idx,
+                            "finish_reason": reason_name,
+                        }
+                    )
+
+            safety_ratings = getattr(candidate, "safety_ratings", None)
+            if safety_ratings:
+                rating_details = []
+                for rating in safety_ratings:
+                    category = getattr(rating, "category", None)
+                    category_name = getattr(category, "name", str(category))
+                    probability = getattr(rating, "probability", None)
+                    probability_name = getattr(probability, "name", str(probability))
+                    blocked = getattr(rating, "blocked", False)
+                    rating_details.append({
+                        "category": category_name,
+                        "probability": probability_name,
+                        "blocked": bool(blocked),
+                    })
+
+                logger.info(
+                    "🛡️ Gemini safety ratings",
+                    extra={
+                        "model_name": model_name,
+                        "candidate_index": idx,
+                        "ratings": rating_details,
+                    }
+                )
+
+    def _response_blocked_by_safety(self, response: Any) -> bool:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason is not None:
+                reason_name = getattr(finish_reason, "name", str(finish_reason))
+                try:
+                    reason_value = int(finish_reason)
+                except Exception:
+                    reason_value = None
+
+                if reason_name and reason_name.upper() in {"SAFETY", "SAFETY_REASON_UNSPECIFIED"}:
+                    return True
+                if reason_value == 2:
+                    return True
+
+            safety_ratings = getattr(candidate, "safety_ratings", None)
+            if safety_ratings:
+                for rating in safety_ratings:
+                    if getattr(rating, "blocked", False):
+                        return True
+
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        if prompt_feedback is not None:
+            block_reason = getattr(prompt_feedback, "block_reason", None)
+            if block_reason:
+                reason_name = getattr(block_reason, "name", str(block_reason))
+                if reason_name and "SAFETY" in reason_name.upper():
+                    return True
+
+        return False
 
     def _collect_candidate_text(self, response) -> str:
         """Safely collect text from a Gemini response object - NO SAFETY CHECKS."""
@@ -398,13 +475,13 @@ class GeminiService:
     ) -> Dict[str, Any]:
         """Invoke Gemini with consistent settings and parse JSON output."""
 
-        def _call_model():
+        def _call_model_for_name(model_name: str):
             payload = self._build_content_payload(prompt, attachments)
-            
-            # Log what we're about to send to Gemini
+
             logger.info(
                 "🚀 Calling Gemini API (NO SAFETY FILTERS)",
                 extra={
+                    "model_name": model_name,
                     "has_attachments": bool(attachments),
                     "attachment_count": len(attachments) if attachments else 0,
                     "prompt_length": len(prompt),
@@ -413,7 +490,8 @@ class GeminiService:
                 }
             )
 
-            return self.config.model.generate_content(
+            model = self.config.get_model(model_name)
+            return model.generate_content(
                 payload,
                 generation_config=genai.types.GenerationConfig(
                     temperature=temperature,
@@ -423,37 +501,64 @@ class GeminiService:
                 safety_settings=self.config.get_safety_settings(),
             )
 
-        response = await asyncio.to_thread(_call_model)
-        prompt_feedback = getattr(response, "prompt_feedback", None)
-        if prompt_feedback is not None:
-            block_reason = getattr(prompt_feedback, "block_reason", None)
-            if block_reason:
-                logger.warning(
-                    "⚠️ Gemini prompt feedback indicates block",
-                    extra={"block_reason": getattr(block_reason, "name", str(block_reason))}
-                )
-        try:
-            response_text = self._collect_candidate_text(response)
-            
-            # DEBUG: Log the raw response text before parsing
-            logger.info(
-                "📥 RAW GEMINI RESPONSE TEXT",
-                extra={
-                    "response_text_preview": response_text[:500] if response_text else None,
-                    "response_text_length": len(response_text) if response_text else 0,
-                    "first_char": response_text[0] if response_text else None,
-                    "last_char": response_text[-1] if response_text else None,
-                }
-            )
-            print(f"\n{'='*80}")
-            print(f"📥 RAW GEMINI RESPONSE TEXT (full):")
-            print(response_text)
-            print(f"{'='*80}\n")
-            
-        except ValueError as missing_text:
-            # If Gemini returned nothing, attempt a robust retry that relaxes JSON
-            fallback_payloads: List[str] = []
+        response: Optional[Any] = None
+        response_text: Optional[str] = None
+        missing_text_error: Optional[ValueError] = None
+        used_model_name: Optional[str] = None
 
+        for model_name in self.config.get_model_sequence():
+            try:
+                response_candidate = await asyncio.to_thread(
+                    lambda name=model_name: _call_model_for_name(name)
+                )
+            except Exception as call_exc:
+                logger.error(
+                    "❌ Gemini API call failed",
+                    extra={"model_name": model_name, "error": str(call_exc)}
+                )
+                missing_text_error = ValueError(str(call_exc))
+                continue
+
+            response = response_candidate
+            self._log_candidate_metadata(response, model_name=model_name)
+
+            prompt_feedback = getattr(response, "prompt_feedback", None)
+            if prompt_feedback is not None:
+                block_reason = getattr(prompt_feedback, "block_reason", None)
+                if block_reason:
+                    logger.warning(
+                        "⚠️ Gemini prompt feedback indicates block",
+                        extra={
+                            "model_name": model_name,
+                            "block_reason": getattr(block_reason, "name", str(block_reason))
+                        }
+                    )
+
+            try:
+                response_text_candidate = self._collect_candidate_text(response)
+                response_text = response_text_candidate
+                used_model_name = model_name
+                if model_name != self.config.model_name:
+                    logger.info(
+                        "✅ Gemini fallback model succeeded",
+                        extra={"model_name": model_name}
+                    )
+                break
+            except ValueError as err:
+                missing_text_error = err
+                if not self._response_blocked_by_safety(response):
+                    break
+
+                logger.warning(
+                    "⚠️ Gemini response blocked by safety, trying fallback model",
+                    extra={"model_name": model_name}
+                )
+                continue
+
+        if response_text is None:
+            missing_text = missing_text_error or ValueError("No text returned by Gemini response")
+
+            fallback_payloads: List[str] = []
             retry_prompt_plain = (
                 prompt
                 + "\n\nIf you cannot output structured JSON, provide plain text grading details including a percentage score."
@@ -474,8 +579,7 @@ class GeminiService:
             for idx, retry_prompt in enumerate(fallback_payloads):
                 def _call_model_plain(prompt_override: str = retry_prompt):
                     payload = self._build_content_payload(prompt_override, attachments)
-
-                    return self.config.model.generate_content(
+                    return self.config.get_model().generate_content(
                         payload,
                         generation_config=genai.types.GenerationConfig(
                             temperature=temperature,
@@ -486,18 +590,21 @@ class GeminiService:
 
                 response_plain = await asyncio.to_thread(_call_model_plain)
                 try:
-                    response_text = self._collect_candidate_text(response_plain)
+                    response_text_plain = self._collect_candidate_text(response_plain)
                 except Exception:
                     if idx == len(fallback_payloads) - 1:
                         raise missing_text
                     continue
 
-                parsed = self._safe_parse_json_soft(response_text)
-                if parsed is not None:
-                    return parsed
+                try:
+                    parsed_plain = self._safe_parse_json(response_text_plain)
+                    return self._normalise_gemini_payload(parsed_plain)
+                except Exception:
+                    parsed_soft = self._safe_parse_json_soft(response_text_plain)
+                    if parsed_soft is not None:
+                        return self._normalise_gemini_payload(parsed_soft)
 
-                # Build best-effort structured payload from plain text so caller still gets feedback
-                text = (response_text or "").strip()
+                text = (response_text_plain or "").strip()
                 if text:
                     return {
                         "score": None,
@@ -515,6 +622,21 @@ class GeminiService:
                     }
 
             raise missing_text
+
+        logger.info(
+            "📥 RAW GEMINI RESPONSE TEXT",
+            extra={
+                "response_text_preview": response_text[:500] if response_text else None,
+                "response_text_length": len(response_text) if response_text else 0,
+                "first_char": response_text[0] if response_text else None,
+                "last_char": response_text[-1] if response_text else None,
+                "model_name": used_model_name or self.config.model_name,
+            }
+        )
+        print(f"\n{'='*80}")
+        print(f"📥 RAW GEMINI RESPONSE TEXT (full):")
+        print(response_text)
+        print(f"{'='*80}\n")
 
         try:
             parsed = self._safe_parse_json(response_text)
