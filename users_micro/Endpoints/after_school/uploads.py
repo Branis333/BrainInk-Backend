@@ -261,22 +261,22 @@ async def bulk_upload_images_to_pdf_session(
     skip_db: bool = Form(False, description="If true, only generate PDF and return; do not persist (debug)")
 ):
     """
-    Upload multiple image files for a course block and combine them into a single PDF.
+    Upload multiple image files for a course block and send them directly to AI for grading.
     
     - **course_id**: Course ID (required)
     - **block_id**: Block ID (for AI-generated courses)
     - **lesson_id**: Lesson ID (for legacy courses)
     - **submission_type**: Type of submission (homework, quiz, practice, assessment)
     - **files**: List of image files (JPG, PNG, GIF, BMP, WEBP)
-    - Returns: PDF file containing all images as separate pages
+    - Returns: Submission details with AI grading results
     
     The API will:
     1. Validate user access to course and block/lesson
     2. Validate all uploaded files are images
-    3. Convert and resize images to fit PDF pages
-    4. Combine all images into a single PDF document
-    5. Save submission record in database with AI processing
-    6. Return the generated PDF file
+    3. Save images to upload directory
+    4. Send images directly to Gemini AI for grading (no PDF conversion)
+    5. Save submission record in database with AI processing results
+    6. Return grading results immediately
     """
     
     try:
@@ -364,15 +364,22 @@ async def bulk_upload_images_to_pdf_session(
         if not valid_files:
             raise HTTPException(status_code=400, detail="No valid image files found after validation")
 
-        # Reset file pointers
+        # Reset file pointers and read image data
+        image_files_data = []
+        image_filenames = []
         for f in valid_files:
             try:
                 if hasattr(f.file, 'seek') and f.file.seekable():
                     f.file.seek(0)
-            except Exception:
-                pass
+                img_bytes = await f.read()
+                image_files_data.append(img_bytes)
+                image_filenames.append(f.filename)
+            except Exception as read_err:
+                raise HTTPException(status_code=500, detail=f"Failed to read image file {f.filename}: {read_err}")
         
-        # Generate PDF filename (support lesson- or block-anchored uploads)
+        print(f"📸 Loaded {len(image_files_data)} images for direct submission")
+        
+        # Generate submission filename for reference
         course_title = course.title.replace(" ", "_").replace("/", "_")
         if lesson is not None:
             anchor_title = lesson.title.replace(" ", "_").replace("/", "_")
@@ -384,41 +391,48 @@ async def bulk_upload_images_to_pdf_session(
             anchor_title = "upload"
             upload_id = "unknown"
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pdf_filename = f"{upload_id}_{course_title}_{anchor_title}_{timestamp}.pdf"
+        submission_filename = f"{upload_id}_{course_title}_{anchor_title}_{timestamp}_images"
         
-        # Create PDF from images (returns bytes and hash)
-        try:
-            pdf_bytes, content_hash = await create_pdf_from_images(valid_files, pdf_filename)
-        except Exception as gen_err:
-            raise HTTPException(status_code=500, detail=f"Failed to generate PDF from images: {gen_err}")
-        pdf_size = len(pdf_bytes)
+        # Calculate content hash from all images combined
+        import hashlib
+        hasher = hashlib.sha256()
+        for img_data in image_files_data:
+            hasher.update(img_data)
+        content_hash = hasher.hexdigest()
         
-        print(f"📄 Created PDF in memory: {pdf_size} bytes, hash: {content_hash}")
+        # Calculate total size of all images
+        total_size = sum(len(img_data) for img_data in image_files_data)
+        
+        print(f"📄 Prepared {len(image_files_data)} images: {total_size} bytes total, hash: {content_hash}")
 
         # Early return for debug mode (skip DB persistence)
         if skip_db:
-            return Response(
-                content=pdf_bytes,
-                media_type="application/pdf",
-                headers={
-                    "X-Debug-Skip-DB": "true",
-                    "X-Generated-Only": "true",
-                    "X-Content-Hash": content_hash,
-                    "Content-Disposition": f"attachment; filename={pdf_filename}"
-                }
-            )
+            return JSONResponse({
+                "success": True,
+                "message": "Images prepared (debug mode - not saved)",
+                "content_hash": content_hash,
+                "total_images": len(image_files_data),
+                "total_size": total_size
+            })
 
-        # Save PDF file to uploads directory
-        unique_filename = generate_unique_filename(pdf_filename, user_id, block_id_int or lesson_id_int or 0)
-        file_path = UPLOAD_DIR / unique_filename
+        # Save images to upload directory for record keeping
+        saved_file_paths = []
+        for idx, (img_data, img_filename) in enumerate(zip(image_files_data, image_filenames)):
+            unique_filename = generate_unique_filename(f"{idx+1}_{img_filename}", user_id, block_id_int or lesson_id_int or 0)
+            file_path = UPLOAD_DIR / unique_filename
+            try:
+                async with aiofiles.open(file_path, 'wb') as f:
+                    await f.write(img_data)
+                saved_file_paths.append(str(file_path))
+            except Exception as save_err:
+                raise HTTPException(status_code=500, detail=f"Failed to save image file: {save_err}")
         
-        try:
-            async with aiofiles.open(file_path, 'wb') as f:
-                await f.write(pdf_bytes)
-        except Exception as save_err:
-            raise HTTPException(status_code=500, detail=f"Failed to save PDF file: {save_err}")
+        # Store primary file path (first image) for database reference
+        primary_file_path = saved_file_paths[0] if saved_file_paths else None
         
         # Create AI submission record without session dependency
+        # Store all file paths as JSON array
+        import json
         submission = AISubmission(
             user_id=user_id,
             course_id=course_id,
@@ -427,9 +441,9 @@ async def bulk_upload_images_to_pdf_session(
             session_id=None,  # Not using sessions for this workflow
             assignment_id=assignment_id_int,
             submission_type=submission_type,
-            original_filename=pdf_filename,
-            file_path=str(file_path),
-            file_type="pdf",
+            original_filename=submission_filename,
+            file_path=primary_file_path,  # Primary image path
+            file_type="images",  # Changed from "pdf" to "images"
             ai_processed=False,
             submitted_at=datetime.utcnow()
         )
@@ -459,10 +473,10 @@ async def bulk_upload_images_to_pdf_session(
                     rubric = getattr(assignment, 'rubric', '') or ''
                     max_points = getattr(assignment, 'points', 100) or 100
 
-            # Grade using Gemini's native file processing (handles OCR for scanned/image PDFs)
-            raw_grading = await gemini_service.grade_submission_from_file(
-                file_bytes=pdf_bytes,
-                filename=pdf_filename,
+            # Grade using Gemini's direct image processing (more reliable than PDF)
+            raw_grading = await gemini_service.grade_submission_from_images(
+                image_files=image_files_data,
+                image_filenames=image_filenames,
                 assignment_title=assignment_title,
                 assignment_description=assignment_description,
                 rubric=rubric,
@@ -618,8 +632,8 @@ async def bulk_upload_images_to_pdf_session(
                     db.flush()
 
                 # Always mark submitted and attach file path
-                student_assignment.submission_file_path = str(file_path)
-                student_assignment.submission_content = f"PDF submission with {len(valid_files)} page(s)"
+                student_assignment.submission_file_path = primary_file_path
+                student_assignment.submission_content = f"Image submission with {len(valid_files)} image(s)"
                 student_assignment.submitted_at = datetime.utcnow()
 
                 # Set grade from extracted score
@@ -655,12 +669,13 @@ async def bulk_upload_images_to_pdf_session(
         # Return JSON summary with normalized Gemini data
         return JSONResponse({
             "success": True,
-            "message": "PDF created and AI processed",
+            "message": "Images uploaded and AI processed",
             "submission_id": submission.id,
-            "pdf_filename": pdf_filename,
-            "pdf_size": pdf_size,
+            "submission_filename": submission_filename,
+            "total_size": total_size,
             "content_hash": content_hash,
             "total_images": len(valid_files),
+            "image_files": [Path(p).name for p in saved_file_paths],
             "ai_processing_results": normalized_results,
             # Add immediate availability flag
             "grade_available": extracted_score is not None,
@@ -670,7 +685,7 @@ async def bulk_upload_images_to_pdf_session(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error creating PDF: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing images: {str(e)}")
 
 # ===============================
 # SUBMISSION MANAGEMENT ENDPOINTS

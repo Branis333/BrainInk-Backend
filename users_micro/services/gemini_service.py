@@ -2610,6 +2610,134 @@ class GeminiService:
 
         return uploaded_file
 
+    async def grade_submission_from_images(
+        self,
+        image_files: List[bytes],
+        image_filenames: List[str],
+        assignment_title: str,
+        assignment_description: str,
+        rubric: str,
+        max_points: int = 100,
+        submission_type: str = "homework",
+    ) -> Dict[str, Any]:
+        """
+        Grade a student submission by uploading multiple images directly to Gemini.
+        
+        This sends images directly without converting to PDF, which is more reliable
+        for AI processing and avoids PDF conversion errors.
+        
+        Args:
+            image_files: List of image file bytes
+            image_filenames: List of corresponding filenames
+            assignment_title: Title of the assignment
+            assignment_description: Description of what's being graded
+            rubric: Grading criteria
+            max_points: Maximum points possible (default 100)
+            submission_type: Type of submission (homework, quiz, etc.)
+            
+        Returns:
+            Dict with grading results including score, feedback, strengths, etc.
+        """
+        try:
+            # Upload all images to Gemini
+            uploaded_files = []
+            for img_bytes, img_filename in zip(image_files, image_filenames):
+                gemini_file_uri = await self.upload_file_to_gemini(img_bytes, img_filename)
+                uploaded_file = genai.get_file(gemini_file_uri)
+                uploaded_files.append(uploaded_file)
+            
+            print(f"✅ Uploaded {len(uploaded_files)} images to Gemini for grading")
+            
+            # Create grading prompt
+            grading_prompt = f"""
+            You are an expert educational assessor. Review ALL {len(uploaded_files)} attached images 
+            which represent a student's submission, and grade them with detailed analysis.
+
+            ASSIGNMENT DETAILS:
+            Title: {assignment_title}
+            Description: {assignment_description}
+            Type: {submission_type}
+            Maximum Points: {max_points}
+
+            GRADING RUBRIC:
+            {rubric}
+
+            IMPORTANT: Review ALL images in sequence. They are pages of the student's work.
+
+            Provide a comprehensive assessment in JSON format with these keys:
+            {{
+                "score": 85,
+                "percentage": 85.0,
+                "grade_letter": "B+",
+                "overall_feedback": "Overall feedback text",
+                "detailed_feedback": "Detailed analysis text",
+                "strengths": ["strength1", "strength2"],
+                "improvements": ["improvement1", "improvement2"],
+                "corrections": ["correction1", "correction2"],
+                "recommendations": ["recommendation1", "recommendation2"],
+                "rubric_breakdown": {{"criteria_1": {{"score": 20, "max": 25, "feedback": "..."}}}}
+            }}
+            """
+
+            # Generate grading with all images attached
+            grade_result = await self._generate_json_response(
+                grading_prompt,
+                attachments=uploaded_files,
+                temperature=0.25,
+                max_output_tokens=2048,
+            )
+
+            # Coerce and normalize percentage
+            coerced_percentage = self._coerce_percentage(grade_result, max_points)
+            if coerced_percentage is not None:
+                grade_result["percentage"] = coerced_percentage
+            elif "percentage" in grade_result:
+                parsed_percentage = self._parse_percentage_token(grade_result.get("percentage"))
+                if parsed_percentage is not None:
+                    grade_result["percentage"] = parsed_percentage
+
+            # Parse and normalize score
+            score_value, _ = self._parse_score_token(grade_result.get("score"))
+            if score_value is not None:
+                grade_result["score"] = round(score_value, 2)
+
+            # Ensure overall_feedback exists
+            if not grade_result.get("overall_feedback"):
+                for feedback_key in ("detailed_feedback", "feedback", "ai_feedback"):
+                    if grade_result.get(feedback_key):
+                        grade_result["overall_feedback"] = grade_result[feedback_key]
+                        break
+
+            # Add metadata
+            grade_result["graded_by"] = "Gemini AI"
+            grade_result["graded_at"] = datetime.utcnow().isoformat()
+            grade_result["max_points"] = max_points
+            grade_result["images_count"] = len(uploaded_files)
+
+            return grade_result
+
+        except Exception as e:
+            print(f"❌ Error grading images: {e}")
+            
+            # Return error payload to avoid breaking the caller
+            return {
+                "score": None,
+                "percentage": None,
+                "grade_letter": None,
+                "overall_feedback": None,
+                "detailed_feedback": None,
+                "strengths": [],
+                "improvements": [],
+                "corrections": [],
+                "recommendations": [],
+                "rubric_breakdown": None,
+                "graded_by": "Gemini AI",
+                "graded_at": datetime.utcnow().isoformat(),
+                "max_points": max_points,
+                "images_count": len(image_files),
+                "error": str(e),
+            }
+
 
 # Singleton instance
 gemini_service = GeminiService()
