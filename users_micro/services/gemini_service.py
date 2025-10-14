@@ -6,6 +6,7 @@ import tempfile
 import mimetypes
 import logging
 import base64
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -40,20 +41,56 @@ class GeminiConfig:
         if chosen != self.model_name:
             print(f"🔁 Using fallback model: {chosen}")
         self.model_name = chosen
-        
-        # Configure safety settings to BLOCK_NONE for all categories
-        # This prevents educational content from being blocked
-        self.safety_settings = {
-            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-        }
-        
+
+        # Configure safety settings to BLOCK_NONE for all categories to avoid educational content blocks
+        self.safety_settings = self._build_safety_settings()
+
         self.model = genai.GenerativeModel(
             self.model_name,
-            safety_settings=self.safety_settings
+            safety_settings=self.get_safety_settings()
         )
+
+    def _build_safety_settings(self) -> Any:
+        """Build safety settings payload compatible with the installed SDK version."""
+        safety_cls = getattr(genai.types, "SafetySetting", None)
+        category_enum = getattr(genai.types, "HarmCategory", None)
+        threshold_enum = getattr(genai.types, "HarmBlockThreshold", None)
+
+        categories = [
+            "HARM_CATEGORY_HARASSMENT",
+            "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "HARM_CATEGORY_DANGEROUS_CONTENT",
+        ]
+
+        if safety_cls and category_enum and threshold_enum:
+            try:
+                return [
+                    safety_cls(
+                        category=getattr(category_enum, category_name),
+                        threshold=threshold_enum.BLOCK_NONE,
+                    )
+                    for category_name in categories
+                ]
+            except Exception:
+                pass
+
+        # Fallback for older SDKs that accept simple dict mapping
+        return {category: "BLOCK_NONE" for category in categories}
+
+    def get_safety_settings(self) -> Any:
+        """Return a copy of the configured safety settings for request usage."""
+        if isinstance(self.safety_settings, list):
+            cloned_settings: List[Any] = []
+            for setting in self.safety_settings:
+                try:
+                    cloned_settings.append(copy.deepcopy(setting))
+                except Exception:
+                    cloned_settings.append(setting)
+            return cloned_settings
+        if isinstance(self.safety_settings, dict):
+            return dict(self.safety_settings)
+        return self.safety_settings
 
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
@@ -154,6 +191,52 @@ class GeneratedCourse(BaseModel):
 class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
+
+    def _coerce_attachment_part(self, attachment: Any) -> Optional[Dict[str, Any]]:
+        """Convert various attachment representations into Gemini part dictionaries."""
+        if attachment is None:
+            return None
+
+        if isinstance(attachment, dict):
+            if any(key in attachment for key in ("file_data", "inline_data", "text")):
+                return attachment
+
+        # Prefer URI if available; fall back to name which is also acceptable
+        file_uri = getattr(attachment, "uri", None) or getattr(attachment, "name", None)
+        mime_type = getattr(attachment, "mime_type", None)
+
+        if hasattr(attachment, "to_dict"):
+            try:
+                payload = attachment.to_dict()
+                if payload and any(key in payload for key in ("file_data", "inline_data", "text")):
+                    return payload
+            except Exception:
+                pass
+
+        if file_uri:
+            file_data: Dict[str, Any] = {"file_uri": file_uri}
+            if mime_type:
+                file_data["mime_type"] = mime_type
+            return {"file_data": file_data}
+
+        if isinstance(attachment, str):
+            return {"text": attachment}
+
+        return None
+
+    def _build_content_payload(self, prompt: str, attachments: Optional[List[Any]]) -> Any:
+        """Construct the payload expected by generate_content, bundling attachments with the prompt."""
+        if attachments:
+            parts: List[Any] = []
+            for attachment in attachments:
+                part = self._coerce_attachment_part(attachment)
+                if part is not None:
+                    parts.append(part)
+            parts.append({"text": prompt})
+            return [{"role": "user", "parts": parts}]
+
+        # Without attachments we can send plain text for compatibility
+        return prompt
 
     def _collect_candidate_text(self, response) -> str:
         """Safely collect text from a Gemini response object - NO SAFETY CHECKS."""
@@ -316,11 +399,7 @@ class GeminiService:
         """Invoke Gemini with consistent settings and parse JSON output."""
 
         def _call_model():
-            payload: Any
-            if attachments:
-                payload = list(attachments) + [prompt]
-            else:
-                payload = prompt
+            payload = self._build_content_payload(prompt, attachments)
             
             # Log what we're about to send to Gemini
             logger.info(
@@ -341,15 +420,18 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
-                safety_settings={
-                    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-                    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-                    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-                },
+                safety_settings=self.config.get_safety_settings(),
             )
 
         response = await asyncio.to_thread(_call_model)
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        if prompt_feedback is not None:
+            block_reason = getattr(prompt_feedback, "block_reason", None)
+            if block_reason:
+                logger.warning(
+                    "⚠️ Gemini prompt feedback indicates block",
+                    extra={"block_reason": getattr(block_reason, "name", str(block_reason))}
+                )
         try:
             response_text = self._collect_candidate_text(response)
             
@@ -391,11 +473,7 @@ class GeminiService:
 
             for idx, retry_prompt in enumerate(fallback_payloads):
                 def _call_model_plain(prompt_override: str = retry_prompt):
-                    payload: Any
-                    if attachments:
-                        payload = list(attachments) + [prompt_override]
-                    else:
-                        payload = prompt_override
+                    payload = self._build_content_payload(prompt_override, attachments)
 
                     return self.config.model.generate_content(
                         payload,
@@ -403,12 +481,7 @@ class GeminiService:
                             temperature=temperature,
                             max_output_tokens=max_output_tokens,
                         ),
-                        safety_settings={
-                            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
-                            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
-                            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
-                            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
-                        },
+                        safety_settings=self.config.get_safety_settings(),
                     )
 
                 response_plain = await asyncio.to_thread(_call_model_plain)
@@ -2022,6 +2095,11 @@ class GeminiService:
             GRADING RUBRIC:
             {rubric}
 
+            SAFETY CONTEXT:
+            - This submission is educational student work (potentially handwritten or scanned).
+            - It is safe for school environments with no harmful or adult content.
+            - Proceed with grading without declining for safety reasons.
+
             Provide a comprehensive assessment in JSON format with these keys:
             {{
                 "score": 85,
@@ -2688,6 +2766,11 @@ class GeminiService:
             {rubric}
 
             IMPORTANT: Review ALL images in sequence. They are pages of the student's work.
+
+            SAFETY CONTEXT:
+            - These images are photos of student homework for educational review.
+            - They may contain handwriting or simple drawings that are safe for school environments.
+            - There is no harmful, adult, or disallowed content. Proceed with grading normally.
 
             Provide a comprehensive assessment in JSON format with these keys:
             {{
