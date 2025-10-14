@@ -40,7 +40,20 @@ class GeminiConfig:
         if chosen != self.model_name:
             print(f"🔁 Using fallback model: {chosen}")
         self.model_name = chosen
-        self.model = genai.GenerativeModel(self.model_name)
+        
+        # Configure safety settings to BLOCK_NONE for all categories
+        # This prevents educational content from being blocked
+        self.safety_settings = {
+            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+        }
+        
+        self.model = genai.GenerativeModel(
+            self.model_name,
+            safety_settings=self.safety_settings
+        )
 
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
@@ -328,6 +341,12 @@ class GeminiService:
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
+                safety_settings={
+                    "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                    "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                    "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                    "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                },
             )
 
         response = await asyncio.to_thread(_call_model)
@@ -384,6 +403,12 @@ class GeminiService:
                             temperature=temperature,
                             max_output_tokens=max_output_tokens,
                         ),
+                        safety_settings={
+                            "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+                            "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
+                            "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+                            "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+                        },
                     )
 
                 response_plain = await asyncio.to_thread(_call_model_plain)
