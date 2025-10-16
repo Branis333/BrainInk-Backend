@@ -32,9 +32,28 @@ class GeminiConfig:
         # Allow opting into paid models explicitly; default to free-only
         self.allow_paid = os.getenv("ALLOW_PAID_MODELS", "false").lower() in ("1", "true", "yes")
 
+        self.rag_store_name = os.getenv("GEMINI_RAG_STORE_NAME") or os.getenv("GOOGLE_RAG_STORE_NAME")
+        self.rag_region = os.getenv("GEMINI_RAG_REGION") or os.getenv("GOOGLE_RAG_REGION")
+
+        configure_kwargs: Dict[str, Any] = {"api_key": self.api_key}
+        metadata: List[Tuple[str, str]] = []
+
+        if self.rag_store_name:
+            metadata.append(("x-goog-rag-store-name", self.rag_store_name))
+        if self.rag_region:
+            metadata.append(("x-goog-region", self.rag_region))
+
+        if metadata:
+            configure_kwargs["default_metadata"] = tuple(metadata)
+
         print(f"🔑 Configuring Gemini AI with API key: {self.api_key[:10]}...{self.api_key[-4:]}")
         print(f"🤖 Requested model: {self.model_name} | allow_paid={self.allow_paid}")
-        genai.configure(api_key=self.api_key)
+        if self.rag_store_name:
+            print(f"🗄️ Using RAG store: {self.rag_store_name}")
+        elif os.getenv("REQUIRE_GEMINI_RAG_STORE", "true").lower() in ("1", "true", "yes"):
+            logger.warning("GEMINI_RAG_STORE_NAME not set; file uploads may fail with ragStoreName errors.")
+
+        genai.configure(**configure_kwargs)
 
         # Choose a supported model (respecting free-only unless ALLOW_PAID_MODELS=true)
         chosen = self._choose_supported_model(preferred_first=self.model_name)
@@ -2524,7 +2543,11 @@ class GeminiService:
                     temp_file_path = temp_file.name
 
                 print(f"📤 Uploading {filename} to Gemini AI for native processing... (attempt {attempt}/{max_attempts})")
-                uploaded_file = genai.upload_file(path=temp_file_path, display_name=filename)
+                uploaded_file = genai.upload_file(
+                    path=temp_file_path,
+                    display_name=filename,
+                    mime_type=mime_type
+                )
 
                 print(f"✅ File uploaded successfully: {uploaded_file.name}")
                 print(f"📋 MIME type: {uploaded_file.mime_type}")
@@ -2543,7 +2566,16 @@ class GeminiService:
 
             except Exception as exc:
                 last_error = exc
-                print(f"⚠️ Gemini upload attempt {attempt} failed: {exc}")
+                error_text = str(exc)
+                print(f"⚠️ Gemini upload attempt {attempt} failed: {error_text}")
+
+                if "ragStoreName" in error_text and not getattr(self.config, "rag_store_name", None):
+                    raise RuntimeError(
+                        "Gemini file uploads now require a RAG store name. "
+                        "Set GEMINI_RAG_STORE_NAME to your store resource, e.g. "
+                        "'projects/<project>/locations/<region>/ragStores/<store_id>'."
+                    ) from exc
+
                 if attempt < max_attempts:
                     backoff = 1.5 * attempt
                     print(f"🔁 Retrying in {backoff:.1f}s...")
