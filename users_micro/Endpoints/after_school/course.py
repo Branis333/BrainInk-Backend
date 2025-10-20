@@ -1446,6 +1446,11 @@ async def get_student_dashboard(
         }
     )
 
+    # Encode images to base64 for all active courses
+    for course in active_courses:
+        if course.image:
+            course.image = image_service.encode_image_to_base64(course.image)
+
     return StudentDashboard(
         user_id=user_id,
         active_courses=active_courses,
