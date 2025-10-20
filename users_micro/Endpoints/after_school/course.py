@@ -25,6 +25,7 @@ from schemas.afterschool_schema import (
     CourseBlocksProgressOut, BlockProgressOut
 )
 from services.gemini_service import gemini_service
+from services.image_service import image_service
 
 router = APIRouter(prefix="/after-school/courses", tags=["After-School Courses"])
 
@@ -595,6 +596,254 @@ async def create_course_from_textbook(
             detail=f"Failed to create AI-generated course: {str(e)}"
         )
 
+@router.post("/with-image", response_model=CourseOut)
+async def create_course_with_image(
+    db: db_dependency,
+    current_user: dict = Depends(get_current_user),
+    title: str = Form(..., min_length=1, max_length=200, description="Course title"),
+    subject: str = Form(..., min_length=1, max_length=100, description="Subject"),
+    description: Optional[str] = Form(None, description="Course description"),
+    age_min: int = Form(3, ge=3, le=16, description="Minimum age"),
+    age_max: int = Form(16, ge=3, le=16, description="Maximum age"),
+    difficulty_level: str = Form("beginner", description="Difficulty level: beginner, intermediate, advanced"),
+    image_file: Optional[UploadFile] = File(None, description="Course image (optional) - PNG, JPG, WEBP")
+):
+    """
+    Create a course with an optional image
+    
+    Supports uploading a course image that will be:
+    - Automatically compressed to reduce size by ~50%
+    - Stored in database as bytes to avoid path issues
+    - Returned as base64 in API responses
+    
+    **Image Features:**
+    - Formats: PNG, JPG, JPEG, WEBP
+    - Max size: 5MB
+    - Compression: JPEG quality 75, max dimensions 800x600
+    - Storage: Bytes in database (no external file paths)
+    
+    **Request Format:** multipart/form-data
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Validate age range
+        if age_max < age_min:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Maximum age must be greater than or equal to minimum age"
+            )
+        
+        if age_min < 3 or age_max > 16:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Age range must be between 3-16 years"
+            )
+        
+        # Validate difficulty level
+        if difficulty_level not in ['beginner', 'intermediate', 'advanced']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Difficulty level must be: beginner, intermediate, or advanced"
+            )
+        
+        # Check for duplicate course
+        existing_course = db.query(Course).filter(
+            and_(
+                Course.title.ilike(title.strip()),
+                Course.subject.ilike(subject.strip()),
+                Course.is_active == True
+            )
+        ).first()
+        
+        if existing_course:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"A course titled '{title}' already exists for subject '{subject}'"
+            )
+        
+        # Process image if provided
+        compressed_image_bytes = None
+        if image_file:
+            try:
+                image_data = await image_file.read()
+                print(f"📸 Processing image: {image_file.filename} ({len(image_data):,} bytes)")
+                
+                # Compress and get bytes
+                compressed_image_bytes, _ = image_service.process_and_compress_image(
+                    image_data,
+                    image_file.filename
+                )
+                print(f"✅ Image compressed and ready for storage")
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Image validation failed: {str(e)}"
+                )
+            except Exception as e:
+                print(f"❌ Error processing image: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to process image: {str(e)}"
+                )
+        
+        # Create course
+        new_course = Course(
+            title=title.strip(),
+            subject=subject.strip(),
+            description=description.strip() if description else f"Comprehensive {subject} course for ages {age_min}-{age_max}",
+            age_min=age_min,
+            age_max=age_max,
+            difficulty_level=difficulty_level,
+            created_by=user_id,
+            image=compressed_image_bytes  # Store compressed bytes directly
+        )
+        
+        db.add(new_course)
+        db.commit()
+        db.refresh(new_course)
+        
+        # Encode image to base64 for response
+        image_base64 = image_service.encode_image_to_base64(new_course.image) if new_course.image else None
+        
+        # Return response with image
+        response = CourseOut(
+            id=new_course.id,
+            title=new_course.title,
+            subject=new_course.subject,
+            description=new_course.description,
+            age_min=new_course.age_min,
+            age_max=new_course.age_max,
+            difficulty_level=new_course.difficulty_level,
+            created_by=new_course.created_by,
+            is_active=new_course.is_active,
+            image=image_base64,
+            total_weeks=new_course.total_weeks,
+            blocks_per_week=new_course.blocks_per_week,
+            textbook_source=new_course.textbook_source,
+            generated_by_ai=new_course.generated_by_ai,
+            created_at=new_course.created_at,
+            updated_at=new_course.updated_at
+        )
+        
+        print(f"✅ Course created with image: ID {new_course.id} - '{new_course.title}'")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error creating course with image: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create course: {str(e)}"
+        )
+
+
+@router.put("/{course_id}/image", response_model=CourseOut)
+async def update_course_image(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = Depends(get_current_user),
+    image_file: UploadFile = File(..., description="Course image - PNG, JPG, WEBP")
+):
+    """
+    Update course image (add or replace existing image)
+    
+    Replaces the course image with a new one that will be:
+    - Automatically compressed to reduce size by ~50%
+    - Stored in database as bytes
+    - Returned as base64 in subsequent API calls
+    
+    **Image Features:**
+    - Formats: PNG, JPG, JPEG, WEBP
+    - Max size: 5MB
+    - Compression: JPEG quality 75, max dimensions 800x600
+    - Storage: Bytes in database
+    
+    **Request Format:** multipart/form-data
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Fetch course
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Course not found: ID {course_id}"
+            )
+        
+        # Verify user has permission to update (optional - adjust based on your auth)
+        # For now, allow anyone to update course images
+        
+        # Process image
+        try:
+            image_data = await image_file.read()
+            print(f"📸 Processing new image for course {course_id}: {image_file.filename} ({len(image_data):,} bytes)")
+            
+            # Compress and get bytes
+            compressed_image_bytes, _ = image_service.process_and_compress_image(
+                image_data,
+                image_file.filename
+            )
+            
+            # Update course image
+            course.image = compressed_image_bytes
+            course.updated_at = datetime.utcnow()
+            
+            db.commit()
+            db.refresh(course)
+            
+            # Encode image to base64 for response
+            image_base64 = image_service.encode_image_to_base64(course.image) if course.image else None
+            
+            # Return updated course
+            response = CourseOut(
+                id=course.id,
+                title=course.title,
+                subject=course.subject,
+                description=course.description,
+                age_min=course.age_min,
+                age_max=course.age_max,
+                difficulty_level=course.difficulty_level,
+                created_by=course.created_by,
+                is_active=course.is_active,
+                image=image_base64,
+                total_weeks=course.total_weeks,
+                blocks_per_week=course.blocks_per_week,
+                textbook_source=course.textbook_source,
+                generated_by_ai=course.generated_by_ai,
+                created_at=course.created_at,
+                updated_at=course.updated_at
+            )
+            
+            print(f"✅ Course image updated: ID {course.id}")
+            return response
+            
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image validation failed: {str(e)}"
+            )
+        except Exception as e:
+            print(f"❌ Error processing image: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to process image: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating course image: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update course image: {str(e)}"
+        )
+
+
 @router.post("/", response_model=CourseOut)
 async def create_course(
     course_data: CourseCreate,
@@ -880,6 +1129,9 @@ async def list_courses(
                 StudySession.course_id == course.id
             ).distinct().count()
             
+            # Encode image to base64 if present
+            image_base64 = image_service.encode_image_to_base64(course.image) if course.image else None
+            
             # Add metadata to course
             course_dict = {
                 "id": course.id,
@@ -891,6 +1143,11 @@ async def list_courses(
                 "difficulty_level": course.difficulty_level,
                 "created_by": course.created_by,
                 "is_active": course.is_active,
+                "image": image_base64,
+                "total_weeks": course.total_weeks,
+                "blocks_per_week": course.blocks_per_week,
+                "textbook_source": course.textbook_source,
+                "generated_by_ai": course.generated_by_ai,
                 "created_at": course.created_at,
                 "updated_at": course.updated_at,
                 "_stats": {
@@ -1434,6 +1691,9 @@ async def get_course_comprehensive_details(
             CourseAssignment.course_id == course_id
         ).all()
         
+        # Encode image to base64 if present
+        image_base64 = image_service.encode_image_to_base64(course.image) if course.image else None
+        
         # Enhanced course response with comprehensive data
         course_data = {
             "id": course.id,
@@ -1445,6 +1705,7 @@ async def get_course_comprehensive_details(
             "difficulty_level": course.difficulty_level,
             "created_by": course.created_by,
             "is_active": course.is_active,
+            "image": image_base64,
             "total_weeks": course.total_weeks,
             "blocks_per_week": course.blocks_per_week,
             "textbook_source": course.textbook_source,

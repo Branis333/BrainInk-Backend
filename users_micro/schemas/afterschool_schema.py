@@ -81,6 +81,7 @@ class CourseUpdate(BaseModel):
     age_max: Optional[int] = Field(None, ge=3, le=16)
     difficulty_level: Optional[str] = None
     is_active: Optional[bool] = None
+    image: Optional[str] = Field(None, description="Base64 encoded compressed image")
     
     @validator('difficulty_level')
     def validate_difficulty(cls, v):
@@ -100,6 +101,9 @@ class CourseOut(BaseModel):
     difficulty_level: str
     created_by: int
     is_active: bool
+    
+    # Course image - base64 encoded compressed image
+    image: Optional[str] = Field(default=None, description="Base64 encoded compressed image")
     
     # Enhanced fields with default values for backward compatibility
     total_weeks: int = Field(default=8, description="Total duration in weeks")

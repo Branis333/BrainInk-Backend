@@ -11,6 +11,7 @@ from sqlalchemy import (
     UniqueConstraint,
     CheckConstraint,
     JSON,
+    LargeBinary,
 )
 from sqlalchemy.orm import relationship
 from db.database import Base
@@ -27,6 +28,9 @@ class Course(Base):
     difficulty_level = Column(String(20), nullable=False, default="beginner")  # beginner, intermediate, advanced
     created_by = Column(Integer, nullable=False)  # admin user_id who created the course
     is_active = Column(Boolean, default=True)
+    
+    # Course image - stored as compressed bytes
+    image = Column(LargeBinary, nullable=True)  # Compressed image data
     
     # Enhanced course structure fields
     total_weeks = Column(Integer, nullable=False, default=8)
