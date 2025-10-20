@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Transcription Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .transcription-output {
+            border: 1px solid #ccc;
+            padding: 20px;
+            min-height: 200px;
+            background: #f9f9f9;
+            border-radius: 5px;
+            margin: 20px 0;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .transcription-entry {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-left: 3px solid #667eea;
+            background: white;
+            border-radius: 3px;
+        }
+
+        .speaker-name {
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .timestamp {
+            color: #666;
+            font-size: 12px;
+            margin-left: 10px;
+        }
+
+        .transcription-text {
+            margin-top: 5px;
+            line-height: 1.5;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 10px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        .start {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .stop {
+            background: #f44336;
+            color: white;
+        }
+
+        .test {
+            background: #2196F3;
+            color: white;
+        }
+
+        .status {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>🎤 Simple Transcription Test</h1>
+
+    <div class="controls">
+        <input type="text" id="token" placeholder="Enter your Bearer token" style="width: 400px; padding: 8px;">
+        <br>
+        <button class="test" onclick="testMicrophone()">🎤 Test Microphone</button>
+        <button class="start" onclick="startTranscription()" id="startBtn">▶️ Start Transcription</button>
+        <button class="stop" onclick="stopTranscription()" id="stopBtn" disabled>⏹️ Stop Transcription</button>
+    </div>
+
+    <div id="status" class="status info">Ready to start. Please enter your token and test your microphone first.</div>
+
+    <div class="transcription-output" id="transcriptionOutput">
+        <div style="text-align: center; color: #666;">
+            Transcription results will appear here...
+        </div>
+    </div>
+
+    <script>
+        let isTranscribing = false;
+        let transcriptionSocket = null;
+        let audioContext = null;
+        let processor = null;
+        let sessionId = null;
+
+        function showStatus(message, type = 'info') {
+            const statusDiv = document.getElementById('status');
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+
+        async function testMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                let testDuration = 3000;
+                let startTime = Date.now();
+                let maxLevel = 0;
+
+                const checkLevel = () => {
+                    analyser.getByteFrequencyData(dataArray);
+                    const level = Math.max(...dataArray);
+                    maxLevel = Math.max(maxLevel, level);
+
+                    if (Date.now() - startTime < testDuration) {
+                        requestAnimationFrame(checkLevel);
+                    } else {
+                        if (maxLevel > 50) {
+                            showStatus(`✅ Microphone working! Max level: ${maxLevel}/255`, 'success');
+                        } else {
+                            showStatus(`⚠️ Microphone level low: ${maxLevel}/255. Try speaking louder.`, 'error');
+                        }
+                        stream.getTracks().forEach(track => track.stop());
+                        audioContext.close();
+                    }
+                };
+
+                showStatus('🎤 Testing microphone for 3 seconds... Please speak now!', 'info');
+                checkLevel();
+
+            } catch (error) {
+                console.error('Microphone test failed:', error);
+                showStatus('❌ Microphone test failed: ' + error.message, 'error');
+            }
+        }
+
+        async function startTranscription() {
+            const token = document.getElementById('token').value.trim();
+            if (!token) {
+                showStatus('Please enter your Bearer token first', 'error');
+                return;
+            }
+
+            if (isTranscribing) return;
+
+            try {
+                // Create a dummy session for testing
+                sessionId = Math.floor(Math.random() * 1000000);
+
+                // Start audio capture
+                const audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false,
+                        sampleRate: 44100,
+                        channelCount: 1
+                    }
+                });
+
+                isTranscribing = true;
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('stopBtn').disabled = false;
+
+                // Setup Web Audio API
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(audioStream);
+                processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                let lastSendTime = 0;
+                const sendInterval = 3000; // 3 seconds
+                let audioBuffer = [];
+
+                processor.onaudioprocess = (e) => {
+                    if (!isTranscribing || !transcriptionSocket || transcriptionSocket.readyState !== WebSocket.OPEN) {
+                        return;
+                    }
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+
+                    // Convert to PCM
+                    const pcmData = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32767));
+                    }
+
+                    audioBuffer.push(pcmData);
+
+                    const now = Date.now();
+                    if (now - lastSendTime >= sendInterval && audioBuffer.length > 0) {
+                        // Combine audio
+                        const totalLength = audioBuffer.reduce((sum, arr) => sum + arr.length, 0);
+                        const combinedAudio = new Int16Array(totalLength);
+                        let offset = 0;
+                        for (const buffer of audioBuffer) {
+                            combinedAudio.set(buffer, offset);
+                            offset += buffer.length;
+                        }
+
+                        // Check audio level
+                        let sum = 0;
+                        for (let i = 0; i < combinedAudio.length; i++) {
+                            sum += Math.abs(combinedAudio[i]);
+                        }
+                        const avgLevel = sum / combinedAudio.length;
+
+                        if (avgLevel > 50) {
+                            sendAudioChunk(combinedAudio);
+                        }
+
+                        audioBuffer = [];
+                        lastSendTime = now;
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Connect to transcription WebSocket
+                const wsUrl = `ws://localhost:8000/video-call/transcription/live?token=${token}&session_id=${sessionId}&language=en`;
+                transcriptionSocket = new WebSocket(wsUrl);
+
+                transcriptionSocket.onopen = () => {
+                    console.log('Connected to transcription WebSocket');
+                    showStatus('🎤 Connected! Start speaking...', 'success');
+
+                    transcriptionSocket.send(JSON.stringify({
+                        type: 'start_recording',
+                        session_id: sessionId,
+                        language: 'en'
+                    }));
+                };
+
+                transcriptionSocket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    handleTranscriptionResponse(data);
+                };
+
+                transcriptionSocket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    showStatus('Connection error occurred', 'error');
+                };
+
+                transcriptionSocket.onclose = (event) => {
+                    console.log('WebSocket closed:', event.code, event.reason);
+                    if (event.code !== 1000 && isTranscribing) {
+                        showStatus('Connection lost unexpectedly', 'error');
+                    }
+                };
+
+            } catch (error) {
+                console.error('Failed to start transcription:', error);
+                showStatus('Failed to start transcription: ' + error.message, 'error');
+                isTranscribing = false;
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('stopBtn').disabled = true;
+            }
+        }
+
+        function sendAudioChunk(pcmData) {
+            if (!transcriptionSocket || transcriptionSocket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+
+            try {
+                // Convert to base64
+                const buffer = new ArrayBuffer(pcmData.length * 2);
+                const view = new DataView(buffer);
+                for (let i = 0; i < pcmData.length; i++) {
+                    view.setInt16(i * 2, pcmData[i], true);
+                }
+
+                const bytes = new Uint8Array(buffer);
+                let binary = '';
+                for (let i = 0; i < bytes.byteLength; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                const base64Audio = btoa(binary);
+
+                const message = {
+                    type: 'audio_chunk',
+                    session_id: sessionId,
+                    audio_data: base64Audio,
+                    timestamp: Date.now(),
+                    speaker_info: {
+                        user_id: 999,
+                        user_name: 'Test User',
+                        role: 'participant'
+                    },
+                    audio_format: 'audio/pcm',
+                    sample_rate: 44100,
+                    channels: 1,
+                    format: 'pcm'
+                };
+
+                transcriptionSocket.send(JSON.stringify(message));
+                console.log(`Sent PCM audio chunk: ${pcmData.length} samples`);
+            } catch (error) {
+                console.error('Error sending audio chunk:', error);
+            }
+        }
+
+        function handleTranscriptionResponse(data) {
+            console.log('Transcription response:', data);
+
+            if (data.type === 'transcription' && data.text && data.text.trim()) {
+                addTranscriptionEntry('Test User', data.text, data.timestamp);
+                showStatus(`✅ Transcribed: "${data.text}"`, 'success');
+            } else if (data.type === 'recording_started') {
+                showStatus('🎤 Recording active - start speaking!', 'success');
+            } else if (data.type === 'silence') {
+                console.log('Silence detected:', data.reason);
+            } else if (data.type === 'error') {
+                console.error('Transcription error:', data.error);
+                showStatus('Transcription error: ' + data.error, 'error');
+            }
+        }
+
+        function addTranscriptionEntry(speakerName, text, timestamp) {
+            const output = document.getElementById('transcriptionOutput');
+
+            // Remove placeholder
+            if (output.innerHTML.includes('Transcription results will appear here')) {
+                output.innerHTML = '';
+            }
+
+            const entry = document.createElement('div');
+            entry.className = 'transcription-entry';
+
+            const time = new Date(timestamp).toLocaleTimeString();
+
+            entry.innerHTML = `
+                <div>
+                    <span class="speaker-name">${speakerName}</span>
+                    <span class="timestamp">${time}</span>
+                </div>
+                <div class="transcription-text">${text}</div>
+            `;
+
+            output.appendChild(entry);
+            output.scrollTop = output.scrollHeight;
+        }
+
+        function stopTranscription() {
+            if (!isTranscribing) return;
+
+            isTranscribing = false;
+
+            // Clean up audio
+            if (processor) {
+                processor.disconnect();
+                processor = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+
+            // Close WebSocket
+            if (transcriptionSocket) {
+                transcriptionSocket.send(JSON.stringify({ type: 'stop_recording' }));
+                transcriptionSocket.close();
+                transcriptionSocket = null;
+            }
+
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            showStatus('Transcription stopped', 'info');
+        }
+
+        // Auto-fill token from localStorage
+        window.addEventListener('load', () => {
+            const savedToken = localStorage.getItem('brainink_token');
+            if (savedToken) {
+                document.getElementById('token').value = savedToken;
+            }
+        });
+
+        document.getElementById('token').addEventListener('change', (e) => {
+            localStorage.setItem('brainink_token', e.target.value);
+        });
+    </script>
+</body>
+
+</html>

@@ -394,15 +394,15 @@ async def create_course_from_textbook(
             file_content, textbook_file.filename
         )
         
-        # Validate content (skip for Gemini file URIs as they'll be processed natively)
-        if not textbook_content.startswith("GEMINI_FILE_URI:") and len(textbook_content.strip()) < 100:
+        # Validate content (skip for inline files as they'll be processed natively by Gemini)
+        if not textbook_content.startswith("INLINE_FILE:") and len(textbook_content.strip()) < 100:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Extracted text content is too short. Please provide a file with more substantial content (at least 100 characters)."
             )
         
-        if textbook_content.startswith("GEMINI_FILE_URI:"):
-            print(f"🤖 File uploaded to Gemini for native multimodal processing")
+        if textbook_content.startswith("INLINE_FILE:"):
+            print(f"🤖 File prepared as inline attachment for Gemini processing")
         else:
             print(f"📝 Extracted {len(textbook_content)} characters from uploaded file")
         
@@ -458,7 +458,7 @@ async def create_course_from_textbook(
                 total_weeks=generated_course.total_weeks,
                 blocks_per_week=generated_course.blocks_per_week,
                 textbook_source=textbook_source or f"Uploaded file: {textbook_file.filename}",
-                textbook_content=textbook_content[:10000] if not textbook_content.startswith("GEMINI_FILE_URI:") else f"Gemini processed file: {textbook_file.filename}",
+                textbook_content=textbook_content[:10000] if not textbook_content.startswith("INLINE_FILE:") else f"Inline attachment: {textbook_file.filename}",
                 generated_by_ai=True
             )
             

@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Speech Transcription - BrainInk</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        select,
+        button {
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .record-btn {
+            background-color: #28a745;
+            font-size: 16px;
+            padding: 15px 30px;
+        }
+
+        .record-btn:hover:not(:disabled) {
+            background-color: #218838;
+        }
+
+        .stop-btn {
+            background-color: #dc3545;
+        }
+
+        .stop-btn:hover:not(:disabled) {
+            background-color: #c82333;
+        }
+
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.recording {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .transcription-area {
+            margin-top: 20px;
+        }
+
+        .transcription-output {
+            min-height: 300px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            line-height: 1.5;
+            overflow-y: auto;
+        }
+
+        .chunk {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-left: 3px solid #007bff;
+            background-color: white;
+            border-radius: 3px;
+        }
+
+        .chunk-info {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .chunk-text {
+            font-size: 14px;
+            color: #333;
+        }
+
+        .session-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+
+        .info-item {
+            text-align: center;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+        }
+
+        .info-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .log-area {
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #000;
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>🎤 Live Speech Transcription</h1>
+
+        <div class="controls">
+            <select id="languageSelect">
+                <option value="">Auto-detect language</option>
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+                <option value="ru">Russian</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="ar">Arabic</option>
+                <option value="sw">Swahili</option>
+                <option value="af">Afrikaans</option>
+            </select>
+
+            <select id="engineSelect">
+                <option value="whisper">Whisper</option>
+                <option value="google">Google Speech</option>
+            </select>
+
+            <button id="recordBtn" class="record-btn">🎤 Start Recording</button>
+            <button id="stopBtn" class="stop-btn" disabled>⏹️ Stop Recording</button>
+            <button id="clearBtn">🗑️ Clear</button>
+        </div>
+
+        <div id="status" class="status">Ready to connect...</div>
+
+        <div class="session-info" id="sessionInfo" style="display: none;">
+            <div class="info-item">
+                <div class="info-label">Session ID</div>
+                <div class="info-value" id="sessionId">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Duration</div>
+                <div class="info-value" id="duration">0s</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Chunks Processed</div>
+                <div class="info-value" id="chunksProcessed">0</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Language Detected</div>
+                <div class="info-value" id="languageDetected">-</div>
+            </div>
+        </div>
+
+        <div class="transcription-area">
+            <h3>Transcription Output:</h3>
+            <div id="transcriptionOutput" class="transcription-output">
+                Click "Start Recording" to begin live transcription...
+            </div>
+        </div>
+
+        <details>
+            <summary><strong>Debug Log</strong></summary>
+            <div id="debugLog" class="log-area"></div>
+        </details>
+    </div>
+
+    <script>
+        class LiveTranscription {
+            constructor() {
+                this.socket = null;
+                this.mediaRecorder = null;
+                this.audioStream = null;
+                this.isRecording = false;
+                this.sessionId = null;
+                this.chunksProcessed = 0;
+                this.startTime = null;
+
+                this.initializeElements();
+                this.bindEvents();
+            }
+
+            initializeElements() {
+                this.recordBtn = document.getElementById('recordBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.clearBtn = document.getElementById('clearBtn');
+                this.status = document.getElementById('status');
+                this.transcriptionOutput = document.getElementById('transcriptionOutput');
+                this.debugLog = document.getElementById('debugLog');
+                this.languageSelect = document.getElementById('languageSelect');
+                this.engineSelect = document.getElementById('engineSelect');
+                this.sessionInfo = document.getElementById('sessionInfo');
+                this.sessionIdEl = document.getElementById('sessionId');
+                this.durationEl = document.getElementById('duration');
+                this.chunksProcessedEl = document.getElementById('chunksProcessed');
+                this.languageDetectedEl = document.getElementById('languageDetected');
+            }
+
+            bindEvents() {
+                this.recordBtn.addEventListener('click', () => this.startRecording());
+                this.stopBtn.addEventListener('click', () => this.stopRecording());
+                this.clearBtn.addEventListener('click', () => this.clearTranscription());
+            }
+
+            log(message) {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry';
+                logEntry.textContent = `[${timestamp}] ${message}`;
+                this.debugLog.appendChild(logEntry);
+                this.debugLog.scrollTop = this.debugLog.scrollHeight;
+                console.log(message);
+            }
+
+            updateStatus(message, type = 'info') {
+                this.status.textContent = message;
+                this.status.className = `status ${type}`;
+                this.log(`Status: ${message}`);
+            }
+
+            updateSessionInfo() {
+                if (this.sessionId) {
+                    this.sessionIdEl.textContent = this.sessionId.substring(0, 8) + '...';
+                    this.sessionInfo.style.display = 'grid';
+                }
+
+                if (this.startTime) {
+                    const duration = Math.round((Date.now() - this.startTime) / 1000);
+                    this.durationEl.textContent = `${duration}s`;
+                }
+
+                this.chunksProcessedEl.textContent = this.chunksProcessed;
+            }
+
+            async startRecording() {
+                try {
+                    this.log('Requesting microphone access...');
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    });
+
+                    this.log('Microphone access granted');
+                    this.connectWebSocket();
+
+                } catch (error) {
+                    this.log(`Error accessing microphone: ${error.message}`);
+                    this.updateStatus('Error: Could not access microphone', 'error');
+                }
+            }
+
+            connectWebSocket() {
+                const language = this.languageSelect.value;
+                const engine = this.engineSelect.value;
+
+                let wsUrl = `ws://localhost:8000/speech/live-transcribe?engine=${engine}`;
+                if (language) {
+                    wsUrl += `&language=${language}`;
+                }
+
+                this.log(`Connecting to WebSocket: ${wsUrl}`);
+                this.socket = new WebSocket(wsUrl);
+
+                this.socket.onopen = () => {
+                    this.log('WebSocket connected');
+                    this.updateStatus('Connected - Starting recording...', 'connected');
+                    this.startMediaRecorder();
+                };
+
+                this.socket.onmessage = (event) => {
+                    this.handleWebSocketMessage(JSON.parse(event.data));
+                };
+
+                this.socket.onerror = (error) => {
+                    this.log(`WebSocket error: ${error}`);
+                    this.updateStatus('WebSocket connection error', 'error');
+                };
+
+                this.socket.onclose = () => {
+                    this.log('WebSocket connection closed');
+                    this.updateStatus('Connection closed', 'info');
+                    this.cleanup();
+                };
+            }
+
+            startMediaRecorder() {
+                this.mediaRecorder = new MediaRecorder(this.audioStream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
+
+                this.mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0 && this.socket && this.socket.readyState === WebSocket.OPEN) {
+                        this.sendAudioChunk(event.data);
+                    }
+                };
+
+                this.mediaRecorder.start(500); // Send chunks every 500ms for better responsiveness
+                this.isRecording = true;
+                this.startTime = Date.now();
+                this.chunksProcessed = 0;
+
+                this.recordBtn.disabled = true;
+                this.stopBtn.disabled = false;
+                this.updateStatus('Recording... Speak now!', 'recording');
+
+                // Update session info every second
+                this.sessionInfoInterval = setInterval(() => {
+                    this.updateSessionInfo();
+                }, 1000);
+            }
+
+            async sendAudioChunk(audioBlob) {
+                try {
+                    const arrayBuffer = await audioBlob.arrayBuffer();
+                    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+                    const message = {
+                        type: 'audio_chunk',
+                        audio_data: base64Audio,
+                        timestamp: Date.now()
+                    };
+
+                    this.socket.send(JSON.stringify(message));
+                    this.log(`Sent audio chunk: ${audioBlob.size} bytes`);
+
+                } catch (error) {
+                    this.log(`Error sending audio chunk: ${error.message}`);
+                }
+            }
+
+            handleWebSocketMessage(message) {
+                this.log(`Received: ${message.type}`);
+
+                switch (message.type) {
+                    case 'session_started':
+                        this.sessionId = message.session_id;
+                        this.updateSessionInfo();
+                        this.log(`Session started: ${this.sessionId}`);
+                        break;
+
+                    case 'transcription':
+                        this.chunksProcessed = message.chunk_id;
+                        this.addTranscriptionChunk(message);
+
+                        if (message.language_detected) {
+                            this.languageDetectedEl.textContent = message.language_detected;
+                        }
+                        break;
+
+                    case 'chunk_received':
+                        this.chunksProcessed = message.chunk_id;
+                        this.log(`Audio chunk ${message.chunk_id} received (accumulated: ${message.accumulated_size} bytes)`);
+                        break;
+
+                    case 'segment_completed':
+                        this.log(`Segment ${message.segment_number} completed. Starting new segment...`);
+                        this.addSegmentNotification(message);
+                        break;
+
+                    case 'silence':
+                        this.log(`Silence detected (chunk ${message.chunk_id})`);
+                        break;
+
+                    case 'processing_error':
+                        this.log(`Processing error: ${message.error}`);
+                        break;
+
+                    case 'session_ended':
+                        this.log(`Session ended. Final text: "${message.final_text}"`);
+                        this.addFinalResult(message);
+                        break;
+
+                    case 'error':
+                        this.log(`Server error: ${message.error}`);
+                        this.updateStatus(`Error: ${message.error}`, 'error');
+                        break;
+
+                    case 'pong':
+                        // Keep-alive response
+                        break;
+                }
+            }
+
+            addTranscriptionChunk(message) {
+                const chunk = document.createElement('div');
+                chunk.className = 'chunk';
+
+                const chunkInfo = document.createElement('div');
+                chunkInfo.className = 'chunk-info';
+                chunkInfo.textContent = `Chunk ${message.chunk_id} | ${new Date(message.timestamp).toLocaleTimeString()}`;
+
+                const chunkText = document.createElement('div');
+                chunkText.className = 'chunk-text';
+                chunkText.textContent = message.text;
+
+                chunk.appendChild(chunkInfo);
+                chunk.appendChild(chunkText);
+
+                if (this.transcriptionOutput.textContent.includes('Click "Start Recording"')) {
+                    this.transcriptionOutput.textContent = '';
+                }
+
+                this.transcriptionOutput.appendChild(chunk);
+                this.transcriptionOutput.scrollTop = this.transcriptionOutput.scrollHeight;
+            }
+
+            addSegmentNotification(message) {
+                const notification = document.createElement('div');
+                notification.style.cssText = 'background-color: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 10px; border-radius: 5px; margin: 10px 0; font-weight: bold;';
+                notification.textContent = `📍 ${message.message}`;
+
+                this.transcriptionOutput.appendChild(notification);
+                this.transcriptionOutput.scrollTop = this.transcriptionOutput.scrollHeight;
+            }
+
+            addFinalResult(message) {
+                const finalResult = document.createElement('div');
+                finalResult.style.cssText = 'margin-top: 20px; padding: 15px; background-color: #e7f3ff; border-left: 4px solid #007bff; border-radius: 5px;';
+
+                finalResult.innerHTML = `
+                    <h4 style="margin: 0 0 10px 0; color: #0056b3;">📝 Final Transcription</h4>
+                    <p style="margin: 0; font-size: 16px; line-height: 1.5;">${message.final_text || 'No speech detected'}</p>
+                    <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                        Duration: ${Math.round(message.duration_seconds)}s | 
+                        Chunks: ${message.total_chunks} | 
+                        Language: ${message.language_detected || 'Unknown'}
+                    </div>
+                `;
+
+                this.transcriptionOutput.appendChild(finalResult);
+                this.transcriptionOutput.scrollTop = this.transcriptionOutput.scrollHeight;
+            }
+
+            stopRecording() {
+                if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.send(JSON.stringify({ type: 'stop_recording' }));
+                }
+                this.cleanup();
+            }
+
+            cleanup() {
+                if (this.mediaRecorder && this.isRecording) {
+                    this.mediaRecorder.stop();
+                }
+
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                    this.audioStream = null;
+                }
+
+                if (this.sessionInfoInterval) {
+                    clearInterval(this.sessionInfoInterval);
+                }
+
+                this.isRecording = false;
+                this.recordBtn.disabled = false;
+                this.stopBtn.disabled = true;
+
+                if (this.socket) {
+                    this.socket.close();
+                    this.socket = null;
+                }
+            }
+
+            clearTranscription() {
+                this.transcriptionOutput.innerHTML = 'Click "Start Recording" to begin live transcription...';
+                this.debugLog.innerHTML = '';
+                this.sessionInfo.style.display = 'none';
+                this.chunksProcessed = 0;
+                this.sessionId = null;
+            }
+        }
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', () => {
+            new LiveTranscription();
+        });
+    </script>
+</body>
+
+</html>

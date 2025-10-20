@@ -1,0 +1,1707 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Meeting & Debate Analysis - BrainInk</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            margin-bottom: 20px;
+        }
+
+        h1,
+        h2,
+        h3 {
+            color: #333;
+        }
+
+        h1 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #007bff;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        select,
+        button,
+        input {
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+
+        button:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .record-btn {
+            background-color: #28a745;
+            font-size: 16px;
+            padding: 15px 30px;
+        }
+
+        .stop-btn {
+            background-color: #dc3545;
+        }
+
+        .speaker-button {
+            background-color: #6c757d;
+            font-size: 14px;
+            padding: 12px 20px;
+            margin: 5px;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s;
+            user-select: none;
+            position: relative;
+        }
+
+        .speaker-button:hover:not(:disabled) {
+            background-color: #5a6268;
+        }
+
+        .speaker-button.active {
+            background-color: #dc3545;
+            box-shadow: 0 0 15px rgba(220, 53, 69, 0.5);
+            animation: pulse 1.5s infinite;
+        }
+
+        .speaker-button:disabled {
+            background-color: #495057;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        @keyframes pulse {
+            0% {
+                box-shadow: 0 0 15px rgba(220, 53, 69, 0.5);
+            }
+
+            50% {
+                box-shadow: 0 0 25px rgba(220, 53, 69, 0.8);
+            }
+
+            100% {
+                box-shadow: 0 0 15px rgba(220, 53, 69, 0.5);
+            }
+        }
+
+        .speaker-controls {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 15px 0;
+            border: 2px solid #dee2e6;
+        }
+
+        .speaker-controls h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+
+        .speaker-buttons-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .recording-mode-info {
+            background-color: #e7f3ff;
+            border: 1px solid #b8daff;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 10px 0;
+            color: #004085;
+        }
+
+        .session-controls {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 15px;
+        }
+
+        .analyze-btn {
+            background-color: #17a2b8;
+        }
+
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .status.recording {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .status.analyzing {
+            background-color: #e2e3e5;
+            color: #383d41;
+            border: 1px solid #d6d8db;
+        }
+
+        .session-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+
+        .info-item {
+            text-align: center;
+        }
+
+        .info-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+        }
+
+        .info-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .transcription-area {
+            margin-top: 20px;
+        }
+
+        .transcription-output {
+            min-height: 300px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            line-height: 1.5;
+            overflow-y: auto;
+        }
+
+        .chunk {
+            margin-bottom: 10px;
+            padding: 8px;
+            border-left: 3px solid #007bff;
+            background-color: white;
+            border-radius: 3px;
+        }
+
+        .chunk-info {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 5px;
+        }
+
+        .chunk-text {
+            font-size: 14px;
+            color: #333;
+        }
+
+        .segment-notification {
+            background-color: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 10px;
+            border-radius: 5px;
+            margin: 10px 0;
+            font-weight: bold;
+        }
+
+        .analysis-section {
+            margin-top: 30px;
+        }
+
+        .analysis-output {
+            background-color: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 20px;
+            margin-top: 15px;
+        }
+
+        .ai-user-profile {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .ai-user-profile h3 {
+            margin: 0 0 10px 0;
+            color: white;
+        }
+
+        .speaker-analysis {
+            background-color: white;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 10px 0;
+        }
+
+        .score-bar {
+            background-color: #e9ecef;
+            border-radius: 10px;
+            height: 10px;
+            margin: 5px 0;
+            overflow: hidden;
+        }
+
+        .score-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #ff6b6b, #feca57, #48dbfb, #0abde3);
+            transition: width 0.3s ease;
+        }
+
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 20px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            border-bottom: 3px solid transparent;
+        }
+
+        .tab.active {
+            border-bottom-color: #007bff;
+            color: #007bff;
+            font-weight: bold;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        .speakers-config {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 15px 0;
+        }
+
+        .speaker-input {
+            display: flex;
+            gap: 10px;
+            margin: 10px 0;
+            align-items: center;
+        }
+
+        .log-area {
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #000;
+            color: #00ff00;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+        }
+
+        .final-result {
+            background-color: #e7f3ff;
+            border-left: 4px solid #007bff;
+            padding: 15px;
+            border-radius: 5px;
+            margin: 20px 0;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <h1>🎤 AI-Powered Meeting & Debate Analysis</h1>
+
+    <!-- Live Transcription Section -->
+    <div class="container">
+        <h2>Live Transcription</h2>
+
+        <div class="session-controls">
+            <select id="languageSelect">
+                <option value="">Auto-detect language</option>
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="it">Italian</option>
+                <option value="pt">Portuguese</option>
+                <option value="ru">Russian</option>
+                <option value="zh">Chinese</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+                <option value="ar">Arabic</option>
+                <option value="sw">Swahili</option>
+                <option value="af">Afrikaans</option>
+            </select>
+
+            <select id="meetingType">
+                <option value="discussion">Discussion</option>
+                <option value="debate">Debate</option>
+                <option value="meeting">Meeting</option>
+            </select>
+
+            <button id="initializeBtn" class="record-btn">🎤 Initialize Session</button>
+            <button id="stopBtn" class="stop-btn" disabled>⏹️ End Session</button>
+            <button id="clearBtn">🗑️ Clear</button>
+        </div>
+
+        <div id="status" class="status">Ready to connect...</div>
+
+        <!-- Session Info -->
+        <div class="session-info" id="sessionInfo" style="display: none;">
+            <div class="info-item">
+                <div class="info-label">Session ID</div>
+                <div class="info-value" id="sessionId">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Duration</div>
+                <div class="info-value" id="duration">0s</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Chunks Processed</div>
+                <div class="info-value" id="chunksProcessed">0</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Current Segment</div>
+                <div class="info-value" id="currentSegment">1</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Language</div>
+                <div class="info-value" id="languageDetected">-</div>
+            </div>
+        </div>
+
+        <!-- Speaker Recording Controls -->
+        <div class="speaker-controls" id="speakerControls" style="display: none;">
+            <h3>🎙️ Press & Hold to Speak</h3>
+            <div class="recording-mode-info">
+                <strong>Instructions:</strong> Press and hold a speaker button while they are talking. Only the active
+                speaker's audio will be recorded and attributed to them. Release the button when they stop speaking.
+            </div>
+            <div class="speaker-buttons-grid" id="speakerButtonsGrid">
+                <!-- Speaker buttons will be generated here -->
+            </div>
+        </div>
+
+        <!-- Speakers Configuration -->
+        <div class="speakers-config">
+            <h3>👥 Speakers Configuration</h3>
+            <div id="speakersContainer">
+                <div class="speaker-input">
+                    <input type="text" placeholder="Speaker 1 Name" id="speaker1Name" value="John Doe">
+                    <select id="speaker1Role">
+                        <option value="participant">Participant</option>
+                        <option value="moderator">Moderator</option>
+                        <option value="presenter">Presenter</option>
+                    </select>
+                </div>
+                <div class="speaker-input">
+                    <input type="text" placeholder="Speaker 2 Name" id="speaker2Name" value="Jane Smith">
+                    <select id="speaker2Role">
+                        <option value="participant">Participant</option>
+                        <option value="moderator">Moderator</option>
+                        <option value="presenter">Presenter</option>
+                    </select>
+                </div>
+            </div>
+            <button onclick="addSpeaker()">➕ Add Speaker</button>
+        </div>
+
+        <!-- Live Transcription Output -->
+        <div class="transcription-area">
+            <h3>Live Transcription:</h3>
+            <div id="transcriptionOutput" class="transcription-output">
+                Click "Initialize Session" to begin live transcription...
+            </div>
+        </div>
+    </div>
+
+    <!-- Analysis Section -->
+    <div class="container analysis-section">
+        <h2>🤖 AI Analysis</h2>
+
+        <div class="controls">
+            <button id="analyzeBtn" class="analyze-btn" disabled>🔍 Analyze Session</button>
+            <button id="combineBtn" class="analyze-btn" disabled>📄 Get Combined Transcription</button>
+            <button id="getSegmentsBtn" class="analyze-btn" disabled>🔗 View Segments</button>
+        </div>
+
+        <!-- Tabs for different analysis views -->
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('overview', this)">📊 Overview</button>
+            <button class="tab" onclick="showTab('ai-observer', this)">🤖 AI Observer</button>
+            <button class="tab" onclick="showTab('speakers', this)">👥 Speaker Analysis</button>
+            <button class="tab" onclick="showTab('winner', this)">🏆 Winner Analysis</button>
+            <button class="tab" onclick="showTab('segments', this)">🔗 Segments</button>
+            <button class="tab" onclick="showTab('combined', this)">📄 Full Transcript</button>
+        </div>
+
+        <!-- Tab Contents -->
+        <div id="overview" class="tab-content active">
+            <div id="analysisOverview" class="analysis-output">
+                Start a recording session to see AI analysis...
+            </div>
+        </div>
+
+        <div id="ai-observer" class="tab-content">
+            <div class="ai-user-profile">
+                <h3>🤖 AI Meeting Assistant</h3>
+                <p>I'm your AI observer, analyzing the conversation in real-time and providing insights.</p>
+            </div>
+            <div id="aiObserverAnalysis" class="analysis-output">
+                AI observer analysis will appear here after session analysis...
+            </div>
+        </div>
+
+        <div id="speakers" class="tab-content">
+            <div id="speakerAnalysis" class="analysis-output">
+                Individual speaker analysis will appear here...
+            </div>
+        </div>
+
+        <div id="winner" class="tab-content">
+            <div id="winnerAnalysis" class="analysis-output">
+                Winner analysis will appear here after session analysis...
+            </div>
+        </div>
+
+        <div id="segments" class="tab-content">
+            <div id="segmentsOutput" class="analysis-output">
+                Session segments will appear here...
+            </div>
+        </div>
+
+        <div id="combined" class="tab-content">
+            <div id="combinedOutput" class="analysis-output">
+                Combined transcription will appear here...
+            </div>
+        </div>
+    </div>
+
+    <!-- Debug Log -->
+    <div class="container">
+        <details>
+            <summary><strong>🔧 Debug Log</strong></summary>
+            <div id="debugLog" class="log-area"></div>
+        </details>
+    </div>
+
+    <script>
+        class AIDebateAnalyzer {
+            constructor() {
+                this.socket = null;
+                this.mediaRecorder = null;
+                this.audioStream = null;
+                this.isRecording = false;
+                this.sessionId = null;
+                this.chunksProcessed = 0;
+                this.currentSegment = 1;
+                this.startTime = null;
+                this.speakerCount = 2;
+                this.activeSpeaker = null;
+                this.isInitialized = false;
+                this.speakerButtons = new Map();
+
+                this.initializeElements();
+                this.bindEvents();
+                this.generateSpeakerButtons();
+            }
+
+            initializeElements() {
+                this.initializeBtn = document.getElementById('initializeBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.clearBtn = document.getElementById('clearBtn');
+                this.analyzeBtn = document.getElementById('analyzeBtn');
+                this.combineBtn = document.getElementById('combineBtn');
+                this.getSegmentsBtn = document.getElementById('getSegmentsBtn');
+
+                this.status = document.getElementById('status');
+                this.transcriptionOutput = document.getElementById('transcriptionOutput');
+                this.debugLog = document.getElementById('debugLog');
+
+                this.languageSelect = document.getElementById('languageSelect');
+                this.meetingTypeSelect = document.getElementById('meetingType');
+
+                this.sessionInfo = document.getElementById('sessionInfo');
+                this.sessionIdEl = document.getElementById('sessionId');
+                this.durationEl = document.getElementById('duration');
+                this.chunksProcessedEl = document.getElementById('chunksProcessed');
+                this.currentSegmentEl = document.getElementById('currentSegment');
+                this.languageDetectedEl = document.getElementById('languageDetected');
+
+                this.speakerControls = document.getElementById('speakerControls');
+                this.speakerButtonsGrid = document.getElementById('speakerButtonsGrid');
+            }
+
+            bindEvents() {
+                this.initializeBtn.addEventListener('click', () => this.initializeSession());
+                this.stopBtn.addEventListener('click', () => this.stopSession());
+                this.clearBtn.addEventListener('click', () => this.clearTranscription());
+                this.analyzeBtn.addEventListener('click', () => this.analyzeSession());
+                this.combineBtn.addEventListener('click', () => this.getCombinedTranscription());
+                this.getSegmentsBtn.addEventListener('click', () => this.getSessionSegments());
+            }
+
+            generateSpeakerButtons() {
+                this.speakerButtonsGrid.innerHTML = '';
+                this.speakerButtons.clear();
+
+                for (let i = 1; i <= this.speakerCount; i++) {
+                    const speakerNameInput = document.getElementById(`speaker${i}Name`);
+                    const speakerRoleSelect = document.getElementById(`speaker${i}Role`);
+
+                    const speakerName = speakerNameInput ? speakerNameInput.value || `Speaker ${i}` : `Speaker ${i}`;
+                    const speakerRole = speakerRoleSelect ? speakerRoleSelect.value || 'participant' : 'participant';
+
+                    const button = document.createElement('button');
+                    button.className = 'speaker-button';
+                    button.disabled = !this.isInitialized;
+                    button.innerHTML = `🎤 ${speakerName}<br><small>${speakerRole}</small>`;
+                    button.dataset.speakerId = i;
+                    button.dataset.speakerName = speakerName;
+                    button.dataset.speakerRole = speakerRole;
+
+                    // Press and hold functionality
+                    let pressTimer = null;
+
+                    const startRecording = () => {
+                        if (!this.isInitialized || this.activeSpeaker) return;
+
+                        this.activeSpeaker = i;
+                        button.classList.add('active');
+                        this.startRecordingForSpeaker(i, speakerName, speakerRole);
+                        this.log(`Started recording for ${speakerName}`);
+                    };
+
+                    const stopRecording = () => {
+                        if (this.activeSpeaker === i) {
+                            this.activeSpeaker = null;
+                            button.classList.remove('active');
+                            this.stopRecordingForSpeaker();
+                            this.log(`Stopped recording for ${speakerName}`);
+                        }
+                    };
+
+                    // Mouse events
+                    button.addEventListener('mousedown', (e) => {
+                        e.preventDefault();
+                        startRecording();
+                    });
+
+                    button.addEventListener('mouseup', (e) => {
+                        e.preventDefault();
+                        stopRecording();
+                    });
+
+                    button.addEventListener('mouseleave', (e) => {
+                        e.preventDefault();
+                        stopRecording();
+                    });
+
+                    // Touch events for mobile
+                    button.addEventListener('touchstart', (e) => {
+                        e.preventDefault();
+                        startRecording();
+                    });
+
+                    button.addEventListener('touchend', (e) => {
+                        e.preventDefault();
+                        stopRecording();
+                    });
+
+                    button.addEventListener('touchcancel', (e) => {
+                        e.preventDefault();
+                        stopRecording();
+                    });
+
+                    this.speakerButtons.set(i, button);
+                    this.speakerButtonsGrid.appendChild(button);
+                }
+            }
+
+            log(message) {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry';
+                logEntry.textContent = `[${timestamp}] ${message}`;
+                this.debugLog.appendChild(logEntry);
+                this.debugLog.scrollTop = this.debugLog.scrollHeight;
+                console.log(message);
+            }
+
+            updateStatus(message, type = 'info') {
+                this.status.textContent = message;
+                this.status.className = `status ${type}`;
+                this.log(`Status: ${message}`);
+            }
+
+            updateSessionInfo() {
+                if (this.sessionId) {
+                    this.sessionIdEl.textContent = this.sessionId.substring(0, 8) + '...';
+                    this.sessionInfo.style.display = 'grid';
+                }
+
+                if (this.startTime) {
+                    const duration = Math.round((Date.now() - this.startTime) / 1000);
+                    this.durationEl.textContent = `${duration}s`;
+                }
+
+                this.chunksProcessedEl.textContent = this.chunksProcessed;
+                this.currentSegmentEl.textContent = this.currentSegment;
+            }
+
+            async initializeSession() {
+                try {
+                    this.log('Initializing session and requesting microphone access...');
+                    this.audioStream = await navigator.mediaDevices.getUserMedia({
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true
+                        }
+                    });
+
+                    this.log('Microphone access granted');
+                    this.connectWebSocket();
+
+                } catch (error) {
+                    this.log(`Error accessing microphone: ${error.message}`);
+                    this.updateStatus('Error: Could not access microphone', 'error');
+                }
+            }
+
+            async startRecordingForSpeaker(speakerId, speakerName, speakerRole) {
+                if (!this.isInitialized || this.isRecording) return;
+
+                this.isRecording = true;
+                this.currentSpeaker = { id: `speaker_${speakerId}`, name: speakerName, role: speakerRole };
+
+                this.updateStatus(`Recording ${speakerName}...`, 'recording');
+
+                if (!this.mediaRecorder && !this.scriptProcessor) {
+                    this.startMediaRecorder();
+                }
+
+                // For Web Audio API, start capturing
+                if (this.scriptProcessor) {
+                    this.isCapturing = true;
+                    if (!this.bufferStartTime) {
+                        this.bufferStartTime = Date.now();
+                    }
+                }
+            }
+
+            stopRecordingForSpeaker() {
+                if (!this.isRecording) return;
+
+                // Send any remaining PCM audio data
+                if (this.audioBuffer && this.audioBuffer.length > 0) {
+                    this.sendAccumulatedPCMAudio();
+                }
+
+                this.isRecording = false;
+                this.isCapturing = false;
+                this.currentSpeaker = null;
+                this.lastSpeaker = null;
+                this.updateStatus('Session ready - Press a speaker button to record', 'connected');
+            }
+
+            connectWebSocket() {
+                const language = this.languageSelect.value;
+                const engine = 'whisper'; // Default to whisper
+
+                let wsUrl = `ws://localhost:8000/speech/live-transcribe?engine=${engine}`;
+                if (language) {
+                    wsUrl += `&language=${language}`;
+                }
+
+                this.log(`Connecting to WebSocket: ${wsUrl}`);
+                this.socket = new WebSocket(wsUrl);
+
+                this.socket.onopen = () => {
+                    this.log('WebSocket connected');
+                    this.isInitialized = true;
+
+                    // Enable speaker buttons
+                    this.speakerButtons.forEach(button => {
+                        button.disabled = false;
+                    });
+
+                    this.speakerControls.style.display = 'block';
+                    this.initializeBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+                    this.updateStatus('Session ready - Press a speaker button to record', 'connected');
+
+                    this.startMediaRecorder();
+                };
+
+                this.socket.onmessage = (event) => {
+                    this.handleWebSocketMessage(JSON.parse(event.data));
+                };
+
+                this.socket.onerror = (error) => {
+                    this.log(`WebSocket error: ${error}`);
+                    this.updateStatus('WebSocket connection error', 'error');
+                };
+
+                this.socket.onclose = () => {
+                    this.log('WebSocket connection closed');
+                    this.updateStatus('Connection closed', 'info');
+                    this.cleanup();
+                };
+            }
+
+            startMediaRecorder() {
+                // Use Web Audio API for more reliable audio capture
+                try {
+                    this.setupWebAudioRecording();
+                } catch (error) {
+                    this.log(`Web Audio setup failed, falling back to MediaRecorder: ${error.message}`);
+                    this.fallbackToMediaRecorder();
+                }
+            }
+
+            setupWebAudioRecording() {
+                // Create audio context
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                    sampleRate: 16000  // Target sample rate for Whisper
+                });
+
+                // Create source from microphone stream
+                this.microphoneSource = this.audioContext.createMediaStreamSource(this.audioStream);
+
+                // Create script processor for capturing audio data
+                this.scriptProcessor = this.audioContext.createScriptProcessor(4096, 1, 1);
+
+                // Initialize audio buffer for accumulating data
+                this.audioBuffer = [];
+                this.bufferStartTime = null;
+                this.isCapturing = false;
+
+                this.scriptProcessor.onaudioprocess = (event) => {
+                    if (!this.isRecording || !this.currentSpeaker) {
+                        return;
+                    }
+
+                    // Get audio data from the input buffer
+                    const inputBuffer = event.inputBuffer;
+                    const audioData = inputBuffer.getChannelData(0); // Mono channel
+
+                    // Convert to Int16Array (16-bit PCM)
+                    const int16Array = new Int16Array(audioData.length);
+                    for (let i = 0; i < audioData.length; i++) {
+                        int16Array[i] = Math.max(-32768, Math.min(32767, audioData[i] * 32768));
+                    }
+
+                    // Add to buffer
+                    this.audioBuffer.push(int16Array);
+
+                    // Track timing
+                    if (!this.bufferStartTime) {
+                        this.bufferStartTime = Date.now();
+                    }
+
+                    // Send accumulated audio every 2 seconds
+                    const bufferDuration = (Date.now() - this.bufferStartTime) / 1000;
+                    if (bufferDuration >= 2.0) {
+                        this.sendAccumulatedPCMAudio();
+                    }
+                };
+
+                // Connect the audio graph
+                this.microphoneSource.connect(this.scriptProcessor);
+                this.scriptProcessor.connect(this.audioContext.destination);
+
+                this.startTime = Date.now();
+                this.chunksProcessed = 0;
+                this.currentSegment = 1;
+
+                this.log('Web Audio API recording started (16kHz PCM)');
+
+                // Update session info every second
+                this.sessionInfoInterval = setInterval(() => {
+                    this.updateSessionInfo();
+                }, 1000);
+            }
+
+            async sendAccumulatedPCMAudio() {
+                if (this.audioBuffer.length === 0 || !this.currentSpeaker) {
+                    return;
+                }
+
+                try {
+                    // Calculate total length
+                    const totalLength = this.audioBuffer.reduce((sum, chunk) => sum + chunk.length, 0);
+
+                    // Combine all chunks into a single array
+                    const combinedAudio = new Int16Array(totalLength);
+                    let offset = 0;
+                    for (const chunk of this.audioBuffer) {
+                        combinedAudio.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+
+                    // Convert to base64
+                    const bytes = new Uint8Array(combinedAudio.buffer);
+                    const base64Audio = btoa(String.fromCharCode(...bytes));
+
+                    const message = {
+                        type: 'audio_chunk',
+                        audio_data: base64Audio,
+                        timestamp: Date.now(),
+                        speaker_info: this.currentSpeaker,
+                        audio_format: 'audio/pcm',  // Raw PCM data
+                        sample_rate: 16000,
+                        channels: 1,
+                        bits_per_sample: 16
+                    };
+
+                    this.socket.send(JSON.stringify(message));
+                    this.log(`Sent PCM audio: ${combinedAudio.length} samples (${(combinedAudio.length / 16000).toFixed(2)}s) for ${this.currentSpeaker.name}`);
+
+                    // Clear buffer
+                    this.audioBuffer = [];
+                    this.bufferStartTime = Date.now();
+
+                } catch (error) {
+                    this.log(`Error sending PCM audio: ${error.message}`);
+                }
+            }
+
+            fallbackToMediaRecorder() {
+                // Fallback to original MediaRecorder approach
+                const mimeTypes = [
+                    'audio/webm;codecs=opus',
+                    'audio/webm',
+                    'audio/ogg;codecs=opus',
+                    'audio/mp4',
+                    'audio/wav'
+                ];
+
+                let selectedMimeType = null;
+                for (const mimeType of mimeTypes) {
+                    if (MediaRecorder.isTypeSupported(mimeType)) {
+                        selectedMimeType = mimeType;
+                        this.log(`Selected audio format: ${mimeType}`);
+                        break;
+                    }
+                }
+
+                if (!selectedMimeType) {
+                    this.log('No supported audio format found');
+                    this.updateStatus('Error: No supported audio format', 'error');
+                    return;
+                }
+
+                // Use longer time slice to get more complete chunks
+                this.mediaRecorder = new MediaRecorder(this.audioStream, {
+                    mimeType: selectedMimeType
+                });
+
+                // Store the format being used
+                this.currentAudioFormat = selectedMimeType;
+
+                this.mediaRecorder.ondataavailable = (event) => {
+                    if (event.data.size > 0) {
+                        this.handleAudioChunk(event.data);
+                    }
+                };
+
+                // Use longer intervals to get more complete audio segments
+                this.mediaRecorder.start(2000); // 2 second chunks for better completeness
+                this.startTime = Date.now();
+                this.chunksProcessed = 0;
+                this.currentSegment = 1;
+
+                this.log(`MediaRecorder started with ${selectedMimeType} format`);
+
+                // Update session info every second
+                this.sessionInfoInterval = setInterval(() => {
+                    this.updateSessionInfo();
+                }, 1000);
+            }
+
+            handleAudioChunk(audioChunk) {
+                // Only process audio when someone is actively speaking (MediaRecorder fallback)
+                if (!this.isRecording || !this.currentSpeaker) {
+                    return;
+                }
+
+                const speakerId = this.currentSpeaker.id;
+                this.log(`Handling MediaRecorder chunk for ${speakerId} (${audioChunk.size} bytes, format: ${this.currentAudioFormat})`);
+
+                // Send chunks immediately for MediaRecorder approach
+                this.sendAudioChunk(audioChunk, this.currentSpeaker);
+            }
+
+            async sendAudioChunk(audioBlob, speaker = null) {
+                try {
+                    const arrayBuffer = await audioBlob.arrayBuffer();
+                    const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+                    const message = {
+                        type: 'audio_chunk',
+                        audio_data: base64Audio,
+                        timestamp: Date.now(),
+                        speaker_info: speaker || this.currentSpeaker || null,
+                        audio_format: this.currentAudioFormat || 'audio/webm'  // Include format info
+                    };
+
+                    this.socket.send(JSON.stringify(message));
+                    this.log(`Sent audio chunk: ${audioBlob.size} bytes for ${(speaker || this.currentSpeaker)?.name || 'unknown speaker'} (${this.currentAudioFormat})`);
+
+                } catch (error) {
+                    this.log(`Error sending audio chunk: ${error.message}`);
+                }
+            }
+
+            handleWebSocketMessage(message) {
+                this.log(`Received: ${message.type}`);
+
+                switch (message.type) {
+                    case 'session_started':
+                        this.sessionId = message.session_id;
+                        this.updateSessionInfo();
+                        this.log(`Session started: ${this.sessionId}`);
+                        // Enable analysis buttons
+                        this.analyzeBtn.disabled = false;
+                        this.combineBtn.disabled = false;
+                        this.getSegmentsBtn.disabled = false;
+                        break;
+
+                    case 'transcription':
+                        this.chunksProcessed = message.chunk_id;
+                        this.currentSegment = message.segment_number || 1;
+                        this.addTranscriptionChunk(message);
+
+                        if (message.language_detected) {
+                            this.languageDetectedEl.textContent = message.language_detected;
+                        }
+                        break;
+
+                    case 'segment_completed':
+                        this.addSegmentNotification(message);
+                        this.currentSegment = message.segment_number + 1;
+                        break;
+
+                    case 'chunk_received':
+                        this.chunksProcessed = message.chunk_id;
+                        this.currentSegment = message.segment_number || 1;
+                        break;
+
+                    case 'silence':
+                        this.log(`Silence detected (chunk ${message.chunk_id})`);
+                        break;
+
+                    case 'processing_error':
+                        this.log(`Processing error: ${message.error}`);
+                        break;
+
+                    case 'session_ended':
+                        this.log(`Session ended. Final text: "${message.final_text}"`);
+                        this.addFinalResult(message);
+                        break;
+
+                    case 'error':
+                        this.log(`Server error: ${message.error}`);
+                        this.updateStatus(`Error: ${message.error}`, 'error');
+                        break;
+                }
+            }
+
+            addTranscriptionChunk(message) {
+                const chunk = document.createElement('div');
+                chunk.className = 'chunk';
+
+                const chunkInfo = document.createElement('div');
+                chunkInfo.className = 'chunk-info';
+
+                let speakerInfo = '';
+                if (message.speaker_info) {
+                    speakerInfo = ` | 👤 ${message.speaker_info.name}`;
+                }
+
+                chunkInfo.textContent = `Segment ${message.segment_number || 1} - Chunk ${message.chunk_id} | ${new Date(message.timestamp).toLocaleTimeString()}${speakerInfo}`;
+
+                const chunkText = document.createElement('div');
+                chunkText.className = 'chunk-text';
+                chunkText.textContent = message.text;
+
+                chunk.appendChild(chunkInfo);
+                chunk.appendChild(chunkText);
+
+                if (this.transcriptionOutput.textContent.includes('Click "Initialize Session"')) {
+                    this.transcriptionOutput.textContent = '';
+                }
+
+                this.transcriptionOutput.appendChild(chunk);
+                this.transcriptionOutput.scrollTop = this.transcriptionOutput.scrollHeight;
+            }
+
+            addSegmentNotification(message) {
+                const notification = document.createElement('div');
+                notification.className = 'segment-notification';
+                notification.textContent = `📍 ${message.message}`;
+
+                this.transcriptionOutput.appendChild(notification);
+                this.transcriptionOutput.scrollTop = this.transcriptionOutput.scrollHeight;
+            }
+
+            addFinalResult(message) {
+                const finalResult = document.createElement('div');
+                finalResult.className = 'final-result';
+
+                finalResult.innerHTML = `
+                    <h4 style="margin: 0 0 10px 0; color: #0056b3;">📝 Final Session Results</h4>
+                    <p style="margin: 0; font-size: 16px; line-height: 1.5;">${message.final_text || 'No speech detected'}</p>
+                    <div style="margin-top: 10px; font-size: 12px; color: #666;">
+                        Duration: ${Math.round(message.duration_seconds)}s | 
+                        Chunks: ${message.total_chunks} | 
+                        Language: ${message.language_detected || 'Unknown'}
+                    </div>
+                `;
+
+                this.transcriptionOutput.appendChild(finalResult);
+                this.transcriptionOutput.scrollTop = this.transcriptionOutput.scrollHeight;
+            }
+
+            stopSession() {
+                if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+                    this.socket.send(JSON.stringify({ type: 'stop_recording' }));
+                }
+                this.cleanup();
+            }
+
+            cleanup() {
+                if (this.mediaRecorder) {
+                    this.mediaRecorder.stop();
+                }
+
+                // Clean up Web Audio API resources
+                if (this.scriptProcessor) {
+                    this.scriptProcessor.disconnect();
+                    this.scriptProcessor = null;
+                }
+                if (this.microphoneSource) {
+                    this.microphoneSource.disconnect();
+                    this.microphoneSource = null;
+                }
+                if (this.audioContext && this.audioContext.state !== 'closed') {
+                    this.audioContext.close();
+                    this.audioContext = null;
+                }
+
+                if (this.audioStream) {
+                    this.audioStream.getTracks().forEach(track => track.stop());
+                    this.audioStream = null;
+                }
+
+                if (this.sessionInfoInterval) {
+                    clearInterval(this.sessionInfoInterval);
+                }
+
+                this.isRecording = false;
+                this.isInitialized = false;
+                this.activeSpeaker = null;
+                this.currentSpeaker = null;
+                this.lastSpeaker = null;
+                this.audioBuffer = [];
+                this.isCapturing = false;
+
+                // Disable speaker buttons
+                this.speakerButtons.forEach(button => {
+                    button.disabled = true;
+                    button.classList.remove('active');
+                });
+
+                this.speakerControls.style.display = 'none';
+                this.initializeBtn.disabled = false;
+                this.stopBtn.disabled = true;
+
+                if (this.socket) {
+                    this.socket.close();
+                    this.socket = null;
+                }
+            }
+
+            clearTranscription() {
+                this.transcriptionOutput.innerHTML = 'Click "Initialize Session" to begin live transcription...';
+                this.debugLog.innerHTML = '';
+                this.sessionInfo.style.display = 'none';
+                this.chunksProcessed = 0;
+                this.currentSegment = 1;
+                this.sessionId = null;
+
+                // Clear analysis outputs
+                document.getElementById('analysisOverview').innerHTML = 'Start a recording session to see AI analysis...';
+                document.getElementById('aiObserverAnalysis').innerHTML = 'AI observer analysis will appear here after session analysis...';
+                document.getElementById('speakerAnalysis').innerHTML = 'Individual speaker analysis will appear here...';
+                document.getElementById('winnerAnalysis').innerHTML = 'Winner analysis will appear here after session analysis...';
+                document.getElementById('segmentsOutput').innerHTML = 'Session segments will appear here...';
+                document.getElementById('combinedOutput').innerHTML = 'Combined transcription will appear here...';
+
+                // Disable analysis buttons
+                this.analyzeBtn.disabled = true;
+                this.combineBtn.disabled = true;
+                this.getSegmentsBtn.disabled = true;
+            }
+
+            getSpeakers() {
+                const speakers = [];
+                for (let i = 1; i <= this.speakerCount; i++) {
+                    const nameEl = document.getElementById(`speaker${i}Name`);
+                    const roleEl = document.getElementById(`speaker${i}Role`);
+
+                    if (nameEl && nameEl.value.trim()) {
+                        speakers.push({
+                            id: `speaker_${i}`,
+                            name: nameEl.value.trim(),
+                            role: roleEl ? roleEl.value : 'participant'
+                        });
+                    }
+                }
+                return speakers;
+            }
+
+            async analyzeSession() {
+                if (!this.sessionId) {
+                    this.updateStatus('No active session to analyze', 'error');
+                    return;
+                }
+
+                this.updateStatus('Analyzing session...', 'analyzing');
+                this.analyzeBtn.innerHTML = '<span class="spinner"></span>Analyzing...';
+                this.analyzeBtn.disabled = true;
+
+                try {
+                    const speakers = this.getSpeakers();
+                    const meetingType = this.meetingTypeSelect.value;
+
+                    const response = await fetch(`http://localhost:8000/speech/analyze-session/${this.sessionId}?meeting_type=${meetingType}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ speakers: speakers })
+                    });
+
+                    if (!response.ok) {
+                        throw new Error(`Analysis failed: ${response.statusText}`);
+                    }
+
+                    const analysisData = await response.json();
+                    this.displayAnalysis(analysisData);
+                    this.updateStatus('Analysis completed', 'connected');
+
+                } catch (error) {
+                    let errorMessage = 'Unknown error occurred';
+                    if (typeof error === 'string') {
+                        errorMessage = error;
+                    } else if (error && typeof error.message === 'string') {
+                        errorMessage = error.message;
+                    } else if (error && typeof error.toString === 'function') {
+                        errorMessage = error.toString();
+                    }
+                    this.log(`Analysis error: ${errorMessage}`);
+                    this.updateStatus(`Analysis failed: ${errorMessage}`, 'error');
+                } finally {
+                    this.analyzeBtn.innerHTML = '🔍 Analyze Session';
+                    this.analyzeBtn.disabled = false;
+                }
+            }
+
+            displayAnalysis(data) {
+                // Overview Tab
+                const overviewHtml = `
+                    <h3>📊 Session Analysis Overview</h3>
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>Summary</h4>
+                        <p>${data.analysis.overall_summary}</p>
+                    </div>
+                    
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>Key Arguments by Speaker</h4>
+                        ${Object.entries(data.analysis.key_arguments).map(([speakerId, argumentsList]) => `
+                            <div style="margin: 10px 0;">
+                                <strong>${speakerId}:</strong>
+                                <ul>
+                                    ${argumentsList.map(arg => `<li>${arg}</li>`).join('')}
+                                </ul>
+                            </div>
+                        `).join('')}
+                    </div>
+
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>Debate Flow</h4>
+                        <ol>
+                            ${data.analysis.debate_flow.map(flow => `<li>${flow}</li>`).join('')}
+                        </ol>
+                    </div>
+
+                    ${data.analysis.winner_analysis ? `
+                        <div style="background-color: #e7f3ff; padding: 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #007bff;">
+                            <h4>🏆 Winner Analysis</h4>
+                            <p>${data.analysis.winner_analysis}</p>
+                        </div>
+                    ` : ''}
+                `;
+                document.getElementById('analysisOverview').innerHTML = overviewHtml;
+
+                // AI Observer Tab
+                const aiObserverHtml = `
+                    <h3>🤖 AI Observer Analysis</h3>
+                    <p><strong>Observation:</strong> ${data.ai_observer.analysis.ai_observation}</p>
+                    
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>Key Takeaways</h4>
+                        <ul>
+                            ${data.ai_observer.analysis.key_takeaways.map(takeaway => `<li>${takeaway}</li>`).join('')}
+                        </ul>
+                    </div>
+
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>Meeting Effectiveness Score</h4>
+                        <div class="score-bar">
+                            <div class="score-fill" style="width: ${data.ai_observer.analysis.meeting_effectiveness * 10}%"></div>
+                        </div>
+                        <p>${data.ai_observer.analysis.meeting_effectiveness}/10</p>
+                    </div>
+
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>AI Recommendations</h4>
+                        <ul>
+                            ${data.ai_observer.analysis.recommendations.map(rec => `<li>${rec}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+                document.getElementById('aiObserverAnalysis').innerHTML = aiObserverHtml;
+
+                // Speaker Analysis Tab
+                const speakerHtml = `
+                    <h3>👥 Individual Speaker Analysis</h3>
+                    ${Object.entries(data.analysis.argument_strength).map(([speakerId, strength]) => `
+                        <div class="speaker-analysis">
+                            <h4>${speakerId}</h4>
+                            
+                            <div style="margin: 10px 0;">
+                                <strong>Argument Strength:</strong>
+                                <div class="score-bar">
+                                    <div class="score-fill" style="width: ${strength * 100}%"></div>
+                                </div>
+                                <span>${(strength * 100).toFixed(1)}%</span>
+                            </div>
+
+                            <div style="margin: 10px 0;">
+                                <strong>Speaking Time:</strong> ${data.analysis.speaking_time_analysis[speakerId] || 0} minutes
+                            </div>
+
+                            ${data.analysis.improvement_suggestions[speakerId] ? `
+                                <div style="margin: 10px 0;">
+                                    <strong>Improvement Suggestions:</strong>
+                                    <ul>
+                                        ${data.analysis.improvement_suggestions[speakerId].map(sugg => `<li>${sugg}</li>`).join('')}
+                                    </ul>
+                                </div>
+                            ` : ''}
+
+                            ${data.ai_observer.analysis.speaker_performance && data.ai_observer.analysis.speaker_performance[speakerId] ? `
+                                <div style="margin: 10px 0;">
+                                    <strong>AI Performance Score:</strong> ${data.ai_observer.analysis.speaker_performance[speakerId].score}/10
+                                </div>
+                            ` : ''}
+                        </div>
+                    `).join('')}
+                `;
+                document.getElementById('speakerAnalysis').innerHTML = speakerHtml;
+
+                // Winner Analysis Tab
+                const winnerHtml = `
+                    <h3>🏆 Winner Determination</h3>
+                    
+                    ${data.analysis.winner_analysis ? `
+                        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; margin: 20px 0; border: 2px solid #007bff;">
+                            <h4 style="color: #007bff; margin-bottom: 15px;">🎯 Final Verdict</h4>
+                            <p style="font-size: 16px; line-height: 1.6;">${data.analysis.winner_analysis}</p>
+                        </div>
+                    ` : `
+                        <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; margin: 20px 0; border: 1px solid #ffc107;">
+                            <h4 style="color: #856404; margin-bottom: 15px;">ℹ️ Analysis Note</h4>
+                            <p style="font-size: 16px; line-height: 1.6;">Winner analysis requires multiple speakers or distinct arguments. Current session appears to be a single speaker or limited content. Try recording a debate between multiple people or presenting contrasting viewpoints.</p>
+                        </div>
+                    `}
+
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>📊 Comparative Analysis</h4>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 15px; margin-top: 15px;">
+                            ${Object.entries(data.analysis.argument_strength).map(([speakerId, strength]) => `
+                                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 8px; border-left: 4px solid ${strength > 0.6 ? '#28a745' : strength > 0.4 ? '#ffc107' : '#dc3545'};">
+                                    <h5 style="margin: 0 0 10px 0; color: #333;">${speakerId}</h5>
+                                    <div style="margin: 8px 0;">
+                                        <strong>Argument Strength:</strong>
+                                        <div class="score-bar" style="margin: 5px 0;">
+                                            <div class="score-fill" style="width: ${strength * 100}%; background-color: ${strength > 0.6 ? '#28a745' : strength > 0.4 ? '#ffc107' : '#dc3545'};"></div>
+                                        </div>
+                                        <span style="font-weight: bold; color: ${strength > 0.6 ? '#28a745' : strength > 0.4 ? '#856404' : '#dc3545'};">${(strength * 100).toFixed(1)}%</span>
+                                    </div>
+                                    <div style="margin: 8px 0;">
+                                        <strong>Speaking Time:</strong> ${data.analysis.speaking_time_analysis[speakerId] || 0} minutes
+                                    </div>
+                                    <div style="margin: 8px 0;">
+                                        <strong>Key Arguments:</strong>
+                                        <ul style="margin: 5px 0; padding-left: 20px;">
+                                            ${(data.analysis.key_arguments[speakerId] || []).slice(0, 3).map(arg => `<li style="font-size: 14px; margin: 3px 0;">${arg}</li>`).join('')}
+                                        </ul>
+                                    </div>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+
+                    <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                        <h4>🎯 Performance Metrics</h4>
+                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 15px;">
+                            ${Object.entries(data.analysis.argument_strength).map(([speakerId, strength]) => {
+                    const speakingTime = data.analysis.speaking_time_analysis[speakerId] || 0;
+                    const argumentCount = (data.analysis.key_arguments[speakerId] || []).length;
+                    const overallScore = (strength * 0.6 + Math.min(speakingTime / 2, 1) * 0.2 + Math.min(argumentCount / 3, 1) * 0.2) * 100;
+
+                    return `
+                                    <div style="text-align: center; padding: 15px; background-color: #f8f9fa; border-radius: 8px;">
+                                        <h5 style="margin: 0 0 10px 0; color: #333;">${speakerId}</h5>
+                                        <div style="font-size: 24px; font-weight: bold; color: ${overallScore > 60 ? '#28a745' : overallScore > 40 ? '#ffc107' : '#dc3545'}; margin: 10px 0;">
+                                            ${overallScore.toFixed(0)}/100
+                                        </div>
+                                        <div style="font-size: 12px; color: #666;">Overall Performance</div>
+                                        ${overallScore > 60 ? '<div style="color: #28a745; font-weight: bold; margin-top: 5px;">🏆 Strong Performance</div>' :
+                            overallScore > 40 ? '<div style="color: #ffc107; font-weight: bold; margin-top: 5px;">⚖️ Moderate Performance</div>' :
+                                '<div style="color: #dc3545; font-weight: bold; margin-top: 5px;">📉 Needs Improvement</div>'}
+                                    </div>
+                                `;
+                }).join('')}
+                        </div>
+                    </div>
+
+                    ${data.ai_observer && data.ai_observer.analysis && data.ai_observer.analysis.meeting_effectiveness ? `
+                        <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                            <h4>🎪 Meeting Quality Assessment</h4>
+                            <div style="text-align: center; padding: 20px;">
+                                <div style="font-size: 32px; font-weight: bold; color: ${data.ai_observer.analysis.meeting_effectiveness > 7 ? '#28a745' : data.ai_observer.analysis.meeting_effectiveness > 5 ? '#ffc107' : '#dc3545'};">
+                                    ${data.ai_observer.analysis.meeting_effectiveness}/10
+                                </div>
+                                <div style="color: #666; margin: 10px 0;">Meeting Effectiveness Score</div>
+                                <div class="score-bar" style="max-width: 300px; margin: 15px auto;">
+                                    <div class="score-fill" style="width: ${data.ai_observer.analysis.meeting_effectiveness * 10}%; background-color: ${data.ai_observer.analysis.meeting_effectiveness > 7 ? '#28a745' : data.ai_observer.analysis.meeting_effectiveness > 5 ? '#ffc107' : '#dc3545'};"></div>
+                                </div>
+                            </div>
+                        </div>
+                    ` : ''}
+
+                    <div style="background-color: #e7f3ff; padding: 15px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #007bff;">
+                        <h4 style="color: #0056b3;">💡 Tips for Better Winner Analysis</h4>
+                        <ul style="margin: 10px 0; padding-left: 20px;">
+                            <li>Have multiple people speak during the session</li>
+                            <li>Present contrasting viewpoints or arguments</li>
+                            <li>Use topic transition markers like "On the other hand..." or "However..."</li>
+                            <li>Allow for longer segments (2+ minutes) to develop complete arguments</li>
+                            <li>Include evidence and examples to support positions</li>
+                        </ul>
+                    </div>
+                `;
+                document.getElementById('winnerAnalysis').innerHTML = winnerHtml;
+            }
+
+            async getCombinedTranscription() {
+                if (!this.sessionId) {
+                    this.updateStatus('No active session', 'error');
+                    return;
+                }
+
+                this.combineBtn.innerHTML = '<span class="spinner"></span>Combining...';
+                this.combineBtn.disabled = true;
+
+                try {
+                    const response = await fetch(`http://localhost:8000/speech/combine-transcription/${this.sessionId}`);
+
+                    if (!response.ok) {
+                        throw new Error(`Failed to get combined transcription: ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+
+                    const combinedHtml = `
+                        <h3>📄 Complete Session Transcription</h3>
+                        
+                        <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                            <h4>📊 Session Statistics</h4>
+                            <p><strong>Total Segments:</strong> ${data.stats.total_segments}</p>
+                            <p><strong>Duration:</strong> ${data.stats.total_duration_seconds} seconds</p>
+                            <p><strong>Total Words:</strong> ${data.stats.total_words}</p>
+                            <p><strong>Estimated Speaking Time:</strong> ${data.stats.estimated_speaking_time_minutes} minutes</p>
+                        </div>
+
+                        <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                            <h4>🤖 AI Overview</h4>
+                            <p>${data.overview}</p>
+                        </div>
+
+                        <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                            <h4>📝 Full Transcription</h4>
+                            <div style="max-height: 400px; overflow-y: auto; white-space: pre-wrap; font-family: monospace; border: 1px solid #ddd; padding: 10px;">
+${data.combined_transcription}
+                            </div>
+                        </div>
+                    `;
+
+                    document.getElementById('combinedOutput').innerHTML = combinedHtml;
+                    showTab('combined');
+
+                } catch (error) {
+                    let errorMessage = 'Unknown error occurred';
+                    if (typeof error === 'string') {
+                        errorMessage = error;
+                    } else if (error && typeof error.message === 'string') {
+                        errorMessage = error.message;
+                    } else if (error && typeof error.toString === 'function') {
+                        errorMessage = error.toString();
+                    }
+                    this.log(`Combined transcription error: ${errorMessage}`);
+                    this.updateStatus(`Failed to get combined transcription: ${errorMessage}`, 'error');
+                } finally {
+                    this.combineBtn.innerHTML = '📄 Get Combined Transcription';
+                    this.combineBtn.disabled = false;
+                }
+            }
+
+            async getSessionSegments() {
+                if (!this.sessionId) {
+                    this.updateStatus('No active session', 'error');
+                    return;
+                }
+
+                this.getSegmentsBtn.innerHTML = '<span class="spinner"></span>Loading...';
+                this.getSegmentsBtn.disabled = true;
+
+                try {
+                    const response = await fetch(`http://localhost:8000/speech/session-segments/${this.sessionId}`);
+
+                    if (!response.ok) {
+                        throw new Error(`Failed to get segments: ${response.statusText}`);
+                    }
+
+                    const data = await response.json();
+
+                    const segmentsHtml = `
+                        <h3>🔗 Session Segments</h3>
+                        <p><strong>Total Segments:</strong> ${data.total_segments}</p>
+
+                        ${data.current_segment ? `
+                            <div style="background-color: #fff3cd; padding: 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #ffc107;">
+                                <h4>🔴 Current Active Segment ${data.current_segment.segment_number}</h4>
+                                <p><strong>Started:</strong> ${new Date(data.current_segment.start_time).toLocaleString()}</p>
+                                <p><strong>Chunks Processed:</strong> ${data.current_segment.chunks_processed}</p>
+                                <p><strong>Current Text:</strong> ${data.current_segment.current_text || 'No text yet...'}</p>
+                            </div>
+                        ` : ''}
+
+                        <h4>📋 Completed Segments</h4>
+                        ${data.completed_segments.map(segment => `
+                            <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0; border-left: 4px solid #28a745;">
+                                <h5>Segment ${segment.segment_number}</h5>
+                                <p><strong>Duration:</strong> ${segment.start_time} - ${segment.end_time} (${segment.duration_seconds.toFixed(1)}s)</p>
+                                <p><strong>Transcriptions:</strong> ${segment.transcription_count}</p>
+                                <p><strong>Language:</strong> ${segment.language || 'Unknown'}</p>
+                                <div style="background-color: #f8f9fa; padding: 10px; margin: 10px 0; border-radius: 3px;">
+                                    <strong>Text:</strong> ${segment.text || 'No text recorded'}
+                                </div>
+                            </div>
+                        `).join('')}
+                    `;
+
+                    document.getElementById('segmentsOutput').innerHTML = segmentsHtml;
+                    showTab('segments');
+
+                } catch (error) {
+                    let errorMessage = 'Unknown error occurred';
+                    if (typeof error === 'string') {
+                        errorMessage = error;
+                    } else if (error && typeof error.message === 'string') {
+                        errorMessage = error.message;
+                    } else if (error && typeof error.toString === 'function') {
+                        errorMessage = error.toString();
+                    }
+                    this.log(`Segments error: ${errorMessage}`);
+                    this.updateStatus(`Failed to get segments: ${errorMessage}`, 'error');
+                } finally {
+                    this.getSegmentsBtn.innerHTML = '🔗 View Segments';
+                    this.getSegmentsBtn.disabled = false;
+                }
+            }
+        }
+
+        // Tab switching function
+        function showTab(tabName, clickedElement = null) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+
+            // Remove active class from all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+
+            // Show selected tab content
+            document.getElementById(tabName).classList.add('active');
+
+            // Add active class to clicked tab
+            if (clickedElement) {
+                clickedElement.classList.add('active');
+            } else {
+                // If no element provided, find the tab by onclick attribute or text content
+                document.querySelectorAll('.tab').forEach(tab => {
+                    if (tab.getAttribute('onclick') && tab.getAttribute('onclick').includes(`'${tabName}'`)) {
+                        tab.classList.add('active');
+                    }
+                });
+            }
+        }
+
+        // Add speaker function
+        function addSpeaker() {
+            const container = document.getElementById('speakersContainer');
+            const speakerCount = container.children.length + 1;
+
+            const speakerDiv = document.createElement('div');
+            speakerDiv.className = 'speaker-input';
+            speakerDiv.innerHTML = `
+                <input type="text" placeholder="Speaker ${speakerCount} Name" id="speaker${speakerCount}Name">
+                <select id="speaker${speakerCount}Role">
+                    <option value="participant">Participant</option>
+                    <option value="moderator">Moderator</option>
+                    <option value="presenter">Presenter</option>
+                </select>
+                <button onclick="removeSpeaker(this)" style="background-color: #dc3545;">➖ Remove</button>
+            `;
+
+            container.appendChild(speakerDiv);
+
+            // Update speaker count and regenerate buttons
+            if (window.aiDebateAnalyzer) {
+                window.aiDebateAnalyzer.speakerCount = speakerCount;
+                window.aiDebateAnalyzer.generateSpeakerButtons();
+            }
+        }
+
+        // Remove speaker function
+        function removeSpeaker(button) {
+            button.parentElement.remove();
+
+            // Regenerate buttons if analyzer exists
+            if (window.aiDebateAnalyzer) {
+                const container = document.getElementById('speakersContainer');
+                window.aiDebateAnalyzer.speakerCount = container.children.length;
+                window.aiDebateAnalyzer.generateSpeakerButtons();
+            }
+        }
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', () => {
+            window.aiDebateAnalyzer = new AIDebateAnalyzer();
+        });
+    </script>
+</body>
+
+</html>

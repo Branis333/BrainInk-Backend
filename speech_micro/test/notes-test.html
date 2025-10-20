@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study Notes Generator Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        textarea, input, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        textarea {
+            height: 150px;
+            resize: vertical;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 12px 24px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .notes-result {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 4px;
+            border-left: 4px solid #28a745;
+            margin-top: 20px;
+        }
+        .key-points {
+            background: white;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .key-points ul {
+            margin: 0;
+            padding-left: 20px;
+        }
+        .metadata {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+            font-size: 14px;
+            color: #666;
+        }
+        .metadata-item {
+            background: white;
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #e0e0e0;
+        }
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #f44336;
+        }
+        .loading {
+            background-color: #fff3e0;
+            color: #ef6c00;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #ff9800;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📚 Study Notes Generator Test</h1>
+        
+        <div class="form-group">
+            <label for="transcriptionText">Transcription Text:</label>
+            <textarea id="transcriptionText" placeholder="Enter transcription text here...">
+The water cycle is a continuous process that describes how water moves through the Earth's atmosphere, land, and oceans. It begins with evaporation, where water from oceans, lakes, and rivers transforms into water vapor due to heat from the sun. This water vapor rises into the atmosphere where it cools and condenses around tiny particles to form clouds in a process called condensation. When the water droplets in clouds become too heavy, they fall back to Earth as precipitation in the form of rain, snow, sleet, or hail. Some of this precipitation flows over the surface as runoff back to rivers and oceans, while some soaks into the ground becoming groundwater. Plants also play a role through transpiration, releasing water vapor through their leaves. This entire cycle is powered by solar energy and gravity, making it a renewable process that has been occurring for billions of years.
+            </textarea>
+        </div>
+        
+        <div class="form-group">
+            <label for="userId">User ID:</label>
+            <input type="number" id="userId" value="1" min="1">
+        </div>
+        
+        <div class="form-group">
+            <label for="subject">Subject (Optional):</label>
+            <input type="text" id="subject" placeholder="e.g., Science, Mathematics, History">
+        </div>
+        
+        <div class="form-group">
+            <label for="language">Language:</label>
+            <select id="language">
+                <option value="en">English</option>
+                <option value="es">Spanish</option>
+                <option value="fr">French</option>
+                <option value="de">German</option>
+                <option value="ar">Arabic</option>
+                <option value="sw">Swahili</option>
+                <option value="af">Afrikaans</option>
+            </select>
+        </div>
+        
+        <button id="generateBtn" onclick="generateNotes()">📝 Generate Study Notes</button>
+        <button onclick="loadUserNotes()">📋 Load My Notes</button>
+        
+        <div id="result"></div>
+    </div>
+
+    <div class="container" id="notesListContainer" style="display: none;">
+        <h2>📋 My Study Notes</h2>
+        <div id="notesList"></div>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://localhost:8000';
+
+        async function generateNotes() {
+            const generateBtn = document.getElementById('generateBtn');
+            const result = document.getElementById('result');
+            
+            const text = document.getElementById('transcriptionText').value.trim();
+            const userId = parseInt(document.getElementById('userId').value);
+            const subject = document.getElementById('subject').value.trim();
+            const language = document.getElementById('language').value;
+            
+            if (!text) {
+                result.innerHTML = '<div class="error">Please enter transcription text.</div>';
+                return;
+            }
+            
+            generateBtn.disabled = true;
+            result.innerHTML = '<div class="loading">🤖 Generating study notes with Gemini AI...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/notes/generate?user_id=${userId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        text: text,
+                        subject: subject || null,
+                        language: language
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || `HTTP ${response.status}`);
+                }
+                
+                if (data.success) {
+                    displayNotes(data);
+                } else {
+                    result.innerHTML = `<div class="error">Error: ${data.error}</div>`;
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                result.innerHTML = `<div class="error">Failed to generate notes: ${error.message}</div>`;
+            } finally {
+                generateBtn.disabled = false;
+            }
+        }
+        
+        function displayNotes(data) {
+            const result = document.getElementById('result');
+            
+            let keyPointsHtml = '';
+            if (data.key_points && data.key_points.length > 0) {
+                keyPointsHtml = `
+                    <div class="key-points">
+                        <h4>🎯 Key Points:</h4>
+                        <ul>
+                            ${data.key_points.map(point => `<li>${point}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+            
+            let summaryHtml = '';
+            if (data.summary) {
+                summaryHtml = `
+                    <div class="key-points">
+                        <h4>📄 Summary:</h4>
+                        <p>${data.summary}</p>
+                    </div>
+                `;
+            }
+            
+            result.innerHTML = `
+                <div class="notes-result">
+                    <h3>📚 ${data.title}</h3>
+                    <div style="white-space: pre-wrap; line-height: 1.6; margin: 15px 0;">
+                        ${data.brief_notes}
+                    </div>
+                    ${keyPointsHtml}
+                    ${summaryHtml}
+                    <div class="metadata">
+                        <div class="metadata-item"><strong>Notes ID:</strong> ${data.notes_id}</div>
+                        <div class="metadata-item"><strong>Processing Time:</strong> ${data.processing_time_seconds}s</div>
+                        <div class="metadata-item"><strong>Original Words:</strong> ${data.word_count_original}</div>
+                        <div class="metadata-item"><strong>Notes Words:</strong> ${data.word_count_notes}</div>
+                        <div class="metadata-item"><strong>Compression:</strong> ${((data.word_count_notes / data.word_count_original) * 100).toFixed(1)}%</div>
+                        <div class="metadata-item"><strong>Created:</strong> ${new Date(data.created_at).toLocaleString()}</div>
+                    </div>
+                </div>
+            `;
+        }
+        
+        async function loadUserNotes() {
+            const userId = parseInt(document.getElementById('userId').value);
+            const notesListContainer = document.getElementById('notesListContainer');
+            const notesList = document.getElementById('notesList');
+            
+            notesList.innerHTML = '<div class="loading">Loading your notes...</div>';
+            notesListContainer.style.display = 'block';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/notes/list?user_id=${userId}&page=1&page_size=10`);
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || `HTTP ${response.status}`);
+                }
+                
+                if (data.success && data.notes.length > 0) {
+                    const notesHtml = data.notes.map(note => `
+                        <div class="notes-result" style="margin-bottom: 20px;">
+                            <h4>📚 ${note.title}</h4>
+                            <p style="color: #666; margin: 10px 0;">
+                                <strong>Subject:</strong> ${note.subject || 'Not specified'} | 
+                                <strong>Created:</strong> ${new Date(note.created_at).toLocaleDateString()} |
+                                <strong>Views:</strong> ${note.view_count}
+                            </p>
+                            <div style="max-height: 100px; overflow: hidden; margin: 10px 0;">
+                                ${note.brief_notes.substring(0, 200)}${note.brief_notes.length > 200 ? '...' : ''}
+                            </div>
+                            <button onclick="viewFullNotes(${note.id})" style="font-size: 14px; padding: 8px 16px;">
+                                👁️ View Full Notes
+                            </button>
+                        </div>
+                    `).join('');
+                    
+                    notesList.innerHTML = `
+                        <p><strong>Total Notes:</strong> ${data.total_count}</p>
+                        ${notesHtml}
+                    `;
+                } else {
+                    notesList.innerHTML = '<div class="error">No notes found. Generate some notes first!</div>';
+                }
+                
+            } catch (error) {
+                console.error('Error:', error);
+                notesList.innerHTML = `<div class="error">Failed to load notes: ${error.message}</div>`;
+            }
+        }
+        
+        async function viewFullNotes(notesId) {
+            const userId = parseInt(document.getElementById('userId').value);
+            const result = document.getElementById('result');
+            
+            result.innerHTML = '<div class="loading">Loading full notes...</div>';
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/notes/${notesId}?user_id=${userId}`);
+                const data = await response.json();
+                
+                if (!response.ok) {
+                    throw new Error(data.detail || `HTTP ${response.status}`);
+                }
+                
+                displayFullNotes(data);
+                
+            } catch (error) {
+                console.error('Error:', error);
+                result.innerHTML = `<div class="error">Failed to load notes: ${error.message}</div>`;
+            }
+        }
+        
+        function displayFullNotes(data) {
+            const result = document.getElementById('result');
+            
+            let keyPointsHtml = '';
+            if (data.key_points && data.key_points.length > 0) {
+                keyPointsHtml = `
+                    <div class="key-points">
+                        <h4>🎯 Key Points:</h4>
+                        <ul>
+                            ${data.key_points.map(point => `<li>${point}</li>`).join('')}
+                        </ul>
+                    </div>
+                `;
+            }
+            
+            let summaryHtml = '';
+            if (data.summary) {
+                summaryHtml = `
+                    <div class="key-points">
+                        <h4>📄 Summary:</h4>
+                        <p>${data.summary}</p>
+                    </div>
+                `;
+            }
+            
+            result.innerHTML = `
+                <div class="notes-result">
+                    <h3>📚 ${data.title}</h3>
+                    <div style="white-space: pre-wrap; line-height: 1.6; margin: 15px 0;">
+                        ${data.brief_notes}
+                    </div>
+                    ${keyPointsHtml}
+                    ${summaryHtml}
+                    <div class="metadata">
+                        <div class="metadata-item"><strong>Notes ID:</strong> ${data.id}</div>
+                        <div class="metadata-item"><strong>Subject:</strong> ${data.subject || 'Not specified'}</div>
+                        <div class="metadata-item"><strong>Language:</strong> ${data.language}</div>
+                        <div class="metadata-item"><strong>Original Words:</strong> ${data.word_count_original}</div>
+                        <div class="metadata-item"><strong>Notes Words:</strong> ${data.word_count_notes}</div>
+                        <div class="metadata-item"><strong>View Count:</strong> ${data.view_count}</div>
+                        <div class="metadata-item"><strong>Created:</strong> ${new Date(data.created_at).toLocaleString()}</div>
+                        <div class="metadata-item"><strong>Last Viewed:</strong> ${data.last_viewed ? new Date(data.last_viewed).toLocaleString() : 'Never'}</div>
+                    </div>
+                </div>
+            `;
+        }
+    </script>
+</body>
+</html>

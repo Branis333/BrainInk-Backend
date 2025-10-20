@@ -15,6 +15,8 @@ import google.generativeai as genai
 from pydantic import BaseModel
 import httpx
 from urllib.parse import quote_plus, urlencode
+from tools.inline_attachment import build_inline_part, build_text_part
+from google.generativeai import protos
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -250,7 +252,13 @@ class GeminiService:
         self.config = GeminiConfig()
 
     def _build_content_payload(self, prompt: str, attachments: Optional[List[Any]]) -> Any:
-        """Construct payload for generate_content, preserving native attachment objects."""
+        """Construct payload for generate_content, preserving native attachment objects.
+        
+        Attachments can be:
+        - protos.Part objects (from inline_attachment.build_inline_part)
+        - protos.File objects (from genai.get_file for backward compat)
+        - Other native Gemini types
+        """
         if attachments:
             payload: List[Any] = []
             for attachment in attachments:
@@ -1074,132 +1082,151 @@ class GeminiService:
         """
         age_min, age_max = target_age_range
         
-        # Check if textbook_content is a Gemini file URI
-        if textbook_content.startswith("GEMINI_FILE_URI:"):
-            gemini_file_uri = textbook_content.replace("GEMINI_FILE_URI:", "")
-            uploaded_file = genai.get_file(gemini_file_uri)
-            
-            structure_prompt = f"""
-            Analyze the uploaded textbook file and create a high-level course structure outline.
-            
-            **CRITICAL FILTERING INSTRUCTIONS:**
-            - SKIP any "Table of Contents", "Course Outline", "Syllabus", or "Index" pages
-            - SKIP any "Chapter Summary" or "Overview" sections
-            - SKIP any "Learning Outcomes" or "Objectives" lists that appear before actual content
-            - ONLY analyze the ACTUAL LESSON CONTENT pages (chapters, sections with substantive material)
-            - Look for the main body text, explanations, examples, and educational content
-            - Ignore preface, foreword, introduction pages, and appendices
-            
-            COURSE REQUIREMENTS:
-            - Title: {course_title}
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max} years
-            - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
-            - Difficulty: {difficulty_level}
-            
-            Create a JSON outline with this structure:
-            {{
-                "title": "{course_title}",
-                "subject": "{subject}",
-                "description": "Brief course description (1-2 sentences)",
-                "age_min": {age_min},
-                "age_max": {age_max},
-                "difficulty_level": "{difficulty_level}",
-                "textbook_source": "Brief description of the textbook",
-                "content_sections": [
+        # Check if textbook_content is an inline file marker
+        if textbook_content.startswith("INLINE_FILE:"):
+            # Parse the inline file marker: INLINE_FILE:[mime_type]:[base64_data]:[filename]
+            parts = textbook_content.split(":", 3)
+            if len(parts) >= 4:
+                mime_type = parts[1]
+                content_b64 = parts[2]
+                filename = parts[3]
+                
+                try:
+                    file_bytes = base64.b64decode(content_b64)
+                    inline_part = build_inline_part(
+                        data=file_bytes,
+                        mime_type=mime_type,
+                        display_name=filename
+                    )
+                    
+                    structure_prompt = f"""
+                    Analyze the uploaded textbook file and create a high-level course structure outline.
+                    
+                    **CRITICAL FILTERING INSTRUCTIONS:**
+                    - SKIP any "Table of Contents", "Course Outline", "Syllabus", or "Index" pages
+                    - SKIP any "Chapter Summary" or "Overview" sections
+                    - SKIP any "Learning Outcomes" or "Objectives" lists that appear before actual content
+                    - ONLY analyze the ACTUAL LESSON CONTENT pages (chapters, sections with substantive material)
+                    - Look for the main body text, explanations, examples, and educational content
+                    - Ignore preface, foreword, introduction pages, and appendices
+                    
+                    COURSE REQUIREMENTS:
+                    - Title: {course_title}
+                    - Subject: {subject}
+                    - Target Age: {age_min}-{age_max} years
+                    - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
+                    - Difficulty: {difficulty_level}
+                    
+                    Create a JSON outline with this structure:
                     {{
-                        "section_title": "Section 1 Title",
-                        "topics": ["Topic 1", "Topic 2", "Topic 3"],
-                        "estimated_blocks": 2,
-                        "difficulty": "beginner|intermediate|advanced"
-                    }},
-                    {{
-                        "section_title": "Section 2 Title", 
-                        "topics": ["Topic 4", "Topic 5"],
-                        "estimated_blocks": 3,
-                        "difficulty": "intermediate"
+                        "title": "{course_title}",
+                        "subject": "{subject}",
+                        "description": "Brief course description (1-2 sentences)",
+                        "age_min": {age_min},
+                        "age_max": {age_max},
+                        "difficulty_level": "{difficulty_level}",
+                        "textbook_source": "Brief description of the textbook",
+                        "content_sections": [
+                            {{
+                                "section_title": "Section 1 Title",
+                                "topics": ["Topic 1", "Topic 2", "Topic 3"],
+                                "estimated_blocks": 2,
+                                "difficulty": "beginner|intermediate|advanced"
+                            }},
+                            {{
+                                "section_title": "Section 2 Title", 
+                                "topics": ["Topic 4", "Topic 5"],
+                                "estimated_blocks": 3,
+                                "difficulty": "intermediate"
+                            }}
+                        ],
+                        "learning_progression": "How topics build upon each other",
+                        "key_concepts": ["Main concept 1", "Main concept 2", "Main concept 3"]
                     }}
-                ],
-                "learning_progression": "How topics build upon each other",
-                "key_concepts": ["Main concept 1", "Main concept 2", "Main concept 3"]
-            }}
-            
-            INSTRUCTIONS:
-            - Identify main sections/chapters in the textbook (CONTENT ONLY, not ToC)
-            - Map content to the {total_weeks * blocks_per_week} blocks needed
-            - Ensure logical progression through material
-            - Keep response concise and focused on structure
-            - Remember: EXTRACT FROM ACTUAL CONTENT, NOT FROM TABLE OF CONTENTS
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                [uploaded_file, structure_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=512,  # Reduced for free tier
-                    response_mime_type="application/json"
-                )
+                    
+                    INSTRUCTIONS:
+                    - Identify main sections/chapters in the textbook (CONTENT ONLY, not ToC)
+                    - Map content to the {total_weeks * blocks_per_week} blocks needed
+                    - Ensure logical progression through material
+                    - Keep response concise and focused on structure
+                    - Remember: EXTRACT FROM ACTUAL CONTENT, NOT FROM TABLE OF CONTENTS
+                    """
+                    
+                    response = await asyncio.to_thread(
+                        self.config.model.generate_content,
+                        [inline_part, structure_prompt],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.3,
+                            max_output_tokens=512,  # Reduced for free tier
+                            response_mime_type="application/json"
+                        )
+                    )
+                    
+                    return json.loads(response.text)
+                except Exception as e:
+                    logger.error(f"Error processing inline file: {e}")
+                    # Fall through to text-based processing
+            else:
+                logger.error("Invalid INLINE_FILE marker format")
+                # Fall through to text-based processing
+        
+        # Handle direct text content or fallback
+        filtered_content = textbook_content
+        
+        # Simple filtering: skip content that looks like a table of contents
+        toc_markers = [
+            "table of contents", "contents", "course outline", "syllabus",
+            "chapter 1.", "chapter 2.", "chapter 3.", "week 1", "week 2",
+            "learning outcomes", "overview"
+        ]
+        
+        lines = textbook_content.split('\n')
+        content_start_idx = 0
+        
+        # Look for where actual content begins (after ToC/outline)
+        for i, line in enumerate(lines[:100]):  # Check first 100 lines
+            line_lower = line.lower().strip()
+            # If we find dense paragraph text, assume content has started
+            if len(line) > 100 and not any(marker in line_lower for marker in toc_markers):
+                content_start_idx = max(0, i - 5)  # Start a bit before
+                break
+        
+        if content_start_idx > 0:
+            filtered_content = '\n'.join(lines[content_start_idx:])
+            print(f"📝 Filtered out first {content_start_idx} lines (likely ToC/outline)")
+        
+        structure_prompt = f"""
+        Analyze the following textbook content and create a high-level course structure outline.
+        
+        **CRITICAL FILTERING INSTRUCTIONS:**
+        - This content may start with a Table of Contents or Course Outline - SKIP IT
+        - Look for and analyze only the ACTUAL LESSON CONTENT
+        - Ignore any chapter summaries or overview pages
+        - Focus on substantive educational material
+        
+        TEXTBOOK CONTENT:
+        {filtered_content[:2000]}...
+        
+        COURSE REQUIREMENTS:
+        - Title: {course_title}
+        - Subject: {subject}
+        - Target Age: {age_min}-{age_max} years
+        - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
+        - Difficulty: {difficulty_level}
+        
+        Create a JSON outline with the same structure as above.
+        Remember: Extract structure from ACTUAL CONTENT, not from any table of contents.
+        """
+        
+        response = await asyncio.to_thread(
+            self.config.model.generate_content,
+            structure_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=512,
+                response_mime_type="application/json"
             )
-        else:
-            # Handle direct text content - filter out ToC and outline sections
-            # Try to detect and skip table of contents
-            filtered_content = textbook_content
-            
-            # Simple filtering: skip content that looks like a table of contents
-            toc_markers = [
-                "table of contents", "contents", "course outline", "syllabus",
-                "chapter 1.", "chapter 2.", "chapter 3.", "week 1", "week 2",
-                "learning outcomes", "overview"
-            ]
-            
-            lines = textbook_content.split('\n')
-            content_start_idx = 0
-            
-            # Look for where actual content begins (after ToC/outline)
-            for i, line in enumerate(lines[:100]):  # Check first 100 lines
-                line_lower = line.lower().strip()
-                # If we find dense paragraph text, assume content has started
-                if len(line) > 100 and not any(marker in line_lower for marker in toc_markers):
-                    content_start_idx = max(0, i - 5)  # Start a bit before
-                    break
-            
-            if content_start_idx > 0:
-                filtered_content = '\n'.join(lines[content_start_idx:])
-                print(f"📝 Filtered out first {content_start_idx} lines (likely ToC/outline)")
-            
-            structure_prompt = f"""
-            Analyze the following textbook content and create a high-level course structure outline.
-            
-            **CRITICAL FILTERING INSTRUCTIONS:**
-            - This content may start with a Table of Contents or Course Outline - SKIP IT
-            - Look for and analyze only the ACTUAL LESSON CONTENT
-            - Ignore any chapter summaries or overview pages
-            - Focus on substantive educational material
-            
-            TEXTBOOK CONTENT:
-            {filtered_content[:2000]}...
-            
-            COURSE REQUIREMENTS:
-            - Title: {course_title}
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max} years
-            - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
-            - Difficulty: {difficulty_level}
-            
-            Create a JSON outline with the same structure as above.
-            Remember: Extract structure from ACTUAL CONTENT, not from any table of contents.
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                structure_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=512,
-                    response_mime_type="application/json"
-                )
-            )
+        )
         
         return json.loads(response.text)
 
@@ -1219,162 +1246,136 @@ class GeminiService:
         section_index = min((block_num - 1) // blocks_per_section, len(content_sections) - 1)
         current_section = content_sections[section_index] if content_sections else {"section_title": f"Week {week_num} Content", "topics": []}
         
-        if textbook_content.startswith("GEMINI_FILE_URI:"):
-            gemini_file_uri = textbook_content.replace("GEMINI_FILE_URI:", "")
-            uploaded_file = genai.get_file(gemini_file_uri)
-            
-            block_prompt = f"""
-            Generate a detailed learning block based on the uploaded textbook content.
-            
-            **CRITICAL CONTENT FILTERING:**
-            - SKIP and IGNORE any "Table of Contents", "Course Outline", "Index", or "Syllabus" pages
-            - SKIP any "Chapter Overview", "Summary", or "Learning Outcomes" pages that come BEFORE actual content
-            - ONLY extract content from the ACTUAL LESSON PAGES (substantive educational material)
-            - Look for explanations, examples, diagrams, and main body text
-            - If you encounter outline/ToC content, skip ahead to find the real chapter content
-            - DO NOT include meta-information about the course structure in the lesson content
-            
-            BLOCK CONTEXT:
-            - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
-            - Target Section: {current_section.get('section_title', 'General Content')}
-            - Section Topics: {', '.join(current_section.get('topics', []))}
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max}
-            - Difficulty: {difficulty_level}
-            
-            COURSE CONTEXT:
-            Course Title: {course_outline.get('title', 'Course')}
-            Course Description: {course_outline.get('description', '')}
-            Previous Learning: {"First block" if block_num == 1 else f"Building on previous {block_num-1} blocks"}
-            
-            Generate a JSON block with this exact structure:
-            {{
-                "week": {week_num},
-                "block_number": {block_in_week},
-                "title": "Specific block title from textbook content",
-                "description": "What students will learn in this block",
-                "learning_objectives": [
-                    "Specific objective 1 from textbook",
-                    "Specific objective 2 from textbook",
-                    "Specific objective 3 from textbook"
-                ],
-                "content": "Detailed lesson content extracted from textbook (400-600 words)",
-                "duration_minutes": 45,
-                "visual_elements": ["Any diagrams/images referenced", "Charts or illustrations"],
-                "resources": [
-                    {{"type": "article", "title": "Resource Title", "url": "placeholder", "search_query": "specific search terms"}},
-                    {{"type": "video", "title": "Video Title", "url": "placeholder", "search_query": "YouTube search terms"}}
-                ],
-                "assignments": [
+        if textbook_content.startswith("INLINE_FILE:"):
+            # Parse the inline file marker: INLINE_FILE:[mime_type]:[base64_data]:[filename]
+            parts = textbook_content.split(":", 3)
+            if len(parts) >= 4:
+                mime_type = parts[1]
+                content_b64 = parts[2]
+                filename = parts[3]
+                
+                try:
+                    file_bytes = base64.b64decode(content_b64)
+                    inline_part = build_inline_part(
+                        data=file_bytes,
+                        mime_type=mime_type,
+                        display_name=filename
+                    )
+                    
+                    block_prompt = f"""
+                    Generate a detailed learning block based on the uploaded textbook content.
+                    
+                    **CRITICAL CONTENT FILTERING:**
+                    - SKIP and IGNORE any "Table of Contents", "Course Outline", "Index", or "Syllabus" pages
+                    - SKIP any "Chapter Overview", "Summary", or "Learning Outcomes" pages that come BEFORE actual content
+                    - ONLY extract content from the ACTUAL LESSON PAGES (substantive educational material)
+                    - Look for explanations, examples, diagrams, and main body text
+                    - If you encounter outline/ToC content, skip ahead to find the real chapter content
+                    - DO NOT include meta-information about the course structure in the lesson content
+                    
+                    BLOCK CONTEXT:
+                    - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
+                    - Target Section: {current_section.get('section_title', 'General Content')}
+                    - Section Topics: {', '.join(current_section.get('topics', []))}
+                    - Subject: {subject}
+                    - Target Age: {age_min}-{age_max}
+                    - Difficulty: {difficulty_level}
+                    
+                    COURSE CONTEXT:
+                    Course Title: {course_outline.get('title', 'Course')}
+                    Course Description: {course_outline.get('description', '')}
+                    Previous Learning: {"First block" if block_num == 1 else f"Building on previous {block_num-1} blocks"}
+                    
+                    Generate a JSON block with this exact structure:
                     {{
-                        "title": "Block Assignment Title",
-                        "description": "Assignment based on block content",
-                        "type": "homework",
-                        "duration_minutes": 30,
-                        "points": 100,
-                        "rubric": "Clear grading criteria",
-                        "due_days_after_block": 3
+                        "week": {week_num},
+                        "block_number": {block_in_week},
+                        "title": "Specific block title from textbook content",
+                        "description": "What students will learn in this block",
+                        "learning_objectives": [
+                            "Specific objective 1 from textbook",
+                            "Specific objective 2 from textbook",
+                            "Specific objective 3 from textbook"
+                        ],
+                        "content": "Detailed lesson content extracted from textbook (400-600 words)",
+                        "duration_minutes": 45,
+                        "visual_elements": ["Any diagrams/images referenced", "Charts or illustrations"],
+                        "resources": [
+                            {{"type": "article", "title": "Resource Title", "url": "placeholder", "search_query": "specific search terms"}},
+                            {{"type": "video", "title": "Video Title", "url": "placeholder", "search_query": "YouTube search terms"}}
+                        ],
+                        "assignments": [
+                            {{
+                                "title": "Block Assignment Title",
+                                "description": "Assignment based on block content",
+                                "type": "homework",
+                                "duration_minutes": 30,
+                                "points": 100,
+                                "rubric": "Clear grading criteria",
+                                "due_days_after_block": 3
+                            }}
+                        ]
                     }}
-                ]
-            }}
-            
-            IMPORTANT:
-            - Focus ONLY on content for THIS specific block
-            - Extract relevant ACTUAL LESSON CONTENT from the textbook (NOT outlines or ToC)
-            - Ensure age-appropriate language and complexity
-            - Build on previous blocks if this is not the first block
-            - Make it comprehensive but focused
-            - VERIFY you're extracting from actual educational content, not meta-pages
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                [uploaded_file, block_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.6,
-                    max_output_tokens=1024,  # Reduced for free tier
-                    response_mime_type="application/json"
-                )
+                    
+                    IMPORTANT:
+                    - Focus ONLY on content for THIS specific block
+                    - Extract relevant ACTUAL LESSON CONTENT from the textbook (NOT outlines or ToC)
+                    - Ensure age-appropriate language and complexity
+                    - Build on previous blocks if this is not the first block
+                    - Make it comprehensive but focused
+                    - VERIFY you're extracting from actual educational content, not meta-pages
+                    """
+                    
+                    response = await asyncio.to_thread(
+                        self.config.model.generate_content,
+                        [inline_part, block_prompt],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.6,
+                            max_output_tokens=1024,  # Reduced for free tier
+                            response_mime_type="application/json"
+                        )
+                    )
+                    
+                    return json.loads(response.text)
+                except Exception as e:
+                    logger.error(f"Error processing inline file for block: {e}")
+                    # Fall through to text-based processing
+            else:
+                logger.error("Invalid INLINE_FILE marker format")
+                # Fall through to text-based processing
+        
+        # Handle direct text content - extract relevant portion
+        content_chunk_size = len(textbook_content) // total_blocks
+        start_pos = (block_num - 1) * content_chunk_size
+        end_pos = min(start_pos + content_chunk_size + 500, len(textbook_content))  # Overlap for context
+        content_chunk = textbook_content[start_pos:end_pos]
+        
+        block_prompt = f"""
+        Generate a detailed learning block based on this textbook content section.
+        
+        TEXTBOOK CONTENT (Section {block_num}):
+        {content_chunk}
+        
+        BLOCK CONTEXT:
+        - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
+        - Subject: {subject}
+        - Target Age: {age_min}-{age_max}
+        - Difficulty: {difficulty_level}
+        
+        Generate the same JSON structure as specified above...
+        """
+        
+        response = await asyncio.to_thread(
+            self.config.model.generate_content,
+            block_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.6,
+                max_output_tokens=1024,
+                response_mime_type="application/json"
             )
-        else:
-            # Handle direct text content - extract relevant portion
-            content_chunk_size = len(textbook_content) // total_blocks
-            start_pos = (block_num - 1) * content_chunk_size
-            end_pos = min(start_pos + content_chunk_size + 500, len(textbook_content))  # Overlap for context
-            content_chunk = textbook_content[start_pos:end_pos]
-            
-            block_prompt = f"""
-            Generate a detailed learning block based on this textbook content section.
-            
-            TEXTBOOK CONTENT (Section {block_num}):
-            {content_chunk}
-            
-            BLOCK CONTEXT:
-            - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max}
-            - Difficulty: {difficulty_level}
-            
-            Generate the same JSON structure as above...
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                block_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.6,
-                    max_output_tokens=1024,
-                    response_mime_type="application/json"
-                )
-            )
+        )
         
-        block_data = json.loads(response.text)
-        
-        # Ensure correct week and block numbers
-        block_data["week"] = week_num
-        block_data["block_number"] = block_in_week
-        
-        # Replace placeholder URLs with actual URLs
-        if "resources" in block_data and block_data["resources"]:
-            print(f"🔗 Generating actual resource URLs for block {block_num}...")
-            enhanced_resources = []
-            
-            for resource in block_data["resources"]:
-                resource_type = resource.get("type", "article")
-                search_query = resource.get("search_query", resource.get("title", ""))
-                
-                if resource_type == "video":
-                    # Generate actual YouTube URL
-                    youtube_links = await self.generate_youtube_links(search_query, count=1)
-                    if youtube_links:
-                        enhanced_resources.append({
-                            "type": "video",
-                            "title": youtube_links[0].get("title", resource.get("title")),
-                            "url": youtube_links[0].get("url"),
-                            "search_query": search_query
-                        })
-                    else:
-                        enhanced_resources.append(resource)
-                else:
-                    # Generate actual article URL
-                    article_links = await self.generate_article_links(search_query, subject, count=1)
-                    if article_links:
-                        enhanced_resources.append({
-                            "type": "article",
-                            "title": article_links[0].get("title", resource.get("title")),
-                            "url": article_links[0].get("url"),
-                            "search_query": search_query
-                        })
-                    else:
-                        enhanced_resources.append(resource)
-                
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(0.5)
-            
-            block_data["resources"] = enhanced_resources
-            print(f"✅ Enhanced {len(enhanced_resources)} resources with actual URLs")
-        
-        return block_data
+        return json.loads(response.text)
 
     async def _generate_overall_assignments(
         self, course_outline: Dict, generated_blocks: List[Dict], total_weeks: int
@@ -2213,15 +2214,35 @@ class GeminiService:
         submission_type: str = "homework",
     ) -> Dict[str, Any]:
         """
-        Grade a student submission by uploading the PDF/image document directly to Gemini.
+        Grade a student submission by sending the file directly to Gemini as an inline attachment.
 
-        This uses Gemini's native file processing (incl. OCR for image-based PDFs) and applies
-        the same grading rubric used by grade_submission(). Returns a normalized JSON payload.
+        This bypasses the Files API entirely, avoiding the RAG store requirement.
+        Uses inline base64-encoded data for all file types.
+
+        Returns a normalized JSON payload.
         """
         try:
-            # Upload file and get Gemini file URI
-            gemini_file_uri = await self.upload_file_to_gemini(file_bytes, filename)
-            uploaded_file = genai.get_file(gemini_file_uri)
+            # Determine MIME type
+            file_extension = Path(filename).suffix.lower()
+            mime_types_map = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types_map.get(file_extension, 'application/octet-stream')
+
+            # Build inline part from file bytes
+            inline_part = build_inline_part(
+                data=file_bytes,
+                mime_type=mime_type,
+                display_name=filename
+            )
 
             grading_prompt = f"""
             You are an expert educational assessor. Read the attached submission file in full
@@ -2258,7 +2279,7 @@ class GeminiService:
 
             grade_result = await self._generate_json_response(
                 grading_prompt,
-                attachments=[uploaded_file],
+                attachments=[inline_part],
                 temperature=0.25,
                 max_output_tokens=2048,
             )
@@ -2290,7 +2311,7 @@ class GeminiService:
         except Exception as e:
             fallback_error = str(e)
 
-            # Retry with strict minimal schema to force a percentage before falling back to OCR
+            # Retry with strict minimal schema
             try:
                 strict_grade = await self.grade_submission_from_file_strict(
                     file_bytes=file_bytes,
@@ -2375,11 +2396,31 @@ class GeminiService:
     ) -> Dict[str, Any]:
         """
         Second-pass grading with a stricter prompt requiring a numeric percentage (0-100).
+        Uses inline attachment instead of file upload to avoid RAG store requirement.
         Returns a minimal JSON payload to maximize compliance when initial grading omitted numeric score.
         """
         try:
-            gemini_file_uri = await self.upload_file_to_gemini(file_bytes, filename)
-            uploaded_file = genai.get_file(gemini_file_uri)
+            # Determine MIME type
+            file_extension = Path(filename).suffix.lower()
+            mime_types_map = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types_map.get(file_extension, 'application/octet-stream')
+
+            # Build inline part from file bytes
+            inline_part = build_inline_part(
+                data=file_bytes,
+                mime_type=mime_type,
+                display_name=filename
+            )
 
             strict_prompt = f"""
             You are an automated grader. Read the attached submission in full.
@@ -2403,7 +2444,7 @@ class GeminiService:
 
             data = await self._generate_json_response(
                 strict_prompt,
-                attachments=[uploaded_file],
+                attachments=[inline_part],
                 temperature=0.1,
                 max_output_tokens=512,
             )
@@ -2512,7 +2553,13 @@ class GeminiService:
             }
 
     async def upload_file_to_gemini(self, file_content: bytes, filename: str, mime_type: str = None) -> str:
-        """Upload a file for Gemini processing with resilient retries to handle transient IO issues."""
+        """🚫 DEPRECATED: This method uses genai.upload_file() which requires RAG store.
+        
+        All callers have been migrated to use inline attachments via build_inline_part().
+        This method is kept for reference only and should NOT be used in new code.
+        
+        Upload a file for Gemini processing with resilient retries to handle transient IO issues.
+        """
         import tempfile
         import time
 
@@ -2601,20 +2648,19 @@ class GeminiService:
 
     async def process_uploaded_textbook_file(self, file_content: bytes, filename: str) -> str:
         """
-        Process uploaded textbook file using Gemini's native capabilities
-        Returns the Gemini file URI for direct use in prompts
+        Process uploaded textbook file by converting to inline attachment for Gemini processing.
         
-        This method leverages Gemini's multimodal capabilities to:
-        - Read PDFs with images and scanned content
-        - Process Word documents with embedded media
-        - Handle mixed content (text + images)
-        - Extract text from image-based documents
+        Returns the file content in a format suitable for course generation:
+        - For small text files: returns extracted text directly
+        - For large files and PDFs: returns base64-encoded inline data marker
+        
+        This bypasses the Files API entirely, avoiding RAG store requirements.
         """
         try:
             # Get file extension and validate
             file_extension = Path(filename).suffix.lower()
             
-            # For text files, we can still extract content directly for faster processing
+            # For text files, we can extract content directly for faster processing
             if file_extension == '.txt' and len(file_content) < 100000:  # < 100KB
                 try:
                     text_content = file_content.decode('utf-8', errors='ignore')
@@ -2622,14 +2668,32 @@ class GeminiService:
                         print(f"📝 Processing text file directly: {len(text_content)} characters")
                         return text_content
                 except UnicodeDecodeError:
-                    pass  # Fall through to Gemini processing
+                    pass  # Fall through to inline processing
             
-            # For all other files or large text files, use Gemini's native processing
-            print(f"🤖 Using Gemini native processing for {filename}")
-            gemini_file_uri = await self.upload_file_to_gemini(file_content, filename)
+            # For all other files or large text files, prepare as inline attachment marker
+            # We encode the file content in base64 so it can be decoded later
+            file_extension_marker = file_extension or ".bin"
+            mime_type_map = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_type_map.get(file_extension, 'application/octet-stream')
             
-            # Return a special marker that indicates this is a Gemini file reference
-            return f"GEMINI_FILE_URI:{gemini_file_uri}"
+            # Create an inline attachment marker that includes base64-encoded content
+            content_b64 = base64.b64encode(file_content).decode('utf-8')
+            
+            print(f"🤖 Prepared {filename} ({len(file_content)} bytes) for inline Gemini processing")
+            
+            # Return special marker format so course generation knows to use inline attachment
+            # Format: INLINE_FILE:[mime_type]:[base64_data]
+            return f"INLINE_FILE:{mime_type}:{content_b64}:{filename}"
             
         except Exception as e:
             raise Exception(f"Error processing file '{filename}': {str(e)}")
@@ -2755,14 +2819,33 @@ class GeminiService:
         mime_type: Optional[str],
         learner_notes: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Analyze an uploaded learner artifact (e.g., photo of work) and return actionable feedback."""
+        """Analyze an uploaded learner artifact (e.g., photo of work) using inline attachments."""
+        from tools.inline_attachment import build_inline_part
+        import mimetypes
 
         attachments: List[Any] = []
 
         if file_path and Path(file_path).exists():
-            uploaded = genai.upload_file(path=file_path, display_name=Path(file_path).name)
-            processed_file = self._wait_for_file_processing(uploaded)
-            attachments.append(processed_file)
+            try:
+                # Read file and build inline part
+                file_bytes = Path(file_path).read_bytes()
+                
+                # Determine MIME type
+                if not mime_type:
+                    mime_type, _ = mimetypes.guess_type(file_path)
+                    if not mime_type:
+                        mime_type = 'application/octet-stream'
+                
+                # Create inline attachment
+                inline_part = build_inline_part(
+                    data=file_bytes,
+                    mime_type=mime_type,
+                    display_name=Path(file_path).name
+                )
+                attachments.append(inline_part)
+                print(f"✅ Loaded artifact for analysis: {Path(file_path).name} ({len(file_bytes)} bytes)")
+            except Exception as e:
+                print(f"⚠️ Failed to load artifact {file_path}: {e}")
 
         analysis_prompt = (
             "You are an expert tutor reviewing a learner submission.\n"
@@ -2851,6 +2934,12 @@ class GeminiService:
         }
 
     def _wait_for_file_processing(self, uploaded_file):
+        """🚫 DEPRECATED: No longer needed with inline attachments.
+        
+        This method was part of the old Files API approach which required RAG store.
+        All callers have been migrated to use inline attachments.
+        Kept for reference only - do not use in new code.
+        """
         import time
 
         max_wait = 30
@@ -2878,11 +2967,11 @@ class GeminiService:
         submission_type: str = "homework",
     ) -> Dict[str, Any]:
         """
-        Grade a student submission by uploading multiple images directly to Gemini.
+        Grade a student submission by sending multiple images directly to Gemini as inline attachments.
         
-        This sends images directly without converting to PDF, which is more reliable
-        for AI processing and avoids PDF conversion errors.
-        
+        This sends images directly as inline base64 data without converting to PDF, which is more reliable
+        for AI processing and avoids the RAG store requirement.
+
         Args:
             image_files: List of image file bytes
             image_filenames: List of corresponding filenames
@@ -2896,18 +2985,32 @@ class GeminiService:
             Dict with grading results including score, feedback, strengths, etc.
         """
         try:
-            # Upload all images to Gemini
-            uploaded_files = []
+            # Build inline parts for all images
+            inline_parts = []
             for img_bytes, img_filename in zip(image_files, image_filenames):
-                gemini_file_uri = await self.upload_file_to_gemini(img_bytes, img_filename)
-                uploaded_file = genai.get_file(gemini_file_uri)
-                uploaded_files.append(uploaded_file)
+                # Detect image MIME type
+                file_extension = Path(img_filename).suffix.lower()
+                mime_types_map = {
+                    '.png': 'image/png',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp'
+                }
+                mime_type = mime_types_map.get(file_extension, 'image/jpeg')
+                
+                part = build_inline_part(
+                    data=img_bytes,
+                    mime_type=mime_type,
+                    display_name=img_filename
+                )
+                inline_parts.append(part)
             
-            print(f"✅ Uploaded {len(uploaded_files)} images to Gemini for grading")
+            print(f"✅ Prepared {len(inline_parts)} images as inline attachments for grading")
             
             # Create grading prompt
             grading_prompt = f"""
-            You are an expert educational assessor. Review ALL {len(uploaded_files)} attached images 
+            You are an expert educational assessor. Review ALL {len(inline_parts)} attached images 
             which represent a student's submission, and grade them with detailed analysis.
 
             ASSIGNMENT DETAILS:
@@ -2941,10 +3044,10 @@ class GeminiService:
             }}
             """
 
-            # Generate grading with all images attached
+            # Generate grading with all images attached inline
             grade_result = await self._generate_json_response(
                 grading_prompt,
-                attachments=uploaded_files,
+                attachments=inline_parts,
                 temperature=0.25,
                 max_output_tokens=2048,
             )
@@ -2974,7 +3077,7 @@ class GeminiService:
             grade_result["graded_by"] = "Gemini AI"
             grade_result["graded_at"] = datetime.utcnow().isoformat()
             grade_result["max_points"] = max_points
-            grade_result["images_count"] = len(uploaded_files)
+            grade_result["images_count"] = len(inline_parts)
 
             return grade_result
 
@@ -2999,7 +3102,5 @@ class GeminiService:
                 "images_count": len(image_files),
                 "error": str(e),
             }
-
-
 # Singleton instance
 gemini_service = GeminiService()
