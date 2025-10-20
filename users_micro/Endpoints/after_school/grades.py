@@ -54,6 +54,19 @@ async def mark_block_done(
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
 
+        # CRITICAL: Check user is enrolled in the course before allowing progress marking
+        # User must have at least one StudentAssignment in this course to mark content as done
+        user_enrollment = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == session_data.course_id
+        ).first()
+        
+        if not user_enrollment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course. Please enroll before accessing course content."
+            )
+
         # Determine if working with lesson or block
         lesson = None
         block = None

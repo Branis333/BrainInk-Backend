@@ -1987,6 +1987,18 @@ async def submit_assignment_and_auto_grade(
         course = db.query(Course).filter(Course.id == course_id).first()
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
+        
+        # CRITICAL: Verify user is enrolled in the course before allowing submission
+        user_enrollment = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == course_id
+        ).first()
+        
+        if not user_enrollment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course. Please enroll before submitting assignments."
+            )
             
         assignment = db.query(CourseAssignment).filter(
             and_(

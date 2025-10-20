@@ -307,6 +307,19 @@ async def bulk_upload_images_to_pdf_session(
                 detail="Course not found"
             )
         
+        # CRITICAL: Check user is enrolled in the course before allowing assignment submission
+        # User must have at least one StudentAssignment in this course to submit work
+        user_enrollment = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == course_id
+        ).first()
+        
+        if not user_enrollment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course. Please enroll before submitting assignments."
+            )
+        
         # Validate block or lesson exists and belongs to the course
         block = None
         lesson = None
