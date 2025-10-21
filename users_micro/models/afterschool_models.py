@@ -284,3 +284,95 @@ class StudentProgress(Base):
     __table_args__ = (
         UniqueConstraint('user_id', 'course_id', name='uq_as_student_progress'),
     )
+
+
+# ===============================
+# STUDENT NOTES & AI ANALYSIS
+# ===============================
+
+class StudentNote(Base):
+    """
+    Model for student-uploaded notes with AI analysis using Gemini Vision
+    Students upload school notes as images, and Gemini Vision AI directly analyzes them
+    
+    STANDALONE FEATURE: Notes are independent and NOT tied to courses or assignments
+    course_id is optional and only used for organizational purposes
+    """
+    __tablename__ = "as_student_notes"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)  # student user_id (no FK constraint)
+    course_id = Column(Integer, ForeignKey("as_courses.id"), nullable=True)  # Optional: for organization only
+    
+    # Note metadata
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    subject = Column(String(100), nullable=True)  # e.g., Math, Science, English
+    tags = Column(JSON, nullable=True)  # Array of tags for organization
+    
+    # File information
+    original_filename = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=True)  # Path to uploaded file (primary image)
+    file_size = Column(Integer, nullable=True)  # Size in bytes (total for all images)
+    file_type = Column(String(50), nullable=False)  # "images" for Gemini Vision workflow
+    
+    # Raw content (DEPRECATED for Vision workflow - kept for backward compatibility)
+    extracted_text = Column(Text, nullable=True)  # Not used with Gemini Vision
+    
+    # AI Analysis Results (from Gemini Vision)
+    ai_processed = Column(Boolean, default=False)
+    summary = Column(Text, nullable=True)  # AI-generated summary of notes
+    key_points = Column(JSON, nullable=True)  # Array of key points extracted
+    main_topics = Column(JSON, nullable=True)  # Array of main topics/concepts
+    learning_concepts = Column(JSON, nullable=True)  # Key learning concepts
+    questions_generated = Column(JSON, nullable=True)  # AI-generated questions based on notes
+    
+    # Processing status
+    processing_status = Column(String(50), default="pending")  # pending, processing, completed, failed
+    processing_error = Column(Text, nullable=True)  # Error message if processing failed
+    processed_at = Column(DateTime, nullable=True)
+    
+    # Metadata
+    is_public = Column(Boolean, default=False)  # Share with classmates
+    is_starred = Column(Boolean, default=False)  # User marked as favorite
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    course = relationship("Course", foreign_keys=[course_id])
+    
+    __table_args__ = (
+        UniqueConstraint('user_id', 'original_filename', 'created_at', name='uq_as_student_note_file'),
+    )
+
+
+class NoteAnalysisLog(Base):
+    """
+    Log of AI analysis attempts for notes using Gemini Vision
+    Tracks processing history, errors, and retries
+    """
+    __tablename__ = "as_note_analysis_logs"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    note_id = Column(Integer, ForeignKey("as_student_notes.id"), nullable=False)
+    user_id = Column(Integer, nullable=False)  # student user_id
+    
+    # Processing details
+    processing_type = Column(String(50), nullable=False)  # vision_analysis, extraction, etc.
+    status = Column(String(50), nullable=False)  # pending, processing, completed, failed
+    
+    # Results
+    processing_duration_seconds = Column(Float, nullable=True)
+    error_message = Column(Text, nullable=True)
+    result_data = Column(JSON, nullable=True)  # Detailed results from Gemini Vision
+    
+    # Retry tracking
+    attempt_number = Column(Integer, default=1)
+    max_attempts = Column(Integer, default=3)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    note = relationship("StudentNote", foreign_keys=[note_id])
