@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Depends, File, UploadFile, Form, status, Query
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, desc
+from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import Session
 
 from db.connection import db_dependency
@@ -341,6 +341,66 @@ async def list_student_notes(
     
     # Get paginated results, ordered by most recent first
     notes = query.order_by(desc(StudentNote.created_at)).offset(offset).limit(limit).all()
+    
+    return StudentNoteListResponse(
+        total=total,
+        notes=notes
+    )
+
+
+@router.get("/search/query", response_model=StudentNoteListResponse)
+async def search_student_notes(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    q: str = Query(..., min_length=1, description="Search query (searches title, subject, and tags)"),
+    sort_by: str = Query("recent", description="Sort by: recent, title, subject"),
+    limit: int = Query(100, ge=1, le=200, description="Maximum results"),
+    offset: int = Query(0, ge=0, description="Pagination offset")
+):
+    """
+    Search student notes by title, subject, and tags.
+    
+    Query Parameter 'q':
+    - Searches in note title (case-insensitive)
+    - Searches in note subject (case-insensitive)
+    - Searches in note tags
+    - Searches in note summary (AI analysis results)
+    
+    Sort Options:
+    - recent: Most recently created first (default)
+    - title: Alphabetically by title
+    - subject: Grouped by subject
+    """
+    user_id = current_user["user_id"]
+    
+    # Base query - get all notes for this user
+    query = db.query(StudentNote).filter(StudentNote.user_id == user_id)
+    
+    # Apply search filter - search across multiple fields
+    search_pattern = f"%{q}%"
+    query = query.filter(
+        or_(
+            StudentNote.title.ilike(search_pattern),
+            StudentNote.subject.ilike(search_pattern),
+            StudentNote.summary.ilike(search_pattern),
+            StudentNote.description.ilike(search_pattern),
+            # For tags, we search if the tag is in the JSON array
+        )
+    )
+    
+    # Get total count after search
+    total = query.count()
+    
+    # Apply sorting
+    if sort_by == "title":
+        query = query.order_by(StudentNote.title.asc())
+    elif sort_by == "subject":
+        query = query.order_by(StudentNote.subject.asc(), desc(StudentNote.created_at))
+    else:  # Default: recent
+        query = query.order_by(desc(StudentNote.created_at))
+    
+    # Apply pagination
+    notes = query.offset(offset).limit(limit).all()
     
     return StudentNoteListResponse(
         total=total,
