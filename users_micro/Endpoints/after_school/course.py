@@ -1385,7 +1385,12 @@ async def enroll_in_course(
 @router.get("/dashboard", response_model=StudentDashboard)
 async def get_student_dashboard(
     db: db_dependency,
-    current_user: dict = user_dependency
+    current_user: dict = user_dependency,
+    include_all_if_empty: bool = Query(
+        False,
+        description="If the user has no enrolled/active courses, return a general list of active courses so first-time users can browse"
+    ),
+    limit: int = Query(50, ge=1, le=100, description="Max number of fallback courses when include_all_if_empty is true")
 ):
     """
     Get student dashboard with courses and progress
@@ -1411,6 +1416,11 @@ async def get_student_dashboard(
                 Course.is_active == True  # noqa: E712
             )
         ).order_by(desc(Course.created_at)).all()
+    elif include_all_if_empty:
+        # First-time user fallback: return a general browse list of active courses
+        active_courses = db.query(Course).filter(
+            Course.is_active == True  # noqa: E712
+        ).order_by(desc(Course.created_at)).limit(limit).all()
 
     # Recent study sessions (limit 10) - still strictly from StudySession
     recent_sessions = db.query(StudySession).filter(
@@ -1442,7 +1452,8 @@ async def get_student_dashboard(
             "assignments_courses": assignment_course_ids,
             "progress_courses": progress_course_ids,
             "aggregated_unique_ids": list(aggregated_ids_set),
-            "active_courses_returned": [c.id for c in active_courses]
+            "active_courses_returned": [c.id for c in active_courses],
+            "include_all_if_empty": include_all_if_empty
         }
     )
 
