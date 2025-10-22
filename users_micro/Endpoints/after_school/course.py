@@ -1386,41 +1386,19 @@ async def enroll_in_course(
 async def get_student_dashboard(
     db: db_dependency,
     current_user: dict = user_dependency,
-    include_all_if_empty: bool = Query(
-        False,
-        description="If the user has no enrolled/active courses, return a general list of active courses so first-time users can browse"
-    ),
-    limit: int = Query(50, ge=1, le=100, description="Max number of fallback courses when include_all_if_empty is true")
+    limit: int = Query(50, ge=1, le=100, description="Max number of courses to return for discovery dashboard")
 ):
     """
-    Get student dashboard with courses and progress
+    Discovery dashboard: return active courses for everyone, plus the user's recent sessions and progress.
+
+    - Intended for the home page to introduce courses to all users (even brand new).
+    - Returns the latest active courses (not just enrolled ones).
+    - Still provides user's sessions/progress for personalization where available.
     """
     user_id = current_user["user_id"]
 
-    # ------------------------------
-    # Multi-source course aggregation
-    # ------------------------------
-    # Collect course IDs from: study sessions, student assignments, student progress
-    session_course_ids = [cid for (cid,) in db.query(StudySession.course_id).filter(StudySession.user_id == user_id).distinct().all()]
-    assignment_course_ids = [cid for (cid,) in db.query(StudentAssignment.course_id).filter(StudentAssignment.user_id == user_id).distinct().all()]
-    progress_course_ids = [cid for (cid,) in db.query(StudentProgress.course_id).filter(StudentProgress.user_id == user_id).distinct().all()]
-
-    aggregated_ids_set = set(session_course_ids) | set(assignment_course_ids) | set(progress_course_ids)
-
-    # Fetch active courses for all collected IDs
-    active_courses = []
-    if aggregated_ids_set:
-        active_courses = db.query(Course).filter(
-            and_(
-                Course.id.in_(aggregated_ids_set),
-                Course.is_active == True  # noqa: E712
-            )
-        ).order_by(desc(Course.created_at)).all()
-    elif include_all_if_empty:
-        # First-time user fallback: return a general browse list of active courses
-        active_courses = db.query(Course).filter(
-            Course.is_active == True  # noqa: E712
-        ).order_by(desc(Course.created_at)).limit(limit).all()
+    # All active courses (discovery)
+    active_courses = db.query(Course).filter(Course.is_active == True).order_by(desc(Course.created_at)).limit(limit).all()  # noqa: E712
 
     # Recent study sessions (limit 10) - still strictly from StudySession
     recent_sessions = db.query(StudySession).filter(
@@ -1445,15 +1423,10 @@ async def get_student_dashboard(
 
     # Debug logging to verify aggregation sources
     print(
-        "📊 Dashboard aggregation:",
+        "📊 Dashboard discovery:",
         {
             "user_id": user_id,
-            "sessions_courses": session_course_ids,
-            "assignments_courses": assignment_course_ids,
-            "progress_courses": progress_course_ids,
-            "aggregated_unique_ids": list(aggregated_ids_set),
             "active_courses_returned": [c.id for c in active_courses],
-            "include_all_if_empty": include_all_if_empty
         }
     )
 
@@ -1461,6 +1434,76 @@ async def get_student_dashboard(
     for course in active_courses:
         if course.image:
             course.image = image_service.encode_image_to_base64(course.image)
+
+    return StudentDashboard(
+        user_id=user_id,
+        active_courses=active_courses,
+        recent_sessions=recent_sessions,
+        progress_summary=progress_summary,
+        total_study_time=total_study_time,
+        average_score=average_score
+    )
+
+@router.get("/my-courses", response_model=StudentDashboard)
+async def get_my_courses(
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Return only the user's enrolled courses (true enrollments via StudentAssignment),
+    along with progress and recent sessions scoped to those courses.
+    """
+    user_id = current_user["user_id"]
+
+    # Enrolled course IDs via student assignments
+    enrolled_course_ids = [cid for (cid,) in db.query(StudentAssignment.course_id).filter(StudentAssignment.user_id == user_id).distinct().all()]
+
+    active_courses = []
+    if enrolled_course_ids:
+        active_courses = db.query(Course).filter(
+            and_(
+                Course.id.in_(enrolled_course_ids),
+                Course.is_active == True  # noqa: E712
+            )
+        ).order_by(desc(Course.created_at)).all()
+
+    # Encode images
+    for course in active_courses:
+        if course.image:
+            course.image = image_service.encode_image_to_base64(course.image)
+
+    # Sessions and progress limited to enrolled courses
+    recent_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.course_id.in_(enrolled_course_ids) if enrolled_course_ids else True
+        )
+    ).order_by(StudySession.started_at.desc()).limit(10).all()
+
+    progress_query = db.query(StudentProgress).filter(StudentProgress.user_id == user_id)
+    if enrolled_course_ids:
+        progress_query = progress_query.filter(StudentProgress.course_id.in_(enrolled_course_ids))
+    progress_summary = progress_query.all()
+
+    # Totals/averages from sessions
+    all_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.duration_minutes.isnot(None)
+        )
+    ).all()
+    total_study_time = sum((s.duration_minutes or 0) for s in all_sessions)
+    scored_sessions = [s for s in all_sessions if s.ai_score is not None]
+    average_score = (sum(s.ai_score for s in scored_sessions) / len(scored_sessions)) if scored_sessions else None
+
+    print(
+        "📚 My Courses:",
+        {
+            "user_id": user_id,
+            "enrolled_course_ids": enrolled_course_ids,
+            "active_courses_returned": [c.id for c in active_courses]
+        }
+    )
 
     return StudentDashboard(
         user_id=user_id,
