@@ -5,19 +5,34 @@ from enum import Enum
 import io
 import os
 import tempfile
+import librosa
+import soundfile as sf
 from pydub import AudioSegment
+from typing import Optional, Tuple, Dict, Any, List
+from datetime import datetime, timedelta
+import json
+import time
+import asyncio
+import aiofiles
+import io
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
-import asyncio
+
 from utils.speech_flags import WHISPER_AVAILABLE, SPEECH_RECOGNITION_AVAILABLE
 
-# Import the actual modules if available
+# Import Whisper if available
 if WHISPER_AVAILABLE:
     import whisper
 
+# Import SpeechRecognition if available
 if SPEECH_RECOGNITION_AVAILABLE:
     import speech_recognition as sr
+
+executor = ThreadPoolExecutor(max_workers=2)
+
+# Use environment variable for Whisper model size
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
 
 # Enums
 class TranscriptionEngine(str, Enum):
@@ -383,6 +398,7 @@ def process_webm_audio_with_whisper(audio_data, language, session_id, chunk_id):
             return None
         
         from pydub import AudioSegment
+        import os
         
         # Load WebM data directly into AudioSegment
         try:
@@ -392,18 +408,7 @@ def process_webm_audio_with_whisper(audio_data, language, session_id, chunk_id):
             )
         except Exception as e:
             print(f"Failed to load WebM data: {e}")
-            # Try as raw audio data
-            try:
-                # Assume it's raw PCM data
-                audio_segment = AudioSegment(
-                    data=audio_data,
-                    sample_width=2,  # 16-bit
-                    frame_rate=16000,
-                    channels=1
-                )
-            except Exception as e2:
-                print(f"Failed to load as raw PCM: {e2}")
-                return None
+            return None
         
         # Convert to optimal format for Whisper
         audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
@@ -417,27 +422,29 @@ def process_webm_audio_with_whisper(audio_data, language, session_id, chunk_id):
         elif audio_samples.dtype == np.int32:
             audio_samples = audio_samples.astype(np.float32) / 2147483648.0
         
-        # Load model (with caching)
+        # Load model (with caching) using environment variable
         if not hasattr(process_webm_audio_with_whisper, '_model'):
-            print("Loading Whisper model...")
-            process_webm_audio_with_whisper._model = whisper.load_model("base")
+            print(f"Loading Whisper model ({os.getenv('WHISPER_MODEL_SIZE', 'tiny')})...")
+            import whisper
+            process_webm_audio_with_whisper._model = whisper.load_model(os.getenv('WHISPER_MODEL_SIZE', 'tiny'))
             print("Whisper model cached")
         
         model = process_webm_audio_with_whisper._model
         
-        # Set language
+        # Set language with Afrikaans support
         whisper_language = None
         if language and language.lower() not in ['english', 'en']:
             lang_map = {
                 'spanish': 'es', 'french': 'fr', 'german': 'de',
                 'italian': 'it', 'portuguese': 'pt', 'russian': 'ru',
-                'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko'
+                'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko',
+                'arabic': 'ar', 'swahili': 'sw', 'afrikaans': 'af'  # Added Afrikaans
             }
             whisper_language = lang_map.get(language.lower(), language.lower()[:2])
         
-        # Transcribe directly from numpy array (no file needed!)
+        # Transcribe directly from numpy array
         result = model.transcribe(
-            audio_samples,  # Pass numpy array directly
+            audio_samples,
             language=whisper_language,
             verbose=False,
             fp16=False,
@@ -490,14 +497,15 @@ def process_webm_audio_with_google(audio_data, language, session_id, chunk_id):
         with sr.AudioFile(wav_buffer) as source:
             audio_data_sr = recognizer.record(source)
 
-        # Set language
+        # Set language with Afrikaans support
         google_language = 'en-US'
         if language:
             lang_map = {
                 'english': 'en-US', 'spanish': 'es-ES', 'french': 'fr-FR',
                 'german': 'de-DE', 'italian': 'it-IT', 'portuguese': 'pt-PT',
                 'russian': 'ru-RU', 'chinese': 'zh-CN', 'japanese': 'ja-JP',
-                'korean': 'ko-KR'
+                'korean': 'ko-KR', 'arabic': 'ar-SA', 'swahili': 'sw-KE',
+                'afrikaans': 'af-ZA'  # Added Afrikaans
             }
             google_language = lang_map.get(language.lower(), 'en-US')
 
@@ -509,81 +517,6 @@ def process_webm_audio_with_google(audio_data, language, session_id, chunk_id):
     except Exception as e:
         print(f"Google processing error: {e}")
         return None
-
-# WebSocket message handling (pseudo-code)
-async def handle_message(message, audio_buffer, session_id, chunk_id):
-    if message["type"] == "audio_chunk":
-        chunk_id += 1
-    
-        # Decode base64 audio data
-        try:
-            import base64
-            audio_data = base64.b64decode(message["audio_data"])
-            
-            # Skip very small chunks
-            if len(audio_data) < 1000:  # Increased threshold
-                return
-                
-            # Get MIME type if provided
-            mime_type = message.get("mime_type", "audio/webm;codecs=opus")
-            print(f"Received {len(audio_data)} bytes of {mime_type}")
-            
-            audio_buffer.append(audio_data)
-            # ...rest of your code...
-        except Exception as e:
-            print(f"Error processing audio chunk: {e}")
-
-async def process_streaming_audio(accumulated_audio, session_id, chunk_id, language, engine):
-    """Process accumulated streaming audio data"""
-    
-    try:
-        if len(accumulated_audio) < 5000:  # Need at least 5KB
-            return None
-        
-        print(f"Processing {len(accumulated_audio)} bytes of streaming audio for session {session_id}")
-        
-        # Use thread executor to avoid blocking
-        loop = asyncio.get_event_loop()
-        
-        if engine == TranscriptionEngine.WHISPER and WHISPER_AVAILABLE:
-            result = await loop.run_in_executor(
-                executor,
-                process_streaming_audio_with_whisper,
-                accumulated_audio,
-                language,
-                session_id,
-                chunk_id
-            )
-            
-            if result and result.get("text", "").strip():
-                return {
-                    "text": result["text"].strip(),
-                    "confidence": 0.8,
-                    "language": result.get("language", language)
-                }
-        
-        elif engine == TranscriptionEngine.GOOGLE and SPEECH_RECOGNITION_AVAILABLE:
-            result = await loop.run_in_executor(
-                executor,
-                process_streaming_audio_with_google,
-                accumulated_audio,
-                language,
-                session_id,
-                chunk_id
-            )
-            
-            if result and result.get("text", "").strip():
-                return {
-                    "text": result["text"],
-                    "confidence": 0.8,
-                    "language": language or "en"
-                }
-    
-    except Exception as e:
-        print(f"Error processing streaming audio: {e}")
-        return None
-    
-    return None
 
 def process_streaming_audio_with_whisper(audio_data, language, session_id, chunk_id):
     """Process streaming audio with Whisper - handles accumulated audio data"""
@@ -630,22 +563,23 @@ def process_streaming_audio_with_whisper(audio_data, language, session_id, chunk
         elif audio_segment.sample_width == 1:  # 8-bit PCM
             audio_samples = (audio_samples - 128) / 128.0
 
-        # Load model (with caching)
+        # Load model (with caching) using environment variable
         if not hasattr(process_streaming_audio_with_whisper, '_model'):
-            print("Loading Whisper model...")
+            print(f"Loading Whisper model ({os.getenv('WHISPER_MODEL_SIZE', 'tiny')})...")
             import whisper
-            process_streaming_audio_with_whisper._model = whisper.load_model("base")
+            process_streaming_audio_with_whisper._model = whisper.load_model(os.getenv('WHISPER_MODEL_SIZE', 'tiny'))
             print("Whisper model cached")
 
         model = process_streaming_audio_with_whisper._model
 
-        # Set language parameter
+        # Set language parameter with Afrikaans support
         whisper_language = None
         if language and language.lower() not in ['english', 'en']:
             lang_map = {
                 'spanish': 'es', 'french': 'fr', 'german': 'de',
                 'italian': 'it', 'portuguese': 'pt', 'russian': 'ru',
-                'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko'
+                'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko',
+                'arabic': 'ar', 'swahili': 'sw', 'afrikaans': 'af'  # Added Afrikaans
             }
             whisper_language = lang_map.get(language.lower(), language.lower()[:2])
 
@@ -736,7 +670,8 @@ def process_streaming_audio_with_google(audio_data, language, session_id, chunk_
                 'english': 'en-US', 'spanish': 'es-ES', 'french': 'fr-FR',
                 'german': 'de-DE', 'italian': 'it-IT', 'portuguese': 'pt-PT',
                 'russian': 'ru-RU', 'chinese': 'zh-CN', 'japanese': 'ja-JP',
-                'korean': 'ko-KR'
+                'korean': 'ko-KR', 'arabic': 'ar-SA', 'swahili': 'sw-KE',
+                'afrikaans': 'af-ZA'  # Added Afrikaans
             }
             google_language = lang_map.get(language.lower(), 'en-US')
 
@@ -748,3 +683,14 @@ def process_streaming_audio_with_google(audio_data, language, session_id, chunk_
     except Exception as e:
         print(f"Google streaming processing error: {e}")
         return None
+
+
+# Request/Response models for analysis endpoints
+class SpeakerRequest(BaseModel):
+    id: str
+    name: str
+    role: str = "participant"
+
+class AnalyzeSessionRequest(BaseModel):
+    speakers: Optional[List[SpeakerRequest]] = None
+

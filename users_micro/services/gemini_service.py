@@ -5,6 +5,8 @@ import asyncio
 import tempfile
 import mimetypes
 import logging
+import base64
+import copy
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -13,6 +15,8 @@ import google.generativeai as genai
 from pydantic import BaseModel
 import httpx
 from urllib.parse import quote_plus, urlencode
+from tools.inline_attachment import build_inline_part, build_text_part
+from google.generativeai import protos
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -30,16 +34,122 @@ class GeminiConfig:
         # Allow opting into paid models explicitly; default to free-only
         self.allow_paid = os.getenv("ALLOW_PAID_MODELS", "false").lower() in ("1", "true", "yes")
 
+        self.rag_store_name = os.getenv("GEMINI_RAG_STORE_NAME") or os.getenv("GOOGLE_RAG_STORE_NAME")
+        self.rag_region = os.getenv("GEMINI_RAG_REGION") or os.getenv("GOOGLE_RAG_REGION")
+
+        configure_kwargs: Dict[str, Any] = {"api_key": self.api_key}
+        metadata: List[Tuple[str, str]] = []
+
+        if self.rag_store_name:
+            metadata.append(("x-goog-rag-store-name", self.rag_store_name))
+        if self.rag_region:
+            metadata.append(("x-goog-region", self.rag_region))
+
+        if metadata:
+            configure_kwargs["default_metadata"] = tuple(metadata)
+
         print(f"🔑 Configuring Gemini AI with API key: {self.api_key[:10]}...{self.api_key[-4:]}")
         print(f"🤖 Requested model: {self.model_name} | allow_paid={self.allow_paid}")
-        genai.configure(api_key=self.api_key)
+        if self.rag_store_name:
+            print(f"🗄️ Using RAG store: {self.rag_store_name}")
+        elif os.getenv("REQUIRE_GEMINI_RAG_STORE", "true").lower() in ("1", "true", "yes"):
+            logger.warning("GEMINI_RAG_STORE_NAME not set; file uploads may fail with ragStoreName errors.")
+
+        genai.configure(**configure_kwargs)
 
         # Choose a supported model (respecting free-only unless ALLOW_PAID_MODELS=true)
         chosen = self._choose_supported_model(preferred_first=self.model_name)
         if chosen != self.model_name:
             print(f"🔁 Using fallback model: {chosen}")
         self.model_name = chosen
-        self.model = genai.GenerativeModel(self.model_name)
+
+        # Configure safety settings to BLOCK_NONE for all categories to avoid educational content blocks
+        self.safety_settings = self._build_safety_settings()
+
+        self.model = genai.GenerativeModel(
+            self.model_name,
+            safety_settings=self.get_safety_settings()
+        )
+        self._model_cache: Dict[str, Any] = {self.model_name: self.model}
+
+    def _build_safety_settings(self) -> Any:
+        """Build safety settings payload compatible with the installed SDK version."""
+        safety_cls = getattr(genai.types, "SafetySetting", None)
+        category_enum = getattr(genai.types, "HarmCategory", None)
+        threshold_enum = getattr(genai.types, "HarmBlockThreshold", None)
+
+        if safety_cls and category_enum and threshold_enum:
+            try:
+                members = getattr(category_enum, "__members__", {})
+                if members:
+                    return [
+                        safety_cls(
+                            category=member,
+                            threshold=threshold_enum.BLOCK_NONE,
+                        )
+                        for name, member in members.items()
+                        if name != "HARM_CATEGORY_UNSPECIFIED"
+                    ]
+            except Exception:
+                pass
+
+        # Fallback for older SDKs that accept simple dict mapping
+        fallback_categories = [
+            "HARM_CATEGORY_HARASSMENT",
+            "HARM_CATEGORY_HATE_SPEECH",
+            "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+            "HARM_CATEGORY_DANGEROUS_CONTENT",
+        ]
+        return {category: "BLOCK_NONE" for category in fallback_categories}
+
+    def get_safety_settings(self) -> Any:
+        """Return a copy of the configured safety settings for request usage."""
+        if isinstance(self.safety_settings, list):
+            cloned_settings: List[Any] = []
+            for setting in self.safety_settings:
+                try:
+                    cloned_settings.append(copy.deepcopy(setting))
+                except Exception:
+                    cloned_settings.append(setting)
+            return cloned_settings
+        if isinstance(self.safety_settings, dict):
+            return dict(self.safety_settings)
+        return self.safety_settings
+
+    def get_model(self, model_name: Optional[str] = None):
+        """Return a cached GenerativeModel instance for the requested model."""
+        name = model_name or self.model_name
+        if name not in self._model_cache:
+            self._model_cache[name] = genai.GenerativeModel(
+                name,
+                safety_settings=self.get_safety_settings()
+            )
+        return self._model_cache[name]
+
+    def get_model_sequence(self) -> List[str]:
+        """Provide primary + fallback model names to try in order."""
+        sequence: List[str] = [self.model_name]
+
+        fallback_candidates = [
+            "gemini-2.5-flash",
+            "gemini-2.0-flash-latest",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-8b",
+        ]
+        if self.allow_paid:
+            fallback_candidates.extend([
+                "gemini-1.5-pro-latest",
+                "gemini-1.0-pro-vision-latest",
+                "gemini-pro-vision",
+            ])
+
+        for candidate in fallback_candidates:
+            if candidate and candidate not in sequence:
+                sequence.append(candidate)
+
+        return sequence
 
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
@@ -141,6 +251,97 @@ class GeminiService:
     def __init__(self):
         self.config = GeminiConfig()
 
+    def _build_content_payload(self, prompt: str, attachments: Optional[List[Any]]) -> Any:
+        """Construct payload for generate_content, preserving native attachment objects.
+        
+        Attachments can be:
+        - protos.Part objects (from inline_attachment.build_inline_part)
+        - protos.File objects (from genai.get_file for backward compat)
+        - Other native Gemini types
+        """
+        if attachments:
+            payload: List[Any] = []
+            for attachment in attachments:
+                if attachment is None:
+                    continue
+                payload.append(attachment)
+            payload.append(prompt)
+            return payload
+
+        return prompt
+
+    def _log_candidate_metadata(self, response: Any, *, model_name: str) -> None:
+        candidates = getattr(response, "candidates", None) or []
+        for idx, candidate in enumerate(candidates):
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason:
+                reason_name = getattr(finish_reason, "name", str(finish_reason))
+                if reason_name and reason_name.upper() != "STOP":
+                    logger.warning(
+                        "⚠️ Gemini candidate ended without STOP",
+                        extra={
+                            "model_name": model_name,
+                            "candidate_index": idx,
+                            "finish_reason": reason_name,
+                        }
+                    )
+
+            safety_ratings = getattr(candidate, "safety_ratings", None)
+            if safety_ratings:
+                rating_details = []
+                for rating in safety_ratings:
+                    category = getattr(rating, "category", None)
+                    category_name = getattr(category, "name", str(category))
+                    probability = getattr(rating, "probability", None)
+                    probability_name = getattr(probability, "name", str(probability))
+                    blocked = getattr(rating, "blocked", False)
+                    rating_details.append({
+                        "category": category_name,
+                        "probability": probability_name,
+                        "blocked": bool(blocked),
+                    })
+
+                logger.info(
+                    "🛡️ Gemini safety ratings",
+                    extra={
+                        "model_name": model_name,
+                        "candidate_index": idx,
+                        "ratings": rating_details,
+                    }
+                )
+
+    def _response_blocked_by_safety(self, response: Any) -> bool:
+        candidates = getattr(response, "candidates", None) or []
+        for candidate in candidates:
+            finish_reason = getattr(candidate, "finish_reason", None)
+            if finish_reason is not None:
+                reason_name = getattr(finish_reason, "name", str(finish_reason))
+                try:
+                    reason_value = int(finish_reason)
+                except Exception:
+                    reason_value = None
+
+                if reason_name and reason_name.upper() in {"SAFETY", "SAFETY_REASON_UNSPECIFIED"}:
+                    return True
+                if reason_value == 2:
+                    return True
+
+            safety_ratings = getattr(candidate, "safety_ratings", None)
+            if safety_ratings:
+                for rating in safety_ratings:
+                    if getattr(rating, "blocked", False):
+                        return True
+
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        if prompt_feedback is not None:
+            block_reason = getattr(prompt_feedback, "block_reason", None)
+            if block_reason:
+                reason_name = getattr(block_reason, "name", str(block_reason))
+                if reason_name and "SAFETY" in reason_name.upper():
+                    return True
+
+        return False
+
     def _collect_candidate_text(self, response) -> str:
         """Safely collect text from a Gemini response object - NO SAFETY CHECKS."""
         # Try to get text from response.text first
@@ -151,27 +352,144 @@ class GeminiService:
         except Exception:
             pass
 
-        # Try to extract from candidates
         candidates = getattr(response, "candidates", None) or []
         collected: List[str] = []
-        
+
+        def add_text(value: Any) -> bool:
+            if value is None:
+                return False
+            if isinstance(value, bytes):
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeDecodeError:
+                    value = value.decode("latin-1", errors="ignore")
+            elif not isinstance(value, str):
+                value = str(value)
+
+            trimmed = value.strip()
+            if trimmed:
+                collected.append(trimmed)
+                return True
+            return False
+
         for candidate in candidates:
             if not candidate:
                 continue
-            
+
+            # Some SDK responses expose candidate.text directly
+            add_text(getattr(candidate, "text", None))
+
             content = getattr(candidate, "content", None)
             parts = getattr(content, "parts", None) if content else None
+
             if not parts:
+                add_text(content if isinstance(content, str) else None)
                 continue
-                
+
             for part in parts:
-                part_text = getattr(part, "text", None)
-                if part_text:
-                    collected.append(part_text)
-        
+                if not part:
+                    continue
+
+                if add_text(getattr(part, "text", None)):
+                    continue
+
+                inline_data = getattr(part, "inline_data", None)
+                if inline_data:
+                    data = getattr(inline_data, "data", None)
+                    if data:
+                        try:
+                            decoded = base64.b64decode(data)
+                            if add_text(decoded):
+                                continue
+                        except Exception:
+                            pass
+
+                function_call = getattr(part, "function_call", None)
+                if function_call:
+                    payload = {
+                        "function": getattr(function_call, "name", None),
+                        "args": getattr(function_call, "args", None),
+                    }
+                    add_text(json.dumps(payload))
+                    continue
+
+                if isinstance(part, dict):
+                    if add_text(part.get("text")):
+                        continue
+                    inline_dict = part.get("inline_data") or {}
+                    data = inline_dict.get("data")
+                    if data:
+                        try:
+                            decoded = base64.b64decode(data)
+                            if add_text(decoded):
+                                continue
+                        except Exception:
+                            pass
+
         if collected:
             return "\n".join(collected)
-            
+
+        # Deep fallback: walk any serialisable structure for textual fragments
+        seen_ids = set()
+
+        def walk(obj: Any) -> None:
+            obj_id = id(obj)
+            if obj_id in seen_ids:
+                return
+            seen_ids.add(obj_id)
+
+            if isinstance(obj, str):
+                snippet = obj.strip()
+                if snippet and snippet not in collected:
+                    collected.append(snippet)
+                return
+
+            if isinstance(obj, bytes):
+                try:
+                    walk(obj.decode("utf-8"))
+                except Exception:
+                    return
+                return
+
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, (str, bytes)) and len(str(value)) > 16384:
+                        # Likely binary/base64 payload; skip to avoid noise
+                        continue
+                    walk(value)
+                return
+
+            if isinstance(obj, (list, tuple, set)):
+                for item in obj:
+                    walk(item)
+                return
+
+            for attr in ("text", "message", "content", "parts", "response", "result"):
+                if hasattr(obj, attr):
+                    try:
+                        walk(getattr(obj, attr))
+                    except Exception:
+                        continue
+
+            if hasattr(obj, "to_dict"):
+                try:
+                    walk(obj.to_dict())
+                    return
+                except Exception:
+                    pass
+
+            if hasattr(obj, "__dict__"):
+                walk(vars(obj))
+
+        walk(response)
+
+        if collected:
+            return "\n".join(collected)
+
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        if isinstance(prompt_feedback, str) and prompt_feedback.strip():
+            return prompt_feedback.strip()
+
         raise ValueError("No text returned by Gemini response")
 
     async def _generate_json_response(
@@ -184,17 +502,13 @@ class GeminiService:
     ) -> Dict[str, Any]:
         """Invoke Gemini with consistent settings and parse JSON output."""
 
-        def _call_model():
-            payload: Any
-            if attachments:
-                payload = list(attachments) + [prompt]
-            else:
-                payload = prompt
-            
-            # Log what we're about to send to Gemini
+        def _call_model_for_name(model_name: str):
+            payload = self._build_content_payload(prompt, attachments)
+
             logger.info(
                 "🚀 Calling Gemini API (NO SAFETY FILTERS)",
                 extra={
+                    "model_name": model_name,
                     "has_attachments": bool(attachments),
                     "attachment_count": len(attachments) if attachments else 0,
                     "prompt_length": len(prompt),
@@ -203,75 +517,161 @@ class GeminiService:
                 }
             )
 
-            return self.config.model.generate_content(
+            model = self.config.get_model(model_name)
+            return model.generate_content(
                 payload,
                 generation_config=genai.types.GenerationConfig(
                     temperature=temperature,
                     max_output_tokens=max_output_tokens,
                     response_mime_type="application/json",
                 ),
+                safety_settings=self.config.get_safety_settings(),
             )
 
-        response = await asyncio.to_thread(_call_model)
-        try:
-            response_text = self._collect_candidate_text(response)
-            
-            # DEBUG: Log the raw response text before parsing
-            logger.info(
-                "📥 RAW GEMINI RESPONSE TEXT",
-                extra={
-                    "response_text_preview": response_text[:500] if response_text else None,
-                    "response_text_length": len(response_text) if response_text else 0,
-                    "first_char": response_text[0] if response_text else None,
-                    "last_char": response_text[-1] if response_text else None,
-                }
-            )
-            print(f"\n{'='*80}")
-            print(f"📥 RAW GEMINI RESPONSE TEXT (full):")
-            print(response_text)
-            print(f"{'='*80}\n")
-            
-        except ValueError as missing_text:
-            # If Gemini returned nothing, attempt a looser retry that does not force JSON
-            # so we can salvage any textual feedback rather than failing outright.
-            retry_prompt = (
+        response: Optional[Any] = None
+        response_text: Optional[str] = None
+        missing_text_error: Optional[ValueError] = None
+        used_model_name: Optional[str] = None
+
+        for model_name in self.config.get_model_sequence():
+            try:
+                response_candidate = await asyncio.to_thread(
+                    lambda name=model_name: _call_model_for_name(name)
+                )
+            except Exception as call_exc:
+                logger.error(
+                    "❌ Gemini API call failed",
+                    extra={"model_name": model_name, "error": str(call_exc)}
+                )
+                missing_text_error = ValueError(str(call_exc))
+                continue
+
+            response = response_candidate
+            self._log_candidate_metadata(response, model_name=model_name)
+
+            prompt_feedback = getattr(response, "prompt_feedback", None)
+            if prompt_feedback is not None:
+                block_reason = getattr(prompt_feedback, "block_reason", None)
+                if block_reason:
+                    logger.warning(
+                        "⚠️ Gemini prompt feedback indicates block",
+                        extra={
+                            "model_name": model_name,
+                            "block_reason": getattr(block_reason, "name", str(block_reason))
+                        }
+                    )
+
+            try:
+                response_text_candidate = self._collect_candidate_text(response)
+                response_text = response_text_candidate
+                used_model_name = model_name
+                if model_name != self.config.model_name:
+                    logger.info(
+                        "✅ Gemini fallback model succeeded",
+                        extra={"model_name": model_name}
+                    )
+                break
+            except ValueError as err:
+                missing_text_error = err
+                if not self._response_blocked_by_safety(response):
+                    break
+
+                logger.warning(
+                    "⚠️ Gemini response blocked by safety, trying fallback model",
+                    extra={"model_name": model_name}
+                )
+                continue
+
+        if response_text is None:
+            missing_text = missing_text_error or ValueError("No text returned by Gemini response")
+
+            fallback_payloads: List[str] = []
+            retry_prompt_plain = (
                 prompt
-                + "\n\nIf you cannot output structured JSON, provide plain text with a percentage score"
+                + "\n\nIf you cannot output structured JSON, provide plain text grading details including a percentage score."
             )
+            fallback_payloads.append(retry_prompt_plain)
 
-            def _call_model_plain():
-                payload: Any
-                if attachments:
-                    payload = list(attachments) + [retry_prompt]
-                else:
-                    payload = retry_prompt
-
-                return self.config.model.generate_content(
-                    payload,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=temperature,
-                        max_output_tokens=max_output_tokens,
-                    ),
+            if attachments:
+                fallback_payloads.append(
+                    "Provide at least 3 sentences of feedback summarizing the student's work and a numeric percentage score."
+                    + "\n"
+                    + prompt
+                )
+            else:
+                fallback_payloads.append(
+                    "Summarize the submission with detailed feedback and include a numeric percentage."
                 )
 
-            response_plain = await asyncio.to_thread(_call_model_plain)
-            try:
-                response_text = self._collect_candidate_text(response_plain)
-            except Exception:
-                raise missing_text
+            for idx, retry_prompt in enumerate(fallback_payloads):
+                def _call_model_plain(prompt_override: str = retry_prompt):
+                    payload = self._build_content_payload(prompt_override, attachments)
+                    return self.config.get_model().generate_content(
+                        payload,
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=temperature,
+                            max_output_tokens=max_output_tokens,
+                        ),
+                        safety_settings=self.config.get_safety_settings(),
+                    )
 
-            # Attempt to coerce plain text into JSON-compatible shape
-            parsed = self._safe_parse_json_soft(response_text)
-            if parsed is None:
-                raise missing_text
-            return parsed
+                response_plain = await asyncio.to_thread(_call_model_plain)
+                try:
+                    response_text_plain = self._collect_candidate_text(response_plain)
+                except Exception:
+                    if idx == len(fallback_payloads) - 1:
+                        raise missing_text
+                    continue
+
+                try:
+                    parsed_plain = self._safe_parse_json(response_text_plain)
+                    return self._normalise_gemini_payload(parsed_plain)
+                except Exception:
+                    parsed_soft = self._safe_parse_json_soft(response_text_plain)
+                    if parsed_soft is not None:
+                        return self._normalise_gemini_payload(parsed_soft)
+
+                text = (response_text_plain or "").strip()
+                if text:
+                    return {
+                        "score": None,
+                        "percentage": self._parse_percentage_token(text),
+                        "grade_letter": None,
+                        "overall_feedback": text,
+                        "detailed_feedback": text,
+                        "strengths": [],
+                        "improvements": [],
+                        "corrections": [],
+                        "recommendations": [],
+                        "graded_by": "Gemini AI",
+                        "graded_at": datetime.utcnow().isoformat(),
+                        "fallback": "plain_text"
+                    }
+
+            raise missing_text
+
+        logger.info(
+            "📥 RAW GEMINI RESPONSE TEXT",
+            extra={
+                "response_text_preview": response_text[:500] if response_text else None,
+                "response_text_length": len(response_text) if response_text else 0,
+                "first_char": response_text[0] if response_text else None,
+                "last_char": response_text[-1] if response_text else None,
+                "model_name": used_model_name or self.config.model_name,
+            }
+        )
+        print(f"\n{'='*80}")
+        print(f"📥 RAW GEMINI RESPONSE TEXT (full):")
+        print(response_text)
+        print(f"{'='*80}\n")
 
         try:
-            return self._safe_parse_json(response_text)
+            parsed = self._safe_parse_json(response_text)
+            return self._normalise_gemini_payload(parsed)
         except ValueError:
             parsed_soft = self._safe_parse_json_soft(response_text)
             if parsed_soft is not None:
-                return parsed_soft
+                return self._normalise_gemini_payload(parsed_soft)
             raise
 
     def _extract_text_from_pdf_bytes(self, file_bytes: bytes) -> str:
@@ -301,7 +701,7 @@ class GeminiService:
     def _safe_parse_json(self, text: str) -> Dict[str, Any]:
         """Parse JSON from Gemini response text robustly.
         - Strips ```json fences
-        - Attempts direct json.loads
+        - Attempts direct json.loads FIRST (don't break clean JSON!)
         - Handles escaped JSON strings (e.g., "\"key\": \"value\"")
         - Handles trailing commas in string values (e.g., "0," -> "0")
         - Falls back to slicing first {...} block
@@ -320,7 +720,14 @@ class GeminiService:
         elif t.startswith("```") and t.endswith("```"):
             t = t[3:-3].strip()
         
-        # Fix common malformations from Gemini's JSON output
+        # ⭐ CRITICAL: Try direct parse FIRST before any string manipulation
+        # If Gemini returns clean JSON, don't break it!
+        try:
+            return _json.loads(t)
+        except Exception:
+            pass  # Continue to fixing attempts
+        
+        # If direct parse failed, NOW try fixing common malformations
         # The most common issue is: {"\"key\"": "value,"} where keys have escaped quotes
         # and values have trailing commas
         
@@ -340,12 +747,7 @@ class GeminiService:
         # Step 4: Remove trailing commas before closing brackets/braces
         t = re.sub(r',\s*([}\]])', r'\1', t)
         
-        # Step 5: Fix incomplete array/object markers at end of strings
-        # Sometimes Gemini truncates: "strengths": "[" -> "strengths": []
-        t = re.sub(r':\s*"\["\s*([,}])', r': []\1', t)
-        t = re.sub(r':\s*"\{"\s*([,}])', r': {}\1', t)
-        
-        # Try direct parse first
+        # Try parse after fixes
         try:
             return _json.loads(t)
         except Exception:
@@ -427,6 +829,50 @@ class GeminiService:
                 continue
 
         return result or None
+
+    def _normalise_gemini_payload(self, value: Any) -> Any:
+        """Recursively clean Gemini payloads to remove quoted keys and parse embedded JSON."""
+        import json as _json
+
+        if isinstance(value, dict):
+            cleaned: Dict[str, Any] = {}
+            for raw_key, raw_val in value.items():
+                key = raw_key
+                if isinstance(key, str):
+                    key = key.strip()
+                    if len(key) >= 2 and key[0] == key[-1] == '"':
+                        key = key[1:-1].strip()
+                cleaned[key] = self._normalise_gemini_payload(raw_val)
+            return cleaned
+
+        if isinstance(value, list):
+            return [self._normalise_gemini_payload(item) for item in value]
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return ""
+
+            text = text.rstrip(',').strip()
+
+            if len(text) >= 2 and text[0] == text[-1] == '"':
+                text = text[1:-1].strip()
+
+            if re.fullmatch(r"-?\d+(?:\.\d+)?", text):
+                numeric = self._to_float(text)
+                if numeric is not None:
+                    return numeric
+
+            if (text.startswith('[') and text.endswith(']')) or (text.startswith('{') and text.endswith('}')):
+                try:
+                    embedded = _json.loads(text)
+                except Exception:
+                    return text
+                return self._normalise_gemini_payload(embedded)
+
+            return text
+
+        return value
 
     def _clamp_percentage(self, value: float) -> float:
         return max(0.0, min(100.0, round(float(value), 2)))
@@ -636,132 +1082,151 @@ class GeminiService:
         """
         age_min, age_max = target_age_range
         
-        # Check if textbook_content is a Gemini file URI
-        if textbook_content.startswith("GEMINI_FILE_URI:"):
-            gemini_file_uri = textbook_content.replace("GEMINI_FILE_URI:", "")
-            uploaded_file = genai.get_file(gemini_file_uri)
-            
-            structure_prompt = f"""
-            Analyze the uploaded textbook file and create a high-level course structure outline.
-            
-            **CRITICAL FILTERING INSTRUCTIONS:**
-            - SKIP any "Table of Contents", "Course Outline", "Syllabus", or "Index" pages
-            - SKIP any "Chapter Summary" or "Overview" sections
-            - SKIP any "Learning Outcomes" or "Objectives" lists that appear before actual content
-            - ONLY analyze the ACTUAL LESSON CONTENT pages (chapters, sections with substantive material)
-            - Look for the main body text, explanations, examples, and educational content
-            - Ignore preface, foreword, introduction pages, and appendices
-            
-            COURSE REQUIREMENTS:
-            - Title: {course_title}
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max} years
-            - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
-            - Difficulty: {difficulty_level}
-            
-            Create a JSON outline with this structure:
-            {{
-                "title": "{course_title}",
-                "subject": "{subject}",
-                "description": "Brief course description (1-2 sentences)",
-                "age_min": {age_min},
-                "age_max": {age_max},
-                "difficulty_level": "{difficulty_level}",
-                "textbook_source": "Brief description of the textbook",
-                "content_sections": [
+        # Check if textbook_content is an inline file marker
+        if textbook_content.startswith("INLINE_FILE:"):
+            # Parse the inline file marker: INLINE_FILE:[mime_type]:[base64_data]:[filename]
+            parts = textbook_content.split(":", 3)
+            if len(parts) >= 4:
+                mime_type = parts[1]
+                content_b64 = parts[2]
+                filename = parts[3]
+                
+                try:
+                    file_bytes = base64.b64decode(content_b64)
+                    inline_part = build_inline_part(
+                        data=file_bytes,
+                        mime_type=mime_type,
+                        display_name=filename
+                    )
+                    
+                    structure_prompt = f"""
+                    Analyze the uploaded textbook file and create a high-level course structure outline.
+                    
+                    **CRITICAL FILTERING INSTRUCTIONS:**
+                    - SKIP any "Table of Contents", "Course Outline", "Syllabus", or "Index" pages
+                    - SKIP any "Chapter Summary" or "Overview" sections
+                    - SKIP any "Learning Outcomes" or "Objectives" lists that appear before actual content
+                    - ONLY analyze the ACTUAL LESSON CONTENT pages (chapters, sections with substantive material)
+                    - Look for the main body text, explanations, examples, and educational content
+                    - Ignore preface, foreword, introduction pages, and appendices
+                    
+                    COURSE REQUIREMENTS:
+                    - Title: {course_title}
+                    - Subject: {subject}
+                    - Target Age: {age_min}-{age_max} years
+                    - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
+                    - Difficulty: {difficulty_level}
+                    
+                    Create a JSON outline with this structure:
                     {{
-                        "section_title": "Section 1 Title",
-                        "topics": ["Topic 1", "Topic 2", "Topic 3"],
-                        "estimated_blocks": 2,
-                        "difficulty": "beginner|intermediate|advanced"
-                    }},
-                    {{
-                        "section_title": "Section 2 Title", 
-                        "topics": ["Topic 4", "Topic 5"],
-                        "estimated_blocks": 3,
-                        "difficulty": "intermediate"
+                        "title": "{course_title}",
+                        "subject": "{subject}",
+                        "description": "Brief course description (1-2 sentences)",
+                        "age_min": {age_min},
+                        "age_max": {age_max},
+                        "difficulty_level": "{difficulty_level}",
+                        "textbook_source": "Brief description of the textbook",
+                        "content_sections": [
+                            {{
+                                "section_title": "Section 1 Title",
+                                "topics": ["Topic 1", "Topic 2", "Topic 3"],
+                                "estimated_blocks": 2,
+                                "difficulty": "beginner|intermediate|advanced"
+                            }},
+                            {{
+                                "section_title": "Section 2 Title", 
+                                "topics": ["Topic 4", "Topic 5"],
+                                "estimated_blocks": 3,
+                                "difficulty": "intermediate"
+                            }}
+                        ],
+                        "learning_progression": "How topics build upon each other",
+                        "key_concepts": ["Main concept 1", "Main concept 2", "Main concept 3"]
                     }}
-                ],
-                "learning_progression": "How topics build upon each other",
-                "key_concepts": ["Main concept 1", "Main concept 2", "Main concept 3"]
-            }}
-            
-            INSTRUCTIONS:
-            - Identify main sections/chapters in the textbook (CONTENT ONLY, not ToC)
-            - Map content to the {total_weeks * blocks_per_week} blocks needed
-            - Ensure logical progression through material
-            - Keep response concise and focused on structure
-            - Remember: EXTRACT FROM ACTUAL CONTENT, NOT FROM TABLE OF CONTENTS
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                [uploaded_file, structure_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=512,  # Reduced for free tier
-                    response_mime_type="application/json"
-                )
+                    
+                    INSTRUCTIONS:
+                    - Identify main sections/chapters in the textbook (CONTENT ONLY, not ToC)
+                    - Map content to the {total_weeks * blocks_per_week} blocks needed
+                    - Ensure logical progression through material
+                    - Keep response concise and focused on structure
+                    - Remember: EXTRACT FROM ACTUAL CONTENT, NOT FROM TABLE OF CONTENTS
+                    """
+                    
+                    response = await asyncio.to_thread(
+                        self.config.model.generate_content,
+                        [inline_part, structure_prompt],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.3,
+                            max_output_tokens=512,  # Reduced for free tier
+                            response_mime_type="application/json"
+                        )
+                    )
+                    
+                    return json.loads(response.text)
+                except Exception as e:
+                    logger.error(f"Error processing inline file: {e}")
+                    # Fall through to text-based processing
+            else:
+                logger.error("Invalid INLINE_FILE marker format")
+                # Fall through to text-based processing
+        
+        # Handle direct text content or fallback
+        filtered_content = textbook_content
+        
+        # Simple filtering: skip content that looks like a table of contents
+        toc_markers = [
+            "table of contents", "contents", "course outline", "syllabus",
+            "chapter 1.", "chapter 2.", "chapter 3.", "week 1", "week 2",
+            "learning outcomes", "overview"
+        ]
+        
+        lines = textbook_content.split('\n')
+        content_start_idx = 0
+        
+        # Look for where actual content begins (after ToC/outline)
+        for i, line in enumerate(lines[:100]):  # Check first 100 lines
+            line_lower = line.lower().strip()
+            # If we find dense paragraph text, assume content has started
+            if len(line) > 100 and not any(marker in line_lower for marker in toc_markers):
+                content_start_idx = max(0, i - 5)  # Start a bit before
+                break
+        
+        if content_start_idx > 0:
+            filtered_content = '\n'.join(lines[content_start_idx:])
+            print(f"📝 Filtered out first {content_start_idx} lines (likely ToC/outline)")
+        
+        structure_prompt = f"""
+        Analyze the following textbook content and create a high-level course structure outline.
+        
+        **CRITICAL FILTERING INSTRUCTIONS:**
+        - This content may start with a Table of Contents or Course Outline - SKIP IT
+        - Look for and analyze only the ACTUAL LESSON CONTENT
+        - Ignore any chapter summaries or overview pages
+        - Focus on substantive educational material
+        
+        TEXTBOOK CONTENT:
+        {filtered_content[:2000]}...
+        
+        COURSE REQUIREMENTS:
+        - Title: {course_title}
+        - Subject: {subject}
+        - Target Age: {age_min}-{age_max} years
+        - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
+        - Difficulty: {difficulty_level}
+        
+        Create a JSON outline with the same structure as above.
+        Remember: Extract structure from ACTUAL CONTENT, not from any table of contents.
+        """
+        
+        response = await asyncio.to_thread(
+            self.config.model.generate_content,
+            structure_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.3,
+                max_output_tokens=512,
+                response_mime_type="application/json"
             )
-        else:
-            # Handle direct text content - filter out ToC and outline sections
-            # Try to detect and skip table of contents
-            filtered_content = textbook_content
-            
-            # Simple filtering: skip content that looks like a table of contents
-            toc_markers = [
-                "table of contents", "contents", "course outline", "syllabus",
-                "chapter 1.", "chapter 2.", "chapter 3.", "week 1", "week 2",
-                "learning outcomes", "overview"
-            ]
-            
-            lines = textbook_content.split('\n')
-            content_start_idx = 0
-            
-            # Look for where actual content begins (after ToC/outline)
-            for i, line in enumerate(lines[:100]):  # Check first 100 lines
-                line_lower = line.lower().strip()
-                # If we find dense paragraph text, assume content has started
-                if len(line) > 100 and not any(marker in line_lower for marker in toc_markers):
-                    content_start_idx = max(0, i - 5)  # Start a bit before
-                    break
-            
-            if content_start_idx > 0:
-                filtered_content = '\n'.join(lines[content_start_idx:])
-                print(f"📝 Filtered out first {content_start_idx} lines (likely ToC/outline)")
-            
-            structure_prompt = f"""
-            Analyze the following textbook content and create a high-level course structure outline.
-            
-            **CRITICAL FILTERING INSTRUCTIONS:**
-            - This content may start with a Table of Contents or Course Outline - SKIP IT
-            - Look for and analyze only the ACTUAL LESSON CONTENT
-            - Ignore any chapter summaries or overview pages
-            - Focus on substantive educational material
-            
-            TEXTBOOK CONTENT:
-            {filtered_content[:2000]}...
-            
-            COURSE REQUIREMENTS:
-            - Title: {course_title}
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max} years
-            - Duration: {total_weeks} weeks ({blocks_per_week} blocks per week = {total_weeks * blocks_per_week} total blocks)
-            - Difficulty: {difficulty_level}
-            
-            Create a JSON outline with the same structure as above.
-            Remember: Extract structure from ACTUAL CONTENT, not from any table of contents.
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                structure_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=512,
-                    response_mime_type="application/json"
-                )
-            )
+        )
         
         return json.loads(response.text)
 
@@ -781,162 +1246,136 @@ class GeminiService:
         section_index = min((block_num - 1) // blocks_per_section, len(content_sections) - 1)
         current_section = content_sections[section_index] if content_sections else {"section_title": f"Week {week_num} Content", "topics": []}
         
-        if textbook_content.startswith("GEMINI_FILE_URI:"):
-            gemini_file_uri = textbook_content.replace("GEMINI_FILE_URI:", "")
-            uploaded_file = genai.get_file(gemini_file_uri)
-            
-            block_prompt = f"""
-            Generate a detailed learning block based on the uploaded textbook content.
-            
-            **CRITICAL CONTENT FILTERING:**
-            - SKIP and IGNORE any "Table of Contents", "Course Outline", "Index", or "Syllabus" pages
-            - SKIP any "Chapter Overview", "Summary", or "Learning Outcomes" pages that come BEFORE actual content
-            - ONLY extract content from the ACTUAL LESSON PAGES (substantive educational material)
-            - Look for explanations, examples, diagrams, and main body text
-            - If you encounter outline/ToC content, skip ahead to find the real chapter content
-            - DO NOT include meta-information about the course structure in the lesson content
-            
-            BLOCK CONTEXT:
-            - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
-            - Target Section: {current_section.get('section_title', 'General Content')}
-            - Section Topics: {', '.join(current_section.get('topics', []))}
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max}
-            - Difficulty: {difficulty_level}
-            
-            COURSE CONTEXT:
-            Course Title: {course_outline.get('title', 'Course')}
-            Course Description: {course_outline.get('description', '')}
-            Previous Learning: {"First block" if block_num == 1 else f"Building on previous {block_num-1} blocks"}
-            
-            Generate a JSON block with this exact structure:
-            {{
-                "week": {week_num},
-                "block_number": {block_in_week},
-                "title": "Specific block title from textbook content",
-                "description": "What students will learn in this block",
-                "learning_objectives": [
-                    "Specific objective 1 from textbook",
-                    "Specific objective 2 from textbook",
-                    "Specific objective 3 from textbook"
-                ],
-                "content": "Detailed lesson content extracted from textbook (400-600 words)",
-                "duration_minutes": 45,
-                "visual_elements": ["Any diagrams/images referenced", "Charts or illustrations"],
-                "resources": [
-                    {{"type": "article", "title": "Resource Title", "url": "placeholder", "search_query": "specific search terms"}},
-                    {{"type": "video", "title": "Video Title", "url": "placeholder", "search_query": "YouTube search terms"}}
-                ],
-                "assignments": [
+        if textbook_content.startswith("INLINE_FILE:"):
+            # Parse the inline file marker: INLINE_FILE:[mime_type]:[base64_data]:[filename]
+            parts = textbook_content.split(":", 3)
+            if len(parts) >= 4:
+                mime_type = parts[1]
+                content_b64 = parts[2]
+                filename = parts[3]
+                
+                try:
+                    file_bytes = base64.b64decode(content_b64)
+                    inline_part = build_inline_part(
+                        data=file_bytes,
+                        mime_type=mime_type,
+                        display_name=filename
+                    )
+                    
+                    block_prompt = f"""
+                    Generate a detailed learning block based on the uploaded textbook content.
+                    
+                    **CRITICAL CONTENT FILTERING:**
+                    - SKIP and IGNORE any "Table of Contents", "Course Outline", "Index", or "Syllabus" pages
+                    - SKIP any "Chapter Overview", "Summary", or "Learning Outcomes" pages that come BEFORE actual content
+                    - ONLY extract content from the ACTUAL LESSON PAGES (substantive educational material)
+                    - Look for explanations, examples, diagrams, and main body text
+                    - If you encounter outline/ToC content, skip ahead to find the real chapter content
+                    - DO NOT include meta-information about the course structure in the lesson content
+                    
+                    BLOCK CONTEXT:
+                    - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
+                    - Target Section: {current_section.get('section_title', 'General Content')}
+                    - Section Topics: {', '.join(current_section.get('topics', []))}
+                    - Subject: {subject}
+                    - Target Age: {age_min}-{age_max}
+                    - Difficulty: {difficulty_level}
+                    
+                    COURSE CONTEXT:
+                    Course Title: {course_outline.get('title', 'Course')}
+                    Course Description: {course_outline.get('description', '')}
+                    Previous Learning: {"First block" if block_num == 1 else f"Building on previous {block_num-1} blocks"}
+                    
+                    Generate a JSON block with this exact structure:
                     {{
-                        "title": "Block Assignment Title",
-                        "description": "Assignment based on block content",
-                        "type": "homework",
-                        "duration_minutes": 30,
-                        "points": 100,
-                        "rubric": "Clear grading criteria",
-                        "due_days_after_block": 3
+                        "week": {week_num},
+                        "block_number": {block_in_week},
+                        "title": "Specific block title from textbook content",
+                        "description": "What students will learn in this block",
+                        "learning_objectives": [
+                            "Specific objective 1 from textbook",
+                            "Specific objective 2 from textbook",
+                            "Specific objective 3 from textbook"
+                        ],
+                        "content": "Detailed lesson content extracted from textbook (400-600 words)",
+                        "duration_minutes": 45,
+                        "visual_elements": ["Any diagrams/images referenced", "Charts or illustrations"],
+                        "resources": [
+                            {{"type": "article", "title": "Resource Title", "url": "placeholder", "search_query": "specific search terms"}},
+                            {{"type": "video", "title": "Video Title", "url": "placeholder", "search_query": "YouTube search terms"}}
+                        ],
+                        "assignments": [
+                            {{
+                                "title": "Block Assignment Title",
+                                "description": "Assignment based on block content",
+                                "type": "homework",
+                                "duration_minutes": 30,
+                                "points": 100,
+                                "rubric": "Clear grading criteria",
+                                "due_days_after_block": 3
+                            }}
+                        ]
                     }}
-                ]
-            }}
-            
-            IMPORTANT:
-            - Focus ONLY on content for THIS specific block
-            - Extract relevant ACTUAL LESSON CONTENT from the textbook (NOT outlines or ToC)
-            - Ensure age-appropriate language and complexity
-            - Build on previous blocks if this is not the first block
-            - Make it comprehensive but focused
-            - VERIFY you're extracting from actual educational content, not meta-pages
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                [uploaded_file, block_prompt],
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.6,
-                    max_output_tokens=1024,  # Reduced for free tier
-                    response_mime_type="application/json"
-                )
+                    
+                    IMPORTANT:
+                    - Focus ONLY on content for THIS specific block
+                    - Extract relevant ACTUAL LESSON CONTENT from the textbook (NOT outlines or ToC)
+                    - Ensure age-appropriate language and complexity
+                    - Build on previous blocks if this is not the first block
+                    - Make it comprehensive but focused
+                    - VERIFY you're extracting from actual educational content, not meta-pages
+                    """
+                    
+                    response = await asyncio.to_thread(
+                        self.config.model.generate_content,
+                        [inline_part, block_prompt],
+                        generation_config=genai.types.GenerationConfig(
+                            temperature=0.6,
+                            max_output_tokens=1024,  # Reduced for free tier
+                            response_mime_type="application/json"
+                        )
+                    )
+                    
+                    return json.loads(response.text)
+                except Exception as e:
+                    logger.error(f"Error processing inline file for block: {e}")
+                    # Fall through to text-based processing
+            else:
+                logger.error("Invalid INLINE_FILE marker format")
+                # Fall through to text-based processing
+        
+        # Handle direct text content - extract relevant portion
+        content_chunk_size = len(textbook_content) // total_blocks
+        start_pos = (block_num - 1) * content_chunk_size
+        end_pos = min(start_pos + content_chunk_size + 500, len(textbook_content))  # Overlap for context
+        content_chunk = textbook_content[start_pos:end_pos]
+        
+        block_prompt = f"""
+        Generate a detailed learning block based on this textbook content section.
+        
+        TEXTBOOK CONTENT (Section {block_num}):
+        {content_chunk}
+        
+        BLOCK CONTEXT:
+        - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
+        - Subject: {subject}
+        - Target Age: {age_min}-{age_max}
+        - Difficulty: {difficulty_level}
+        
+        Generate the same JSON structure as specified above...
+        """
+        
+        response = await asyncio.to_thread(
+            self.config.model.generate_content,
+            block_prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.6,
+                max_output_tokens=1024,
+                response_mime_type="application/json"
             )
-        else:
-            # Handle direct text content - extract relevant portion
-            content_chunk_size = len(textbook_content) // total_blocks
-            start_pos = (block_num - 1) * content_chunk_size
-            end_pos = min(start_pos + content_chunk_size + 500, len(textbook_content))  # Overlap for context
-            content_chunk = textbook_content[start_pos:end_pos]
-            
-            block_prompt = f"""
-            Generate a detailed learning block based on this textbook content section.
-            
-            TEXTBOOK CONTENT (Section {block_num}):
-            {content_chunk}
-            
-            BLOCK CONTEXT:
-            - Block {block_num} of {total_blocks} (Week {week_num}, Block {block_in_week})
-            - Subject: {subject}
-            - Target Age: {age_min}-{age_max}
-            - Difficulty: {difficulty_level}
-            
-            Generate the same JSON structure as above...
-            """
-            
-            response = await asyncio.to_thread(
-                self.config.model.generate_content,
-                block_prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.6,
-                    max_output_tokens=1024,
-                    response_mime_type="application/json"
-                )
-            )
+        )
         
-        block_data = json.loads(response.text)
-        
-        # Ensure correct week and block numbers
-        block_data["week"] = week_num
-        block_data["block_number"] = block_in_week
-        
-        # Replace placeholder URLs with actual URLs
-        if "resources" in block_data and block_data["resources"]:
-            print(f"🔗 Generating actual resource URLs for block {block_num}...")
-            enhanced_resources = []
-            
-            for resource in block_data["resources"]:
-                resource_type = resource.get("type", "article")
-                search_query = resource.get("search_query", resource.get("title", ""))
-                
-                if resource_type == "video":
-                    # Generate actual YouTube URL
-                    youtube_links = await self.generate_youtube_links(search_query, count=1)
-                    if youtube_links:
-                        enhanced_resources.append({
-                            "type": "video",
-                            "title": youtube_links[0].get("title", resource.get("title")),
-                            "url": youtube_links[0].get("url"),
-                            "search_query": search_query
-                        })
-                    else:
-                        enhanced_resources.append(resource)
-                else:
-                    # Generate actual article URL
-                    article_links = await self.generate_article_links(search_query, subject, count=1)
-                    if article_links:
-                        enhanced_resources.append({
-                            "type": "article",
-                            "title": article_links[0].get("title", resource.get("title")),
-                            "url": article_links[0].get("url"),
-                            "search_query": search_query
-                        })
-                    else:
-                        enhanced_resources.append(resource)
-                
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(0.5)
-            
-            block_data["resources"] = enhanced_resources
-            print(f"✅ Enhanced {len(enhanced_resources)} resources with actual URLs")
-        
-        return block_data
+        return json.loads(response.text)
 
     async def _generate_overall_assignments(
         self, course_outline: Dict, generated_blocks: List[Dict], total_weeks: int
@@ -1775,15 +2214,35 @@ class GeminiService:
         submission_type: str = "homework",
     ) -> Dict[str, Any]:
         """
-        Grade a student submission by uploading the PDF/image document directly to Gemini.
+        Grade a student submission by sending the file directly to Gemini as an inline attachment.
 
-        This uses Gemini's native file processing (incl. OCR for image-based PDFs) and applies
-        the same grading rubric used by grade_submission(). Returns a normalized JSON payload.
+        This bypasses the Files API entirely, avoiding the RAG store requirement.
+        Uses inline base64-encoded data for all file types.
+
+        Returns a normalized JSON payload.
         """
         try:
-            # Upload file and get Gemini file URI
-            gemini_file_uri = await self.upload_file_to_gemini(file_bytes, filename)
-            uploaded_file = genai.get_file(gemini_file_uri)
+            # Determine MIME type
+            file_extension = Path(filename).suffix.lower()
+            mime_types_map = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types_map.get(file_extension, 'application/octet-stream')
+
+            # Build inline part from file bytes
+            inline_part = build_inline_part(
+                data=file_bytes,
+                mime_type=mime_type,
+                display_name=filename
+            )
 
             grading_prompt = f"""
             You are an expert educational assessor. Read the attached submission file in full
@@ -1797,6 +2256,11 @@ class GeminiService:
 
             GRADING RUBRIC:
             {rubric}
+
+            SAFETY CONTEXT:
+            - This submission is educational student work (potentially handwritten or scanned).
+            - It is safe for school environments with no harmful or adult content.
+            - Proceed with grading without declining for safety reasons.
 
             Provide a comprehensive assessment in JSON format with these keys:
             {{
@@ -1815,7 +2279,7 @@ class GeminiService:
 
             grade_result = await self._generate_json_response(
                 grading_prompt,
-                attachments=[uploaded_file],
+                attachments=[inline_part],
                 temperature=0.25,
                 max_output_tokens=2048,
             )
@@ -1847,10 +2311,49 @@ class GeminiService:
         except Exception as e:
             fallback_error = str(e)
 
+            # Retry with strict minimal schema
+            try:
+                strict_grade = await self.grade_submission_from_file_strict(
+                    file_bytes=file_bytes,
+                    filename=filename,
+                    assignment_title=assignment_title,
+                    assignment_description=assignment_description,
+                    max_points=max_points,
+                    submission_type=submission_type,
+                )
+
+                percentage = self._parse_percentage_token(strict_grade.get("percentage"))
+                if percentage is not None:
+                    score = round((percentage / 100.0) * max_points, 2)
+                else:
+                    score = None
+
+                strict_normalized = {
+                    "score": score,
+                    "percentage": percentage,
+                    "grade_letter": None,
+                    "overall_feedback": strict_grade.get("overall_feedback"),
+                    "detailed_feedback": strict_grade.get("overall_feedback"),
+                    "strengths": [],
+                    "improvements": [],
+                    "corrections": [],
+                    "recommendations": [],
+                    "rubric_breakdown": None,
+                    "graded_by": "Gemini AI (strict fallback)",
+                    "graded_at": datetime.utcnow().isoformat(),
+                    "max_points": max_points,
+                }
+
+                if strict_normalized["score"] is not None or strict_normalized["overall_feedback"]:
+                    return strict_normalized
+
+            except Exception as strict_exc:
+                fallback_error = f"{fallback_error} | strict_retry_failed={strict_exc}"
+
             # Attempt plaintext extraction fallback
             try:
                 extracted_text = self._extract_text_from_pdf_bytes(file_bytes)
-                if extracted_text:
+                if extracted_text and extracted_text.strip():
                     text_grade = await self.grade_submission(
                         submission_content=extracted_text,
                         assignment_title=assignment_title,
@@ -1862,7 +2365,7 @@ class GeminiService:
                     text_grade["graded_by"] = "Gemini AI (file fallback)"
                     return text_grade
             except Exception as fallback_exc:
-                fallback_error = f"{fallback_error} | fallback_failed={fallback_exc}"
+                fallback_error = f"{fallback_error} | text_fallback_failed={fallback_exc}"
 
             # Fallback payload to avoid blowing up the caller
             return {
@@ -1875,6 +2378,7 @@ class GeminiService:
                 "improvements": [],
                 "corrections": [],
                 "recommendations": [],
+                "rubric_breakdown": None,
                 "graded_by": "Gemini AI",
                 "graded_at": datetime.utcnow().isoformat(),
                 "max_points": max_points,
@@ -1892,11 +2396,31 @@ class GeminiService:
     ) -> Dict[str, Any]:
         """
         Second-pass grading with a stricter prompt requiring a numeric percentage (0-100).
+        Uses inline attachment instead of file upload to avoid RAG store requirement.
         Returns a minimal JSON payload to maximize compliance when initial grading omitted numeric score.
         """
         try:
-            gemini_file_uri = await self.upload_file_to_gemini(file_bytes, filename)
-            uploaded_file = genai.get_file(gemini_file_uri)
+            # Determine MIME type
+            file_extension = Path(filename).suffix.lower()
+            mime_types_map = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types_map.get(file_extension, 'application/octet-stream')
+
+            # Build inline part from file bytes
+            inline_part = build_inline_part(
+                data=file_bytes,
+                mime_type=mime_type,
+                display_name=filename
+            )
 
             strict_prompt = f"""
             You are an automated grader. Read the attached submission in full.
@@ -1920,7 +2444,7 @@ class GeminiService:
 
             data = await self._generate_json_response(
                 strict_prompt,
-                attachments=[uploaded_file],
+                attachments=[inline_part],
                 temperature=0.1,
                 max_output_tokens=512,
             )
@@ -2029,93 +2553,114 @@ class GeminiService:
             }
 
     async def upload_file_to_gemini(self, file_content: bytes, filename: str, mime_type: str = None) -> str:
+        """🚫 DEPRECATED: This method uses genai.upload_file() which requires RAG store.
+        
+        All callers have been migrated to use inline attachments via build_inline_part().
+        This method is kept for reference only and should NOT be used in new code.
+        
+        Upload a file for Gemini processing with resilient retries to handle transient IO issues.
         """
-        Upload file directly to Gemini using the File API for native processing
-        This allows Gemini to read PDFs with images, scanned documents, and mixed content directly
-        """
-        try:
-            import tempfile
-            
-            # Determine MIME type if not provided
-            if not mime_type:
-                file_extension = Path(filename).suffix.lower()
-                mime_types = {
-                    '.pdf': 'application/pdf',
-                    '.txt': 'text/plain',
-                    '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-                    '.doc': 'application/msword',
-                    '.png': 'image/png',
-                    '.jpg': 'image/jpeg',
-                    '.jpeg': 'image/jpeg',
-                    '.gif': 'image/gif',
-                    '.webp': 'image/webp'
-                }
-                mime_type = mime_types.get(file_extension, 'application/octet-stream')
-            
-            # Create temporary file for Gemini upload
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as temp_file:
-                temp_file.write(file_content)
-                temp_file_path = temp_file.name
-            
+        import tempfile
+        import time
+
+        # Determine MIME type if not provided
+        if not mime_type:
+            file_extension = Path(filename).suffix.lower()
+            mime_types = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_types.get(file_extension, 'application/octet-stream')
+
+        last_error: Optional[Exception] = None
+        max_attempts = 3
+
+        for attempt in range(1, max_attempts + 1):
+            temp_file_path: Optional[str] = None
             try:
-                # Upload file to Gemini
-                print(f"📤 Uploading {filename} to Gemini AI for native processing...")
-                uploaded_file = genai.upload_file(path=temp_file_path, display_name=filename)
-                
+                with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as temp_file:
+                    temp_file.write(file_content)
+                    temp_file_path = temp_file.name
+
+                print(f"📤 Uploading {filename} to Gemini AI for native processing... (attempt {attempt}/{max_attempts})")
+                uploaded_file = genai.upload_file(
+                    path=temp_file_path,
+                    display_name=filename,
+                    mime_type=mime_type
+                )
+
                 print(f"✅ File uploaded successfully: {uploaded_file.name}")
                 print(f"📋 MIME type: {uploaded_file.mime_type}")
                 print(f"📊 File size: {uploaded_file.size_bytes} bytes")
-                
-                # Wait for file processing to complete
-                import time
+
                 while uploaded_file.state.name == "PROCESSING":
                     print("⏳ Waiting for file processing...")
                     time.sleep(2)
                     uploaded_file = genai.get_file(uploaded_file.name)
-                
+
                 if uploaded_file.state.name == "FAILED":
                     raise Exception(f"File processing failed: {uploaded_file.error}")
-                
+
                 print(f"🎉 File processing complete! State: {uploaded_file.state.name}")
-                return uploaded_file.name  # Return the file URI for Gemini
-                
+                return uploaded_file.name
+
+            except Exception as exc:
+                last_error = exc
+                error_text = str(exc)
+                print(f"⚠️ Gemini upload attempt {attempt} failed: {error_text}")
+
+                if "ragStoreName" in error_text and not getattr(self.config, "rag_store_name", None):
+                    raise RuntimeError(
+                        "Gemini file uploads now require a RAG store name. "
+                        "Set GEMINI_RAG_STORE_NAME to your store resource, e.g. "
+                        "'projects/<project>/locations/<region>/ragStores/<store_id>'."
+                    ) from exc
+
+                if attempt < max_attempts:
+                    backoff = 1.5 * attempt
+                    print(f"🔁 Retrying in {backoff:.1f}s...")
+                    time.sleep(backoff)
+                continue
             finally:
-                # Clean up temporary file with retry for Windows file locking
-                import time
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        os.unlink(temp_file_path)
-                        break
-                    except PermissionError:
-                        if attempt < max_retries - 1:
-                            time.sleep(0.5)  # Wait before retry
-                        else:
-                            # Log warning but don't fail the request
-                            print(f"⚠️ Could not delete temp file {temp_file_path} after {max_retries} attempts")
-                    except Exception as e:
-                        print(f"⚠️ Error deleting temp file: {e}")
-                        break
-                
-        except Exception as e:
-            raise Exception(f"Error uploading file '{filename}' to Gemini: {str(e)}")
+                if temp_file_path and Path(temp_file_path).exists():
+                    for cleanup_attempt in range(3):
+                        try:
+                            os.unlink(temp_file_path)
+                            break
+                        except PermissionError:
+                            if cleanup_attempt < 2:
+                                time.sleep(0.5)
+                                continue
+                            print(f"⚠️ Could not delete temp file {temp_file_path} after retries")
+                            break
+                        except Exception as cleanup_exc:
+                            print(f"⚠️ Error deleting temp file {temp_file_path}: {cleanup_exc}")
+                            break
+
+        raise Exception(f"Error uploading file '{filename}' to Gemini after {max_attempts} attempts: {last_error}")
 
     async def process_uploaded_textbook_file(self, file_content: bytes, filename: str) -> str:
         """
-        Process uploaded textbook file using Gemini's native capabilities
-        Returns the Gemini file URI for direct use in prompts
+        Process uploaded textbook file by converting to inline attachment for Gemini processing.
         
-        This method leverages Gemini's multimodal capabilities to:
-        - Read PDFs with images and scanned content
-        - Process Word documents with embedded media
-        - Handle mixed content (text + images)
-        - Extract text from image-based documents
+        Returns the file content in a format suitable for course generation:
+        - For small text files: returns extracted text directly
+        - For large files and PDFs: returns base64-encoded inline data marker
+        
+        This bypasses the Files API entirely, avoiding RAG store requirements.
         """
         try:
             # Get file extension and validate
             file_extension = Path(filename).suffix.lower()
             
-            # For text files, we can still extract content directly for faster processing
+            # For text files, we can extract content directly for faster processing
             if file_extension == '.txt' and len(file_content) < 100000:  # < 100KB
                 try:
                     text_content = file_content.decode('utf-8', errors='ignore')
@@ -2123,14 +2668,32 @@ class GeminiService:
                         print(f"📝 Processing text file directly: {len(text_content)} characters")
                         return text_content
                 except UnicodeDecodeError:
-                    pass  # Fall through to Gemini processing
+                    pass  # Fall through to inline processing
             
-            # For all other files or large text files, use Gemini's native processing
-            print(f"🤖 Using Gemini native processing for {filename}")
-            gemini_file_uri = await self.upload_file_to_gemini(file_content, filename)
+            # For all other files or large text files, prepare as inline attachment marker
+            # We encode the file content in base64 so it can be decoded later
+            file_extension_marker = file_extension or ".bin"
+            mime_type_map = {
+                '.pdf': 'application/pdf',
+                '.txt': 'text/plain',
+                '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                '.doc': 'application/msword',
+                '.png': 'image/png',
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp'
+            }
+            mime_type = mime_type_map.get(file_extension, 'application/octet-stream')
             
-            # Return a special marker that indicates this is a Gemini file reference
-            return f"GEMINI_FILE_URI:{gemini_file_uri}"
+            # Create an inline attachment marker that includes base64-encoded content
+            content_b64 = base64.b64encode(file_content).decode('utf-8')
+            
+            print(f"🤖 Prepared {filename} ({len(file_content)} bytes) for inline Gemini processing")
+            
+            # Return special marker format so course generation knows to use inline attachment
+            # Format: INLINE_FILE:[mime_type]:[base64_data]
+            return f"INLINE_FILE:{mime_type}:{content_b64}:{filename}"
             
         except Exception as e:
             raise Exception(f"Error processing file '{filename}': {str(e)}")
@@ -2256,14 +2819,33 @@ class GeminiService:
         mime_type: Optional[str],
         learner_notes: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Analyze an uploaded learner artifact (e.g., photo of work) and return actionable feedback."""
+        """Analyze an uploaded learner artifact (e.g., photo of work) using inline attachments."""
+        from tools.inline_attachment import build_inline_part
+        import mimetypes
 
         attachments: List[Any] = []
 
         if file_path and Path(file_path).exists():
-            uploaded = genai.upload_file(path=file_path, display_name=Path(file_path).name)
-            processed_file = self._wait_for_file_processing(uploaded)
-            attachments.append(processed_file)
+            try:
+                # Read file and build inline part
+                file_bytes = Path(file_path).read_bytes()
+                
+                # Determine MIME type
+                if not mime_type:
+                    mime_type, _ = mimetypes.guess_type(file_path)
+                    if not mime_type:
+                        mime_type = 'application/octet-stream'
+                
+                # Create inline attachment
+                inline_part = build_inline_part(
+                    data=file_bytes,
+                    mime_type=mime_type,
+                    display_name=Path(file_path).name
+                )
+                attachments.append(inline_part)
+                print(f"✅ Loaded artifact for analysis: {Path(file_path).name} ({len(file_bytes)} bytes)")
+            except Exception as e:
+                print(f"⚠️ Failed to load artifact {file_path}: {e}")
 
         analysis_prompt = (
             "You are an expert tutor reviewing a learner submission.\n"
@@ -2407,6 +2989,12 @@ class GeminiService:
         }
 
     def _wait_for_file_processing(self, uploaded_file):
+        """🚫 DEPRECATED: No longer needed with inline attachments.
+        
+        This method was part of the old Files API approach which required RAG store.
+        All callers have been migrated to use inline attachments.
+        Kept for reference only - do not use in new code.
+        """
         import time
 
         max_wait = 30
@@ -2423,6 +3011,151 @@ class GeminiService:
 
         return uploaded_file
 
+    async def grade_submission_from_images(
+        self,
+        image_files: List[bytes],
+        image_filenames: List[str],
+        assignment_title: str,
+        assignment_description: str,
+        rubric: str,
+        max_points: int = 100,
+        submission_type: str = "homework",
+    ) -> Dict[str, Any]:
+        """
+        Grade a student submission by sending multiple images directly to Gemini as inline attachments.
+        
+        This sends images directly as inline base64 data without converting to PDF, which is more reliable
+        for AI processing and avoids the RAG store requirement.
 
+        Args:
+            image_files: List of image file bytes
+            image_filenames: List of corresponding filenames
+            assignment_title: Title of the assignment
+            assignment_description: Description of what's being graded
+            rubric: Grading criteria
+            max_points: Maximum points possible (default 100)
+            submission_type: Type of submission (homework, quiz, etc.)
+            
+        Returns:
+            Dict with grading results including score, feedback, strengths, etc.
+        """
+        try:
+            # Build inline parts for all images
+            inline_parts = []
+            for img_bytes, img_filename in zip(image_files, image_filenames):
+                # Detect image MIME type
+                file_extension = Path(img_filename).suffix.lower()
+                mime_types_map = {
+                    '.png': 'image/png',
+                    '.jpg': 'image/jpeg',
+                    '.jpeg': 'image/jpeg',
+                    '.gif': 'image/gif',
+                    '.webp': 'image/webp'
+                }
+                mime_type = mime_types_map.get(file_extension, 'image/jpeg')
+                
+                part = build_inline_part(
+                    data=img_bytes,
+                    mime_type=mime_type,
+                    display_name=img_filename
+                )
+                inline_parts.append(part)
+            
+            print(f"✅ Prepared {len(inline_parts)} images as inline attachments for grading")
+            
+            # Create grading prompt
+            grading_prompt = f"""
+            You are an expert educational assessor. Review ALL {len(inline_parts)} attached images 
+            which represent a student's submission, and grade them with detailed analysis.
+
+            ASSIGNMENT DETAILS:
+            Title: {assignment_title}
+            Description: {assignment_description}
+            Type: {submission_type}
+            Maximum Points: {max_points}
+
+            GRADING RUBRIC:
+            {rubric}
+
+            IMPORTANT: Review ALL images in sequence. They are pages of the student's work.
+
+            SAFETY CONTEXT:
+            - These images are photos of student homework for educational review.
+            - They may contain handwriting or simple drawings that are safe for school environments.
+            - There is no harmful, adult, or disallowed content. Proceed with grading normally.
+
+            Provide a comprehensive assessment in JSON format with these keys:
+            {{
+                "score": 85,
+                "percentage": 85.0,
+                "grade_letter": "B+",
+                "overall_feedback": "Overall feedback text",
+                "detailed_feedback": "Detailed analysis text",
+                "strengths": ["strength1", "strength2"],
+                "improvements": ["improvement1", "improvement2"],
+                "corrections": ["correction1", "correction2"],
+                "recommendations": ["recommendation1", "recommendation2"],
+                "rubric_breakdown": {{"criteria_1": {{"score": 20, "max": 25, "feedback": "..."}}}}
+            }}
+            """
+
+            # Generate grading with all images attached inline
+            grade_result = await self._generate_json_response(
+                grading_prompt,
+                attachments=inline_parts,
+                temperature=0.25,
+                max_output_tokens=2048,
+            )
+
+            # Coerce and normalize percentage
+            coerced_percentage = self._coerce_percentage(grade_result, max_points)
+            if coerced_percentage is not None:
+                grade_result["percentage"] = coerced_percentage
+            elif "percentage" in grade_result:
+                parsed_percentage = self._parse_percentage_token(grade_result.get("percentage"))
+                if parsed_percentage is not None:
+                    grade_result["percentage"] = parsed_percentage
+
+            # Parse and normalize score
+            score_value, _ = self._parse_score_token(grade_result.get("score"))
+            if score_value is not None:
+                grade_result["score"] = round(score_value, 2)
+
+            # Ensure overall_feedback exists
+            if not grade_result.get("overall_feedback"):
+                for feedback_key in ("detailed_feedback", "feedback", "ai_feedback"):
+                    if grade_result.get(feedback_key):
+                        grade_result["overall_feedback"] = grade_result[feedback_key]
+                        break
+
+            # Add metadata
+            grade_result["graded_by"] = "Gemini AI"
+            grade_result["graded_at"] = datetime.utcnow().isoformat()
+            grade_result["max_points"] = max_points
+            grade_result["images_count"] = len(inline_parts)
+
+            return grade_result
+
+        except Exception as e:
+            print(f"❌ Error grading images: {e}")
+            
+            # Return error payload to avoid breaking the caller
+            return {
+                "score": None,
+                "percentage": None,
+                "grade_letter": None,
+                "overall_feedback": None,
+                "detailed_feedback": None,
+                "strengths": [],
+                "improvements": [],
+                "corrections": [],
+                "recommendations": [],
+                "rubric_breakdown": None,
+                "graded_by": "Gemini AI",
+                "graded_at": datetime.utcnow().isoformat(),
+                "max_points": max_points,
+                "images_count": len(image_files),
+                "error": str(e),
+            }
 # Singleton instance
 gemini_service = GeminiService()

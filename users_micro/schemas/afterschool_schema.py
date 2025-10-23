@@ -81,6 +81,7 @@ class CourseUpdate(BaseModel):
     age_max: Optional[int] = Field(None, ge=3, le=16)
     difficulty_level: Optional[str] = None
     is_active: Optional[bool] = None
+    image: Optional[str] = Field(None, description="Base64 encoded compressed image")
     
     @validator('difficulty_level')
     def validate_difficulty(cls, v):
@@ -100,6 +101,9 @@ class CourseOut(BaseModel):
     difficulty_level: str
     created_by: int
     is_active: bool
+    
+    # Course image - base64 encoded compressed image
+    image: Optional[str] = Field(default=None, description="Base64 encoded compressed image")
     
     # Enhanced fields with default values for backward compatibility
     total_weeks: int = Field(default=8, description="Total duration in weeks")
@@ -485,3 +489,137 @@ class StudentDashboard(BaseModel):
     progress_summary: List[StudentProgressOut]
     total_study_time: int
     average_score: Optional[float]
+
+
+# ===============================
+# STUDENT NOTES SCHEMAS
+# ===============================
+
+class StudentNoteCreate(BaseModel):
+    """Schema for creating a new student note"""
+    title: str = Field(..., min_length=1, max_length=255, description="Note title")
+    description: Optional[str] = Field(None, max_length=1000, description="Optional description")
+    subject: Optional[str] = Field(None, max_length=100, description="Subject/topic of notes")
+    course_id: Optional[int] = Field(None, description="Link to course (optional)")
+    tags: Optional[List[str]] = Field(None, description="Tags for organization")
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteUpdate(BaseModel):
+    """Schema for updating a student note"""
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    subject: Optional[str] = Field(None, max_length=100)
+    tags: Optional[List[str]] = Field(None)
+    is_starred: Optional[bool] = Field(None)
+    is_public: Optional[bool] = Field(None)
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteAnalysisResult(BaseModel):
+    """Schema for AI analysis results of notes"""
+    summary: Optional[str] = Field(None, description="AI-generated summary")
+    key_points: Optional[List[str]] = Field(None, description="Extracted key points")
+    main_topics: Optional[List[str]] = Field(None, description="Main topics/concepts")
+    learning_concepts: Optional[List[str]] = Field(None, description="Learning concepts")
+    questions_generated: Optional[List[str]] = Field(None, description="AI-generated questions")
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteOut(BaseModel):
+    """Schema for outputting student note details"""
+    id: int
+    user_id: int
+    course_id: Optional[int]
+    title: str
+    description: Optional[str]
+    subject: Optional[str]
+    tags: Optional[List[str]]
+    
+    # File information
+    original_filename: str
+    file_type: str
+    file_size: Optional[int]
+    
+    # AI Analysis
+    ai_processed: bool
+    processing_status: str
+    processed_at: Optional[datetime]
+    
+    # Analysis results
+    summary: Optional[str]
+    key_points: Optional[List[str]]
+    main_topics: Optional[List[str]]
+    learning_concepts: Optional[List[str]]
+    questions_generated: Optional[List[str]]
+    
+    # Metadata
+    is_public: bool
+    is_starred: bool
+    
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteListResponse(BaseModel):
+    """Schema for list of student notes"""
+    total: int
+    notes: List[StudentNoteOut]
+
+
+class NoteAnalysisLogOut(BaseModel):
+    """Schema for note analysis log entry"""
+    id: int
+    note_id: int
+    user_id: int
+    processing_type: str
+    status: str
+    processing_duration_seconds: Optional[float]
+    error_message: Optional[str]
+    attempt_number: int
+    max_attempts: int
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class NoteUploadResponse(BaseModel):
+    """Schema for note upload response"""
+    success: bool
+    message: str
+    note_id: int
+    title: str
+    original_filename: str
+    processing_status: str
+    uploaded_at: datetime
+
+
+class NoteAnalysisResponse(BaseModel):
+    """Schema for note analysis response"""
+    success: bool
+    message: str
+    note_id: int
+    title: str
+    ai_processed: bool
+    processing_status: str
+    
+    # Analysis results
+    summary: Optional[str]
+    key_points: Optional[List[str]]
+    main_topics: Optional[List[str]]
+    learning_concepts: Optional[List[str]]
+    questions_generated: Optional[List[str]]
+    
+    processed_at: Optional[datetime]
+    processing_duration_seconds: Optional[float]
