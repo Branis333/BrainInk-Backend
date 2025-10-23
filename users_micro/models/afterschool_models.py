@@ -376,3 +376,83 @@ class NoteAnalysisLog(Base):
     
     # Relationships
     note = relationship("StudentNote", foreign_keys=[note_id])
+
+
+# ===============================
+# NOTIFICATION SYSTEM
+# ===============================
+
+class NotificationPreference(Base):
+    """
+    User notification preferences and opt-in settings
+    Controls which notification types each user receives
+    """
+    __tablename__ = "as_notification_preferences"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, unique=True, index=True)  # student user_id
+    
+    # Notification type toggles
+    due_date_notifications = Column(Boolean, default=True)  # Notifications for upcoming due assignments
+    daily_encouragement = Column(Boolean, default=True)  # Daily motivational messages
+    completion_notifications = Column(Boolean, default=True)  # Course/block completion congratulations
+    
+    # Push notification settings
+    push_notifications_enabled = Column(Boolean, default=False)  # Master toggle for push notifications
+    push_token = Column(String(500), nullable=True)  # FCM token or Expo token for push notifications
+    
+    # Frequency controls
+    due_date_days_before = Column(Integer, default=1)  # Notify X days before due date (default: 1 day)
+    daily_encouragement_time = Column(String(5), default="09:00")  # HH:MM format for daily message time
+    
+    # Opt-out tracking
+    opted_out_at = Column(DateTime, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('user_id', name='uq_as_notification_preference_user'),
+    )
+
+
+class Notification(Base):
+    """
+    Notification records for tracking what was sent to users
+    Enables persistence, dismissal, and analytics
+    """
+    __tablename__ = "as_notifications"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)  # student user_id (recipient)
+    
+    # Notification content
+    type = Column(String(50), nullable=False)  # due_date, daily_encouragement, completion
+    title = Column(String(200), nullable=False)  # Notification title
+    body = Column(Text, nullable=False)  # Notification message content
+    
+    # Optional metadata linking to course/assignment
+    course_id = Column(Integer, ForeignKey("as_courses.id"), nullable=True)
+    assignment_id = Column(Integer, ForeignKey("as_course_assignments.id"), nullable=True)
+    block_id = Column(Integer, ForeignKey("as_course_blocks.id"), nullable=True)
+    
+    # Status tracking
+    status = Column(String(50), default="created")  # created, scheduled, sent, failed, dismissed, read
+    is_read = Column(Boolean, default=False)
+    read_at = Column(DateTime, nullable=True)
+    dismissed_at = Column(DateTime, nullable=True)
+    
+    # Push notification tracking
+    push_sent_at = Column(DateTime, nullable=True)
+    push_failed_reason = Column(Text, nullable=True)
+    
+    # Scheduling
+    scheduled_for = Column(DateTime, nullable=True)  # When the notification should be sent
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    course = relationship("Course", foreign_keys=[course_id])
+    assignment = relationship("CourseAssignment", foreign_keys=[assignment_id])
+    block = relationship("CourseBlock", foreign_keys=[block_id])

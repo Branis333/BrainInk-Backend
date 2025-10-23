@@ -141,6 +141,23 @@ async def get_course_progress(
         db.commit()
         db.refresh(progress)
 
+        # Trigger completion notification if newly completed (100%)
+        if completion_percentage >= 100.0 and not progress.completed_at:
+            # Course is now fully complete, send congratulations notification
+            try:
+                from Endpoints.after_school.notification_scheduler import NotificationScheduler
+                course = db.query(Course).filter(Course.id == course_id).first()
+                if course:
+                    NotificationScheduler.trigger_completion_notification(
+                        user_id=user_id,
+                        course_id=course_id,
+                        course_title=course.title,
+                        completion_type="course"
+                    )
+                    print(f"🎉 Triggered completion notification for user {user_id}, course {course_id}")
+            except Exception as e:
+                print(f"⚠️ Error triggering completion notification: {str(e)}")
+
         # Build response
         return StudentProgressOut(
             id=progress.id,
@@ -487,6 +504,9 @@ async def create_course_from_textbook(
                 db.add(course_block)
                 created_blocks.append(course_block)
         
+            # Ensure block IDs are generated before creating assignments that reference them
+            db.flush()
+
             # Create course assignments
             created_assignments = []
             
@@ -503,6 +523,7 @@ async def create_course_from_textbook(
                         points=assignment_data["points"],
                         rubric=assignment_data["rubric"],
                         week_assigned=block_data.week,
+                        block_id=created_blocks[i].id,
                         due_days_after_assignment=assignment_data["due_days_after_block"],
                         submission_format=assignment_data.get("submission_format", "PDF"),
                         learning_outcomes=assignment_data.get("learning_outcomes", []),

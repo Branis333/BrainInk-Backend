@@ -9,7 +9,9 @@ from Endpoints.after_school import (
     assignments as after_school_assignments,
     ai_tutor as after_school_ai_tutor,
     notes as after_school_notes,
+    notifications,
 )
+from Endpoints.after_school.notification_scheduler import setup_notification_scheduler
 from db.database import get_engine, test_connection
 from dotenv import load_dotenv
 import logging
@@ -79,6 +81,14 @@ async def startup_event():
     # Log routers (no DB dependency)
     total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router, after_school_assignments.router])
     print(f"🔄 Total endpoints loaded: {total_endpoints}")
+    
+    # Setup notification scheduler
+    print("🔔 Setting up notification scheduler...")
+    scheduler = setup_notification_scheduler()
+    if scheduler:
+        print("✅ Notification scheduler started successfully")
+    else:
+        print("⚠️ Notification scheduler failed to start")
 
 """Remove eager table creation; handled in startup_event with lazy engine."""
 
@@ -117,6 +127,7 @@ app.include_router(reading_assistant.router)  # Already has prefix /after-school
 app.include_router(after_school_assignments.router)  # New: /after-school/assignments
 app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
+app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
 
 @app.get("/")
 def root():
