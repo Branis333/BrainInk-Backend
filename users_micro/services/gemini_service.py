@@ -2897,40 +2897,183 @@ class GeminiService:
 
     def _normalise_tutor_turn_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         narration = raw.get("narration") or "Let's keep learning together!"
-        follow_ups = raw.get("follow_up_prompts") or []
 
+        # Comprehension check: ensure string or None
+        cc_raw = raw.get("comprehension_check")
+        if isinstance(cc_raw, (list, dict)):
+            try:
+                cc_value = json.dumps(cc_raw, ensure_ascii=False)
+            except Exception:
+                cc_value = str(cc_raw)
+        elif cc_raw is None:
+            cc_value = None
+        else:
+            cc_value = str(cc_raw)
+
+        # Follow-ups: coerce to List[str]
+        fu_raw = raw.get("follow_up_prompts")
+        follow_ups: List[str] = []
+        if isinstance(fu_raw, list):
+            follow_ups = [str(x).strip() for x in fu_raw if str(x).strip()]
+        elif isinstance(fu_raw, str):
+            text = fu_raw.strip()
+            # Try strict JSON parse first
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    follow_ups = [str(x).strip() for x in parsed if str(x).strip()]
+                else:
+                    # Split by common delimiters
+                    parts = re.split(r"\n|\r|\||,|;|•|\u2022", text)
+                    follow_ups = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+            except Exception:
+                parts = re.split(r"\n|\r|\||,|;|•|\u2022", text)
+                follow_ups = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+        else:
+            follow_ups = []
+        # Limit to 3 concise prompts
+        follow_ups = follow_ups[:3]
+
+        # Checkpoint: normalise shape and fields
         checkpoint_payload = raw.get("checkpoint") or None
         checkpoint: Optional[Dict[str, Any]] = None
         if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("required"):
+            ctype = str(checkpoint_payload.get("checkpoint_type") or "reflection").lower()
+            if ctype not in {"photo", "reflection", "quiz"}:
+                ctype = "reflection"
+            crit_raw = checkpoint_payload.get("criteria")
+            criteria: List[str] = []
+            if isinstance(crit_raw, list):
+                criteria = [str(x).strip() for x in crit_raw if str(x).strip()]
+            elif isinstance(crit_raw, str):
+                try:
+                    parsed = json.loads(crit_raw)
+                    if isinstance(parsed, list):
+                        criteria = [str(x).strip() for x in parsed if str(x).strip()]
+                    else:
+                        parts = re.split(r"\n|\r|\||,|;|•|\u2022", crit_raw)
+                        criteria = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+                except Exception:
+                    parts = re.split(r"\n|\r|\||,|;|•|\u2022", crit_raw)
+                    criteria = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+
             checkpoint = {
                 "required": bool(checkpoint_payload.get("required", False)),
-                "checkpoint_type": (checkpoint_payload.get("checkpoint_type") or "reflection").lower(),
+                "checkpoint_type": ctype,
                 "instructions": checkpoint_payload.get("instructions") or "Take a moment to reflect on what you learned.",
-                "criteria": checkpoint_payload.get("criteria") or [],
+                "criteria": criteria,
             }
 
         return {
             "narration": narration,
-            "comprehension_check": raw.get("comprehension_check"),
+            "comprehension_check": cc_value,
             "follow_up_prompts": follow_ups,
             "checkpoint": checkpoint,
             "advance_segment": bool(raw.get("advance_segment", True)),
         }
 
     def _normalise_analysis_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        feedback = raw.get("feedback") or {}
+        def _to_list(value: Any) -> List[str]:
+            if isinstance(value, list):
+                return [str(x).strip() for x in value if str(x).strip()]
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return []
+                # Try JSON parse first
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+                # Split on common delimiters and bullets
+                parts = re.split(r"\n|\r|\||,|;|•|\u2022", text)
+                return [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+            return []
+
+        def _to_score_0_100(value: Any) -> Optional[float]:
+            def clamp(n: float) -> float:
+                return max(0.0, min(100.0, float(n)))
+
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return clamp(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                # Ratio form: "x / y"
+                m = re.search(r"(-?\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
+                if m:
+                    num = float(m.group(1))
+                    den = float(m.group(2))
+                    if den > 0:
+                        return clamp((num / den) * 100.0)
+                # Percentage or plain number
+                m2 = re.search(r"-?\d+(?:\.\d+)?", text)
+                if m2:
+                    n = float(m2.group())
+                    return clamp(n)
+            return None
+
+        def _to_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y"}
+            return False
+
+        # Feedback may be dict or a raw string summary
+        feedback_raw = raw.get("feedback")
+        feedback_summary = "Thanks for sharing your work!"
+        strengths: List[str] = []
+        improvements: List[str] = []
+        next_steps: List[str] = []
+
+        if isinstance(feedback_raw, dict):
+            feedback_summary = str(feedback_raw.get("summary") or feedback_summary)
+            strengths = _to_list(feedback_raw.get("strengths"))
+            improvements = _to_list(feedback_raw.get("improvements"))
+            next_steps = _to_list(feedback_raw.get("next_steps"))
+        elif isinstance(feedback_raw, str):
+            # Try to parse JSON first
+            parsed: Optional[Dict[str, Any]] = None
+            try:
+                tmp = json.loads(feedback_raw)
+                if isinstance(tmp, dict):
+                    parsed = tmp
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                feedback_summary = str(parsed.get("summary") or feedback_summary)
+                strengths = _to_list(parsed.get("strengths"))
+                improvements = _to_list(parsed.get("improvements"))
+                next_steps = _to_list(parsed.get("next_steps"))
+            else:
+                # Treat raw string as the summary
+                feedback_summary = feedback_raw.strip() or feedback_summary
+
         formatted_feedback = {
-            "summary": feedback.get("summary") or "Thanks for sharing your work!",
-            "strengths": feedback.get("strengths") or [],
-            "improvements": feedback.get("improvements") or [],
-            "next_steps": feedback.get("next_steps") or [],
+            "summary": feedback_summary,
+            "strengths": strengths,
+            "improvements": improvements,
+            "next_steps": next_steps,
         }
+
+        score_value = _to_score_0_100(raw.get("score"))
+        needs_review = _to_bool(raw.get("needs_review", False))
+        tutor_message = raw.get("tutor_message")
+        tutor_message = str(tutor_message) if tutor_message is not None else feedback_summary
 
         return {
             "feedback": formatted_feedback,
-            "score": raw.get("score"),
-            "needs_review": bool(raw.get("needs_review", False)),
-            "tutor_message": raw.get("tutor_message") or formatted_feedback["summary"],
+            "score": score_value,
+            "needs_review": needs_review,
+            "tutor_message": tutor_message,
         }
 
     def _wait_for_file_processing(self, uploaded_file):
