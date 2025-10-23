@@ -2973,19 +2973,107 @@ class GeminiService:
         }
 
     def _normalise_analysis_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
-        feedback = raw.get("feedback") or {}
+        def _to_list(value: Any) -> List[str]:
+            if isinstance(value, list):
+                return [str(x).strip() for x in value if str(x).strip()]
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return []
+                # Try JSON parse first
+                try:
+                    parsed = json.loads(text)
+                    if isinstance(parsed, list):
+                        return [str(x).strip() for x in parsed if str(x).strip()]
+                except Exception:
+                    pass
+                # Split on common delimiters and bullets
+                parts = re.split(r"\n|\r|\||,|;|•|\u2022", text)
+                return [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+            return []
+
+        def _to_score_0_100(value: Any) -> Optional[float]:
+            def clamp(n: float) -> float:
+                return max(0.0, min(100.0, float(n)))
+
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return clamp(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                # Ratio form: "x / y"
+                m = re.search(r"(-?\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", text)
+                if m:
+                    num = float(m.group(1))
+                    den = float(m.group(2))
+                    if den > 0:
+                        return clamp((num / den) * 100.0)
+                # Percentage or plain number
+                m2 = re.search(r"-?\d+(?:\.\d+)?", text)
+                if m2:
+                    n = float(m2.group())
+                    return clamp(n)
+            return None
+
+        def _to_bool(value: Any) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return value != 0
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "y"}
+            return False
+
+        # Feedback may be dict or a raw string summary
+        feedback_raw = raw.get("feedback")
+        feedback_summary = "Thanks for sharing your work!"
+        strengths: List[str] = []
+        improvements: List[str] = []
+        next_steps: List[str] = []
+
+        if isinstance(feedback_raw, dict):
+            feedback_summary = str(feedback_raw.get("summary") or feedback_summary)
+            strengths = _to_list(feedback_raw.get("strengths"))
+            improvements = _to_list(feedback_raw.get("improvements"))
+            next_steps = _to_list(feedback_raw.get("next_steps"))
+        elif isinstance(feedback_raw, str):
+            # Try to parse JSON first
+            parsed: Optional[Dict[str, Any]] = None
+            try:
+                tmp = json.loads(feedback_raw)
+                if isinstance(tmp, dict):
+                    parsed = tmp
+            except Exception:
+                parsed = None
+            if parsed is not None:
+                feedback_summary = str(parsed.get("summary") or feedback_summary)
+                strengths = _to_list(parsed.get("strengths"))
+                improvements = _to_list(parsed.get("improvements"))
+                next_steps = _to_list(parsed.get("next_steps"))
+            else:
+                # Treat raw string as the summary
+                feedback_summary = feedback_raw.strip() or feedback_summary
+
         formatted_feedback = {
-            "summary": feedback.get("summary") or "Thanks for sharing your work!",
-            "strengths": feedback.get("strengths") or [],
-            "improvements": feedback.get("improvements") or [],
-            "next_steps": feedback.get("next_steps") or [],
+            "summary": feedback_summary,
+            "strengths": strengths,
+            "improvements": improvements,
+            "next_steps": next_steps,
         }
+
+        score_value = _to_score_0_100(raw.get("score"))
+        needs_review = _to_bool(raw.get("needs_review", False))
+        tutor_message = raw.get("tutor_message")
+        tutor_message = str(tutor_message) if tutor_message is not None else feedback_summary
 
         return {
             "feedback": formatted_feedback,
-            "score": raw.get("score"),
-            "needs_review": bool(raw.get("needs_review", False)),
-            "tutor_message": raw.get("tutor_message") or formatted_feedback["summary"],
+            "score": score_value,
+            "needs_review": needs_review,
+            "tutor_message": tutor_message,
         }
 
     def _wait_for_file_processing(self, uploaded_file):
