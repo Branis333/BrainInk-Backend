@@ -2315,21 +2315,76 @@ class GeminiService:
 
     def _normalise_tutor_turn_payload(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         narration = raw.get("narration") or "Let's keep learning together!"
-        follow_ups = raw.get("follow_up_prompts") or []
 
+        # Comprehension check: ensure string or None
+        cc_raw = raw.get("comprehension_check")
+        if isinstance(cc_raw, (list, dict)):
+            try:
+                cc_value = json.dumps(cc_raw, ensure_ascii=False)
+            except Exception:
+                cc_value = str(cc_raw)
+        elif cc_raw is None:
+            cc_value = None
+        else:
+            cc_value = str(cc_raw)
+
+        # Follow-ups: coerce to List[str]
+        fu_raw = raw.get("follow_up_prompts")
+        follow_ups: List[str] = []
+        if isinstance(fu_raw, list):
+            follow_ups = [str(x).strip() for x in fu_raw if str(x).strip()]
+        elif isinstance(fu_raw, str):
+            text = fu_raw.strip()
+            # Try strict JSON parse first
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    follow_ups = [str(x).strip() for x in parsed if str(x).strip()]
+                else:
+                    # Split by common delimiters
+                    parts = re.split(r"\n|\r|\||,|;|•|\u2022", text)
+                    follow_ups = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+            except Exception:
+                parts = re.split(r"\n|\r|\||,|;|•|\u2022", text)
+                follow_ups = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+        else:
+            follow_ups = []
+        # Limit to 3 concise prompts
+        follow_ups = follow_ups[:3]
+
+        # Checkpoint: normalise shape and fields
         checkpoint_payload = raw.get("checkpoint") or None
         checkpoint: Optional[Dict[str, Any]] = None
         if isinstance(checkpoint_payload, dict) and checkpoint_payload.get("required"):
+            ctype = str(checkpoint_payload.get("checkpoint_type") or "reflection").lower()
+            if ctype not in {"photo", "reflection", "quiz"}:
+                ctype = "reflection"
+            crit_raw = checkpoint_payload.get("criteria")
+            criteria: List[str] = []
+            if isinstance(crit_raw, list):
+                criteria = [str(x).strip() for x in crit_raw if str(x).strip()]
+            elif isinstance(crit_raw, str):
+                try:
+                    parsed = json.loads(crit_raw)
+                    if isinstance(parsed, list):
+                        criteria = [str(x).strip() for x in parsed if str(x).strip()]
+                    else:
+                        parts = re.split(r"\n|\r|\||,|;|•|\u2022", crit_raw)
+                        criteria = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+                except Exception:
+                    parts = re.split(r"\n|\r|\||,|;|•|\u2022", crit_raw)
+                    criteria = [p.strip().strip('-').strip('*') for p in parts if p and p.strip()]
+
             checkpoint = {
                 "required": bool(checkpoint_payload.get("required", False)),
-                "checkpoint_type": (checkpoint_payload.get("checkpoint_type") or "reflection").lower(),
+                "checkpoint_type": ctype,
                 "instructions": checkpoint_payload.get("instructions") or "Take a moment to reflect on what you learned.",
-                "criteria": checkpoint_payload.get("criteria") or [],
+                "criteria": criteria,
             }
 
         return {
             "narration": narration,
-            "comprehension_check": raw.get("comprehension_check"),
+            "comprehension_check": cc_value,
             "follow_up_prompts": follow_ups,
             "checkpoint": checkpoint,
             "advance_segment": bool(raw.get("advance_segment", True)),
