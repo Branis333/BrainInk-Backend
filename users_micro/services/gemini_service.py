@@ -2808,8 +2808,42 @@ class GeminiService:
             temperature=0.35,
             max_output_tokens=768,
         )
+        payload = self._normalise_tutor_turn_payload(raw)
 
-        return self._normalise_tutor_turn_payload(raw)
+        # If narration looks truncated or too short, attempt a single repair pass
+        try:
+            narration_text = (payload.get("narration") or "").strip()
+            looks_incomplete = (
+                len(narration_text) < 60 or not re.search(r"[.!?]$", narration_text)
+            )
+        except Exception:
+            narration_text = ""
+            looks_incomplete = True
+
+        if looks_incomplete:
+            repair_prompt = (
+                prompt
+                + "\n\nThe last output appears truncated. Regenerate COMPLETE JSON strictly matching the schema, with a concise 2–3 sentence narration that fully ends in punctuation. Keep it under 300 tokens. Respond with pure JSON only."
+            )
+            try:
+                raw2 = await self._generate_json_response(
+                    repair_prompt,
+                    temperature=0.25,
+                    max_output_tokens=512,
+                )
+                payload2 = self._normalise_tutor_turn_payload(raw2)
+                # Prefer the repaired payload if it looks better
+                n2 = (payload2.get("narration") or "").strip()
+                if len(n2) >= max(len(narration_text), 60) and re.search(r"[.!?]$", n2):
+                    return payload2
+            except Exception:
+                pass
+
+            # As a last resort, ensure the narration ends cleanly for UI
+            if narration_text and not re.search(r"[.!?]$", narration_text):
+                payload["narration"] = narration_text + "…"
+
+        return payload
 
     async def analyze_student_work_with_gemini(
         self,
