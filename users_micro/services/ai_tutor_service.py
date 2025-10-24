@@ -22,7 +22,7 @@ from models.ai_tutor_models import (
     TutorInteractionInputType,
     TutorCheckpointStatus,
 )
-from users_micro.db.database import get_engine, Base
+from db.database import get_engine, Base
 from models.afterschool_models import CourseBlock, CourseLesson
 from schemas.ai_tutor_schemas import (
     SessionStartRequest,
