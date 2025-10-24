@@ -43,6 +43,19 @@ class AITutorService:
 
     def __init__(self):
         self.gemini = gemini_service
+        # Checkpoint throttling config (env-overridable)
+        try:
+            self.min_gap_segments = int(os.getenv("AI_TUTOR_CHECKPOINT_MIN_GAP", "3"))
+        except Exception:
+            self.min_gap_segments = 3
+        try:
+            self.dedupe_window = int(os.getenv("AI_TUTOR_CHECKPOINT_DEDUPE_WINDOW", "5"))
+        except Exception:
+            self.dedupe_window = 5
+        try:
+            self.same_type_backoff = int(os.getenv("AI_TUTOR_CHECKPOINT_SAME_TYPE_BACKOFF", "2"))
+        except Exception:
+            self.same_type_backoff = 2
 
     # ------------------------------------------------------------------
     # Public API
@@ -442,24 +455,33 @@ class AITutorService:
         if not recent_checkpoints:
             return True
 
-        min_gap = 2
         settings = session.tutor_settings or {}
         last_cp_segment = settings.get("last_checkpoint_segment_index")
 
         if isinstance(last_cp_segment, int):
             # If too soon since last checkpoint, skip creating a new one
-            if (session.current_segment_index - last_cp_segment) < min_gap:
+            if (session.current_segment_index - last_cp_segment) < self.min_gap_segments:
                 return False
 
         # Dedupe by comparing against last few checkpoint prompts and types
         target_type = tutor_turn.checkpoint.checkpoint_type.value
         target_prompt_norm = self._normalise_text(tutor_turn.checkpoint.instructions)
-        for cp in reversed(recent_checkpoints[-3:]):
+        same_type_count = 0
+        window = max(1, self.dedupe_window)
+        for cp in reversed(recent_checkpoints[-window:]):
             try:
+                # Exact prompt duplicate within window
                 if (cp.checkpoint_type == target_type) and (self._normalise_text(cp.prompt) == target_prompt_norm):
                     return False
+                # Track consecutive same-type density in window
+                if cp.checkpoint_type == target_type:
+                    same_type_count += 1
             except Exception:
                 continue
+
+        # Avoid repeating same checkpoint type too frequently even with different wording
+        if same_type_count >= max(1, self.same_type_backoff):
+            return False
 
         return True
 
