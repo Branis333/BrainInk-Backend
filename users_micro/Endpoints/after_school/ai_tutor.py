@@ -21,6 +21,12 @@ from schemas.ai_tutor_schemas import (
     TutorSessionListItem,
     TutorSessionListResponse,
     TutorCompletionRequest,
+    LessonPlanResponse,
+    TutorSessionStatus,  # for typing
+)
+from schemas.ai_tutor_schemas import (
+    BaseModel,
+    Field,
 )
 from schemas.ai_tutor_schemas import TutorSessionStatus as TutorSessionStatusSchema, TutorCheckpointType
 from services.ai_tutor_service import ai_tutor_service
@@ -174,3 +180,44 @@ def _serialize_interactions(interactions: List[AITutorInteraction]) -> List[Tuto
             )
         )
     return serialized
+
+
+class LearnerProfileResponse(BaseModel):
+    learner_profile: dict = Field(default_factory=dict)
+
+
+@router.get("/learner-profile", response_model=LearnerProfileResponse)
+async def get_learner_profile(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+):
+    # Prefer stored profile; fall back to computing from history
+    from models.ai_tutor_models import LearnerProfile
+    row = (
+        db.query(LearnerProfile)
+        .filter(LearnerProfile.student_id == current_user["user_id"], LearnerProfile.course_id == None)
+        .first()
+    )
+    if row:
+        profile = {
+            "topics": row.topics or [],
+            "recent_sessions": row.recent_sessions or [],
+            "streak_days": row.streak_days or 0,
+        }
+    else:
+        profile = ai_tutor_service._build_learner_profile(db, current_user["user_id"], course_id=None)
+    return LearnerProfileResponse(learner_profile=profile)
+
+
+@router.get("/sessions/{session_id}/lesson-plan", response_model=LessonPlanResponse)
+async def get_lesson_plan(
+    session_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+):
+    plan = ai_tutor_service.get_lesson_plan(
+        session_id=session_id,
+        student_id=current_user["user_id"],
+        db=db,
+    )
+    return LessonPlanResponse(lesson_plan=plan)

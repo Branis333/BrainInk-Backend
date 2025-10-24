@@ -16,11 +16,13 @@ from models.ai_tutor_models import (
     AITutorSession,
     AITutorInteraction,
     AITutorCheckpoint,
+    LearnerProfile,
     TutorSessionStatus,
     TutorInteractionRole,
     TutorInteractionInputType,
     TutorCheckpointStatus,
 )
+from users_micro.db.database import get_engine, Base
 from models.afterschool_models import CourseBlock, CourseLesson
 from schemas.ai_tutor_schemas import (
     SessionStartRequest,
@@ -105,6 +107,26 @@ class AITutorService:
         db.add(system_message)
         db.flush()
 
+        # Ensure learner profile table exists (safe no-op if already present)
+        try:
+            engine = get_engine()
+            Base.metadata.create_all(bind=engine)
+        except Exception:
+            logger.exception("Failed to ensure tables via create_all")
+
+        # Build lesson plan up-front (pre-generated explanations, questions, checkpoints)
+        await self._ensure_lesson_plan(db, session, content_text, segments)
+
+        # Build learner profile snapshot from historical sessions/checkpoints
+        try:
+            profile = self._build_learner_profile(db, student_id, request.course_id)
+            settings = session.tutor_settings or {}
+            settings["learner_profile"] = profile
+            session.tutor_settings = settings
+            db.flush()
+        except Exception:
+            logger.exception("Failed to compute learner profile snapshot")
+
         tutor_turn = await self._generate_tutor_turn(db, session, learner_message=None)
         db.commit()
         db.refresh(session)
@@ -131,6 +153,28 @@ class AITutorService:
         )
         db.add(interaction)
         db.flush()
+        # If serving from a lesson plan and we were awaiting a response, advance pointer now
+        settings = session.tutor_settings or {}
+        plan = settings.get("lesson_plan")
+        if plan:
+            state = settings.get("plan_state") or {}
+            awaiting = state.get("awaiting")
+            if awaiting == "question":
+                # Mark answered and advance to next snippet
+                state["awaiting"] = None
+                seg_idx = int(state.get("segment_index", 0))
+                sn_idx = int(state.get("snippet_index", 0))
+                segs = (plan.get("segments") or [])
+                if seg_idx < len(segs):
+                    total_snips = len(segs[seg_idx].get("snippets", []) )
+                    if sn_idx + 1 < total_snips:
+                        state["snippet_index"] = sn_idx + 1
+                    else:
+                        state["segment_index"] = seg_idx + 1
+                        state["snippet_index"] = 0
+                settings["plan_state"] = state
+                session.tutor_settings = settings
+                session.updated_at = datetime.utcnow()
 
         tutor_turn = await self._generate_tutor_turn(db, session, learner_message=message_request.message)
         db.commit()
@@ -254,6 +298,20 @@ class AITutorService:
         snapshot = self._snapshot(session)
         return snapshot, session.interactions
 
+    def get_lesson_plan(
+        self,
+        session_id: int,
+        student_id: int,
+        db: Session,
+    ) -> Dict[str, Any]:
+        session = self._require_session(db, session_id, student_id)
+        settings = session.tutor_settings or {}
+        plan = settings.get("lesson_plan")
+        if not plan:
+            # No plan available; return an empty structure to keep client robust
+            return {"module_title": None, "segments": []}
+        return plan
+
     def list_sessions(
         self,
         student_id: int,
@@ -357,46 +415,75 @@ class AITutorService:
             for interaction in session.interactions[-10:]
         ]
 
-        try:
-            tutor_response = await self.gemini.generate_ai_tutor_turn(
-                persona=session.persona_config,
-                content_segment=current_segment,
-                history=history_payload,
-                learner_message=learner_message,
-                total_segments=len(session.content_segments),
-                current_index=session.current_segment_index,
+        # If we have a pre-generated lesson plan, serve the next planned turn
+        lesson_plan = (session.tutor_settings or {}).get("lesson_plan")
+        if lesson_plan:
+            tutor_turn = self._tutor_turn_from_plan(session)
+            # Log tutor turn for history
+            db.add(
+                AITutorInteraction(
+                    session_id=session.id,
+                    role=TutorInteractionRole.TUTOR,
+                    content=tutor_turn.narration,
+                    input_type=TutorInteractionInputType.TEXT,
+                    metadata_payload={
+                        "checkpoint": tutor_turn.checkpoint.dict() if tutor_turn.checkpoint else None,
+                        "follow_up_prompts": tutor_turn.follow_up_prompts,
+                        "source": "lesson_plan",
+                    },
+                )
             )
-        except ValueError as empty_response_error:
-            logger.warning(
-                "Gemini returned no text for session %s segment %s: %s",
-                session.id,
-                session.current_segment_index,
-                empty_response_error,
-            )
-            tutor_response = self._fallback_tutor_turn()
-        except Exception:
-            logger.exception(
-                "Gemini call failed for session %s segment %s; using fallback narrator",
-                session.id,
-                session.current_segment_index,
-            )
-            tutor_response = self._fallback_tutor_turn()
+            db.flush()
+            # Update high-level status (awaiting checkpoint or active)
+            if tutor_turn.checkpoint and tutor_turn.checkpoint.required:
+                session.status = TutorSessionStatus.AWAITING_CHECKPOINT
+            else:
+                session.status = TutorSessionStatus.IN_PROGRESS
+            session.updated_at = datetime.utcnow()
+            tutor_response = {"advance_segment": False}
+        else:
+            # Fallback: on-the-fly generation for legacy sessions
+            try:
+                tutor_response = await self.gemini.generate_ai_tutor_turn(
+                    persona=session.persona_config,
+                    content_segment=current_segment,
+                    history=history_payload,
+                    learner_message=learner_message,
+                    total_segments=len(session.content_segments),
+                    current_index=session.current_segment_index,
+                )
+            except ValueError as empty_response_error:
+                logger.warning(
+                    "Gemini returned no text for session %s segment %s: %s",
+                    session.id,
+                    session.current_segment_index,
+                    empty_response_error,
+                )
+                tutor_response = self._fallback_tutor_turn()
+            except Exception:
+                logger.exception(
+                    "Gemini call failed for session %s segment %s; using fallback narrator",
+                    session.id,
+                    session.current_segment_index,
+                )
+                tutor_response = self._fallback_tutor_turn()
 
-        tutor_turn = TutorTurn(**tutor_response)
+            tutor_turn = TutorTurn(**tutor_response)
 
-        db.add(
-            AITutorInteraction(
-                session_id=session.id,
-                role=TutorInteractionRole.TUTOR,
-                content=tutor_turn.narration,
-                input_type=TutorInteractionInputType.TEXT,
-                metadata_payload={
-                    "checkpoint": tutor_turn.checkpoint.dict() if tutor_turn.checkpoint else None,
-                    "follow_up_prompts": tutor_turn.follow_up_prompts,
-                },
+        if not lesson_plan:
+            db.add(
+                AITutorInteraction(
+                    session_id=session.id,
+                    role=TutorInteractionRole.TUTOR,
+                    content=tutor_turn.narration,
+                    input_type=TutorInteractionInputType.TEXT,
+                    metadata_payload={
+                        "checkpoint": tutor_turn.checkpoint.dict() if tutor_turn.checkpoint else None,
+                        "follow_up_prompts": tutor_turn.follow_up_prompts,
+                    },
+                )
             )
-        )
-        db.flush()
+            db.flush()
 
         # Backend checkpoint throttling and deduplication
         if tutor_turn.checkpoint and tutor_turn.checkpoint.required:
@@ -432,6 +519,265 @@ class AITutorService:
 
         session.updated_at = datetime.utcnow()
         return tutor_turn
+
+    # ------------------------------
+    # Lesson plan helpers
+    # ------------------------------
+    async def _ensure_lesson_plan(
+        self,
+        db: Session,
+        session: AITutorSession,
+        content_text: str,
+        segments: List[str],
+    ) -> None:
+        settings = session.tutor_settings or {}
+        if settings.get("lesson_plan"):
+            session.tutor_settings = settings
+            return
+
+        segment_payload = [{"index": i, "text": seg} for i, seg in enumerate(segments)]
+        try:
+            plan = await self.gemini.generate_lesson_plan_for_segments(
+                persona=session.persona_config,
+                module_title=(session.tutor_settings or {}).get("source", {}).get("title"),
+                segments=segment_payload,
+            )
+        except Exception:
+            logger.exception("Failed to pre-generate lesson plan; proceeding without one")
+            plan = None
+
+        if plan and isinstance(plan, dict) and plan.get("segments"):
+            settings["lesson_plan"] = plan
+            settings["plan_state"] = {
+                "segment_index": 0,
+                "snippet_index": 0,
+                "awaiting": None,  # 'question' | 'checkpoint' | None
+                "retry_used_for": {},  # key: f"{seg}:{snip}" -> bool
+                "force_easier": False,
+            }
+            session.tutor_settings = settings
+            db.flush()
+
+    def _get_plan(self, session: AITutorSession) -> Optional[Dict[str, Any]]:
+        return (session.tutor_settings or {}).get("lesson_plan")
+
+    def _get_plan_state(self, session: AITutorSession) -> Dict[str, Any]:
+        st = (session.tutor_settings or {}).get("plan_state") or {}
+        return {
+            "segment_index": int(st.get("segment_index", 0)),
+            "snippet_index": int(st.get("snippet_index", 0)),
+            "awaiting": st.get("awaiting"),
+            "retry_used_for": st.get("retry_used_for", {}),
+            "force_easier": bool(st.get("force_easier", False)),
+        }
+
+    def _save_plan_state(self, session: AITutorSession, state: Dict[str, Any]) -> None:
+        settings = session.tutor_settings or {}
+        settings["plan_state"] = state
+        session.tutor_settings = settings
+
+    def _tutor_turn_from_plan(self, session: AITutorSession) -> TutorTurn:
+        plan = self._get_plan(session)
+        state = self._get_plan_state(session)
+        seg_idx = state["segment_index"]
+        sn_idx = state["snippet_index"]
+        force_easier = state.get("force_easier", False)
+        force_enrichment = bool(state.get("force_enrichment", False))
+
+        segments = plan.get("segments", []) if plan else []
+        if seg_idx >= len(segments):
+            # No more content - mark complete
+            session.status = TutorSessionStatus.COMPLETED
+            session.updated_at = datetime.utcnow()
+            return TutorTurn(
+                narration="Awesome work! You've reached the end of this module.",
+                comprehension_check=None,
+                follow_up_prompts=[],
+                checkpoint=None,
+            )
+
+        seg = segments[seg_idx]
+        snippets = seg.get("snippets", [])
+        if not snippets:
+            # Advance to next segment if empty
+            state["segment_index"] = seg_idx + 1
+            state["snippet_index"] = 0
+            self._save_plan_state(session, state)
+            return self._tutor_turn_from_plan(session)
+
+        snip = snippets[min(sn_idx, max(0, len(snippets) - 1))]
+        key = f"{seg_idx}:{sn_idx}"
+        retry_used_for = state.get("retry_used_for", {})
+        use_easier = bool(force_easier) and bool(snip.get("easier_explanation"))
+
+        # Difficulty adaptation: if enrichment is available and we have strong recent performance, use it
+        use_enrichment = False
+        if not use_easier:
+            # Look at recent checkpoint scores to gauge proficiency
+            recent_scores = [cp.score for cp in (session.checkpoints or []) if cp.score is not None]
+            avg = sum(recent_scores[-3:]) / max(1, len(recent_scores[-3:])) if recent_scores[-3:] else None
+            if force_enrichment or (avg is not None and avg >= 85.0):
+                use_enrichment = bool(snip.get("enrichment_explanation"))
+
+        if use_easier:
+            narration_text = snip.get("easier_explanation") or snip.get("explanation") or "Let's break this down simply."
+        elif use_enrichment:
+            narration_text = snip.get("enrichment_explanation") or snip.get("explanation") or "Let's deepen our understanding."
+        else:
+            narration_text = snip.get("explanation") or "Let's explore this idea."
+        question = snip.get("question")
+        follow = snip.get("follow_ups") or []
+        cp = snip.get("checkpoint")
+
+        # Determine awaiting state
+        awaiting = None
+        if cp and cp.get("required"):
+            awaiting = "checkpoint"
+        elif question:
+            awaiting = "question"
+
+        state["awaiting"] = awaiting
+        state["force_easier"] = False  # reset after serving
+        state["force_enrichment"] = False
+        # Do NOT advance here; advancement occurs after response or checkpoint
+        self._save_plan_state(session, state)
+        # Keep session-level index aligned for client UIs
+        try:
+            session.current_segment_index = int(seg_idx)
+        except Exception:
+            pass
+
+        checkpoint_model = None
+        if cp and cp.get("required"):
+            # Normalize to TutorTurnCheckpoint
+            ctype = cp.get("checkpoint_type") or "reflection"
+            criteria = cp.get("criteria") or []
+            checkpoint_model = TutorTurnCheckpoint(
+                required=True,
+                checkpoint_type=ctype,  # Pydantic will coerce enum
+                instructions=cp.get("instructions") or "Show your thinking.",
+                criteria=list(criteria),
+            )
+
+        # Add a tiny bridge: reference what came before and what's next
+        bridge_parts: List[str] = []
+        prev_snippet_text = None
+        if sn_idx > 0 and len(snippets) >= 2:
+            prev_snippet_text = snippets[sn_idx-1].get("snippet")
+        elif seg_idx > 0:
+            prev_seg_snips = (plan.get("segments", [])[seg_idx-1] or {}).get("snippets", [])
+            if prev_seg_snips:
+                prev_snippet_text = prev_seg_snips[0].get("snippet")
+        next_snippet_text = None
+        if sn_idx + 1 < len(snippets):
+            next_snippet_text = snippets[sn_idx+1].get("snippet")
+        elif seg_idx + 1 < len(plan.get("segments", [])):
+            next_seg = plan.get("segments", [])[seg_idx+1]
+            if next_seg and next_seg.get("snippets"):
+                next_snippet_text = next_seg["snippets"][0].get("snippet")
+
+        if prev_snippet_text:
+            bridge_parts.append("Building on what you just saw: " + prev_snippet_text[:120].rstrip() + ("…" if len(prev_snippet_text) > 120 else ""))
+        if next_snippet_text:
+            bridge_parts.append("Up next, we’ll look at: " + next_snippet_text[:120].rstrip() + ("…" if len(next_snippet_text) > 120 else ""))
+        # Weave learner profile context lightly (prior mastery and progress)
+        try:
+            lp = (session.tutor_settings or {}).get("learner_profile") or {}
+            best_topic = None
+            best_score = -1
+            for t in (lp.get("topics") or []):
+                sc = t.get("avg_score")
+                if isinstance(sc, (int, float)) and sc > best_score:
+                    best_score = sc
+                    best_topic = t
+            if best_topic and best_score >= 80:
+                bridge_parts.insert(0, f"You’ve been strong in {best_topic.get('name','this topic')} lately (≈{int(best_score)}%).")
+            last_seen = (lp.get("recent_sessions") or [])[:1]
+            if last_seen:
+                ls = last_seen[0]
+                if ls.get("title") and not any("last time" in p.lower() for p in bridge_parts):
+                    bridge_parts.insert(0, f"Last time, you covered {ls.get('title')}.")
+        except Exception:
+            pass
+
+        if bridge_parts:
+            narration_text = narration_text.strip()
+            narration_text = narration_text + "\n\n" + " ".join(bridge_parts)
+
+        return TutorTurn(
+            narration=narration_text,
+            comprehension_check=question,
+            follow_up_prompts=list(follow)[:3],
+            checkpoint=checkpoint_model,
+        )
+
+    def _build_learner_profile(self, db: Session, student_id: int, course_id: Optional[int]) -> Dict[str, Any]:
+        """Compute a lightweight per-student profile from historical sessions and checkpoints.
+
+        No new tables required: we summarize recent sessions and topic mastery from stored checkpoints.
+        """
+        # Pull last 12 sessions for this student (optionally filter by course)
+        q = db.query(AITutorSession).filter(AITutorSession.student_id == student_id)
+        if course_id:
+            q = q.filter(AITutorSession.course_id == course_id)
+        sessions = (
+            q.order_by(AITutorSession.started_at.desc())
+             .limit(12)
+             .all()
+        )
+
+        topics: Dict[str, List[float]] = {}
+        recent_sessions: List[Dict[str, Any]] = []
+        for s in sessions:
+            src = (s.tutor_settings or {}).get("source") or {}
+            title = src.get("title") or src.get("block_title") or src.get("lesson_title") or "Session"
+            topic_key = self._topic_key_from_source(src)
+            # Collect checkpoint scores
+            scores = [cp.score for cp in (s.checkpoints or []) if cp.score is not None]
+            avg_score = (sum(scores) / len(scores)) if scores else None
+            if topic_key and avg_score is not None:
+                topics.setdefault(topic_key, []).append(avg_score)
+            recent_sessions.append({
+                "session_id": s.id,
+                "title": title,
+                "date": s.started_at.isoformat() if s.started_at else None,
+                "avg_score": avg_score,
+            })
+
+        topic_summaries = [
+            {"key": k, "name": k, "avg_score": round(sum(v)/len(v), 1), "samples": len(v)}
+            for k, v in topics.items() if v
+        ]
+        topic_summaries.sort(key=lambda x: (x["avg_score"] if x["avg_score"] is not None else -1), reverse=True)
+        recent_sessions = recent_sessions[:8]
+
+        data = {
+            "topics": topic_summaries,
+            "recent_sessions": recent_sessions,
+        }
+        # Upsert into learner_profiles for persistence and fast retrieval
+        try:
+            row = (
+                db.query(LearnerProfile)
+                .filter(LearnerProfile.student_id == student_id, LearnerProfile.course_id == course_id)
+                .first()
+            )
+            if not row:
+                row = LearnerProfile(student_id=student_id, course_id=course_id)
+                db.add(row)
+            row.topics = data.get("topics")
+            row.recent_sessions = data.get("recent_sessions")
+            row.updated_at = datetime.utcnow()
+            db.flush()
+        except Exception:
+            logger.exception("Failed to upsert LearnerProfile")
+        return data
+
+    def _topic_key_from_source(self, src: Dict[str, Any]) -> Optional[str]:
+        title = (src or {}).get("title") or (src or {}).get("block_title") or (src or {}).get("lesson_title")
+        if not title:
+            return None
+        return str(title).strip()
 
     def _normalise_text(self, text: Optional[str]) -> str:
         if not text:
@@ -518,6 +864,55 @@ class AITutorService:
         session: AITutorSession,
         analysis: Dict[str, Any],
     ):
+        # If we have a lesson plan, handle advancement within plan pointers
+        settings = session.tutor_settings or {}
+        plan = settings.get("lesson_plan")
+        if plan:
+            state = settings.get("plan_state") or {}
+            seg_idx = int(state.get("segment_index", 0))
+            sn_idx = int(state.get("snippet_index", 0))
+            segs = (plan.get("segments") or [])
+
+            needs_review = bool(analysis.get("needs_review"))
+            # If review needed and easier explanation exists and not yet used, set flag to replay easier
+            if seg_idx < len(segs):
+                snippets = segs[seg_idx].get("snippets", [])
+                if sn_idx < len(snippets):
+                    easier = snippets[sn_idx].get("easier_explanation")
+                    retry_used_for = state.get("retry_used_for", {})
+                    key = f"{seg_idx}:{sn_idx}"
+                    if needs_review and easier and not retry_used_for.get(key):
+                        state["force_easier"] = True
+                        retry_used_for[key] = True
+                        state["retry_used_for"] = retry_used_for
+                        state["awaiting"] = None
+                        settings["plan_state"] = state
+                        session.tutor_settings = settings
+                        session.status = TutorSessionStatus.IN_PROGRESS
+                        session.updated_at = datetime.utcnow()
+                        return
+
+            # Otherwise advance to the next snippet/segment; if strong performance, nudge enrichment
+            score = analysis.get("score")
+            if isinstance(score, (int, float)) and score >= 85:
+                state["force_enrichment"] = True
+
+            # Otherwise advance to the next snippet/segment
+            state["awaiting"] = None
+            if seg_idx < len(segs):
+                total_snips = len(segs[seg_idx].get("snippets", []))
+                if sn_idx + 1 < total_snips:
+                    state["snippet_index"] = sn_idx + 1
+                else:
+                    state["segment_index"] = seg_idx + 1
+                    state["snippet_index"] = 0
+            settings["plan_state"] = state
+            session.tutor_settings = settings
+            session.status = TutorSessionStatus.IN_PROGRESS
+            session.updated_at = datetime.utcnow()
+            return
+
+        # Legacy path: segment-based
         should_repeat = analysis.get("needs_review")
         if should_repeat:
             session.status = TutorSessionStatus.IN_PROGRESS
@@ -530,6 +925,67 @@ class AITutorService:
             len(session.content_segments) - 1,
         )
         session.updated_at = datetime.utcnow()
+
+        # Update persistent learner profile quickly after each checkpoint
+        try:
+            self._update_learner_profile_after_checkpoint(db, session, analysis)
+        except Exception:
+            logger.exception("Failed to update learner profile after checkpoint")
+
+    def _update_learner_profile_after_checkpoint(self, db: Session, session: AITutorSession, analysis: Dict[str, Any]):
+        score = analysis.get("score")
+        if score is None:
+            return
+        try:
+            row = (
+                db.query(LearnerProfile)
+                .filter(LearnerProfile.student_id == session.student_id, LearnerProfile.course_id == session.course_id)
+                .first()
+            )
+            if not row:
+                row = LearnerProfile(student_id=session.student_id, course_id=session.course_id)
+                db.add(row)
+            # Topic key from source title
+            src = (session.tutor_settings or {}).get("source") or {}
+            topic_key = self._topic_key_from_source(src) or "General"
+            topics = list(row.topics or [])
+            found = None
+            for t in topics:
+                if t.get("key") == topic_key:
+                    found = t
+                    break
+            if found:
+                n = int(found.get("samples") or 0)
+                avg = float(found.get("avg_score") or 0.0)
+                new_avg = ((avg * n) + float(score)) / float(n + 1)
+                found["avg_score"] = round(new_avg, 1)
+                found["samples"] = n + 1
+            else:
+                topics.append({"key": topic_key, "name": topic_key, "avg_score": float(score), "samples": 1})
+            # Update recent_sessions entry for this session
+            recent = list(row.recent_sessions or [])
+            updated = False
+            for rs in recent:
+                if rs.get("session_id") == session.id:
+                    rs["avg_score"] = float(score)
+                    updated = True
+                    break
+            if not updated:
+                title = src.get("title") or src.get("block_title") or src.get("lesson_title") or "Session"
+                recent.insert(0, {
+                    "session_id": session.id,
+                    "title": title,
+                    "date": session.started_at.isoformat() if session.started_at else None,
+                    "avg_score": float(score),
+                })
+                recent = recent[:8]
+
+            row.topics = topics
+            row.recent_sessions = recent
+            row.updated_at = datetime.utcnow()
+            db.flush()
+        except Exception:
+            logger.exception("Error updating LearnerProfile row")
 
     def _map_input_type(self, input_type: str) -> TutorInteractionInputType:
         mapping = {

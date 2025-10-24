@@ -83,6 +83,35 @@ class TutorTurn(BaseModel):
     checkpoint: Optional[TutorTurnCheckpoint] = None
 
 
+# ------------------------------
+# Lesson plan data contracts
+# ------------------------------
+
+class LessonPlanSnippet(BaseModel):
+    snippet: str = Field(..., description="Exact text span or paraphrase to highlight/explain")
+    explanation: str = Field(..., description="Primary explanation for the snippet")
+    easier_explanation: Optional[str] = Field(None, description="Pre-generated simpler explanation shown only once if the learner struggles")
+    question: Optional[str] = Field(None, description="Optional comprehension question for this snippet")
+    follow_ups: List[str] = Field(default_factory=list, description="Optional follow-up prompts for curiosity")
+    checkpoint: Optional[TutorTurnCheckpoint] = Field(None, description="Optional checkpoint pre-authored for this snippet")
+
+
+class LessonPlanSegment(BaseModel):
+    index: int
+    title: Optional[str] = None
+    text: Optional[str] = Field(None, description="Source text of this segment for client-side highlighting")
+    snippets: List[LessonPlanSnippet]
+
+
+class LessonPlan(BaseModel):
+    module_title: Optional[str] = None
+    segments: List[LessonPlanSegment]
+
+
+class LessonPlanResponse(BaseModel):
+    lesson_plan: LessonPlan
+
+
 class TutorSessionSnapshot(BaseModel):
     session_id: int
     status: TutorSessionStatus
@@ -91,6 +120,44 @@ class TutorSessionSnapshot(BaseModel):
     last_tutor_turn: Optional[TutorTurn] = None
     created_at: datetime
     updated_at: datetime
+
+
+# ------------------------------
+# Lesson plan contracts (backend schema)
+# ------------------------------
+
+class LessonPlanCheckpoint(BaseModel):
+    required: bool
+    checkpoint_type: TutorCheckpointType
+    instructions: str
+    criteria: Optional[List[str]] = None
+
+
+class LessonPlanSnippet(BaseModel):
+    snippet: str
+    explanation: str
+    easier_explanation: Optional[str] = None
+    enrichment_explanation: Optional[str] = None
+    question: Optional[str] = None
+    follow_ups: List[str] = Field(default_factory=list)
+    checkpoint: Optional[LessonPlanCheckpoint] = None
+
+
+class LessonPlanSegment(BaseModel):
+    index: int
+    title: Optional[str] = None
+    text: Optional[str] = None
+    difficulty: Optional[str] = None  # easy|medium|hard
+    snippets: List[LessonPlanSnippet]
+
+
+class LessonPlan(BaseModel):
+    module_title: Optional[str] = None
+    segments: List[LessonPlanSegment]
+
+
+class LessonPlanResponse(BaseModel):
+    lesson_plan: LessonPlan
 
 
 class TutorInteractionOut(BaseModel):

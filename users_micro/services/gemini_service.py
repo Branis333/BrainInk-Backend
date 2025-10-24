@@ -3279,5 +3279,112 @@ class GeminiService:
                 "images_count": len(image_files),
                 "error": str(e),
             }
+    async def generate_lesson_plan_for_segments(
+        self,
+        *,
+        persona: Optional[Dict[str, Any]],
+        module_title: Optional[str],
+        segments: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Generate a pre-authored lesson plan covering all segments and snippets.
+
+        Returns a dict compatible with LessonPlan schema with per-segment snippets
+        including a primary explanation and an easier_explanation for a single retry.
+        """
+        persona_label = self._describe_persona(persona)
+
+        # Build compact JSON array of segment texts for the model
+        part_lines: List[str] = []
+        for seg in segments:
+            idx = seg.get("index")
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            trimmed = text if len(text) <= 2200 else text[:2200]
+            part_lines.append(json.dumps({"index": idx, "text": trimmed}))
+        segments_json = "[\n" + ",\n".join(part_lines) + "\n]"
+
+        prompt = (
+            f"You are {persona_label}. Prepare the full lesson plan up-front so the session runs smoothly.\n"
+            f"Module title: {module_title or '(untitled)'}\n\n"
+            "CONTENT SEGMENTS (JSON of {index, text}):\n"
+            f"{segments_json}\n\n"
+            "TASK:\n"
+            "- For EACH segment, select 2–5 short, meaningful snippets from the text (exact sentence spans preferred).\n"
+            "- For each snippet, write a clear explanation (2–4 sentences).\n"
+            "- ALSO include: a simpler 'easier_explanation' (1–2 sentences) AND, when appropriate, an 'enrichment_explanation' (2–3 sentences) for advanced learners.\n"
+            "- Optionally add a short 'question' per snippet.\n"
+            "- Optionally add a 'checkpoint' with: required=true, checkpoint_type ('photo'|'reflection'|'quiz'), instructions, criteria[].\n"
+            "- Include 1–3 concise 'follow_ups' per snippet.\n\n"
+            "Return STRICT JSON with the following schema ONLY:\n"
+            "{\n"
+            "  \"module_title\": string,\n"
+            "  \"segments\": [ {\n"
+            "    \"index\": number,\n"
+            "    \"title\": string|null,\n"
+            "    \"text\": string|null,\n"
+            "    \"difficulty\": \"easy\"|\"medium\"|\"hard\"|null,\n"
+            "    \"snippets\": [ {\n"
+            "      \"snippet\": string,\n"
+            "      \"explanation\": string,\n"
+            "      \"easier_explanation\": string|null,\n"
+            "      \"enrichment_explanation\": string|null,\n"
+            "      \"question\": string|null,\n"
+            "      \"follow_ups\": [string],\n"
+            "      \"checkpoint\": {\n"
+            "         \"required\": true,\n"
+            "         \"checkpoint_type\": \"photo\"|\"reflection\"|\"quiz\",\n"
+            "         \"instructions\": string,\n"
+            "         \"criteria\": [string]\n"
+            "      } | null\n"
+            "    } ]\n"
+            "  } ]\n"
+            "}\n\n"
+            "Respond with pure JSON only."
+        )
+
+        raw = await self._generate_json_response(
+            prompt,
+            temperature=0.25,
+            max_output_tokens=4096,
+        )
+
+        # Minimal normalization to defend against small deviations
+        try:
+            if not isinstance(raw, dict):
+                return {"module_title": module_title, "segments": []}
+            segs = raw.get("segments") or []
+            norm_segments: List[Dict[str, Any]] = []
+            for s in segs:
+                idx = s.get("index")
+                text = s.get("text")
+                title = s.get("title")
+                difficulty = s.get("difficulty")
+                snippets = s.get("snippets") or []
+                norm_snips: List[Dict[str, Any]] = []
+                for sn in snippets:
+                    norm_snips.append({
+                        "snippet": (sn.get("snippet") or "").strip(),
+                        "explanation": (sn.get("explanation") or "").strip(),
+                        "easier_explanation": (sn.get("easier_explanation") or None),
+                        "enrichment_explanation": (sn.get("enrichment_explanation") or None),
+                        "question": (sn.get("question") or None),
+                        "follow_ups": list(sn.get("follow_ups") or []),
+                        "checkpoint": sn.get("checkpoint") or None,
+                    })
+                norm_segments.append({
+                    "index": int(idx) if idx is not None else 0,
+                    "title": title,
+                    "text": text,
+                    "difficulty": difficulty,
+                    "snippets": norm_snips,
+                })
+            return {
+                "module_title": raw.get("module_title") or module_title,
+                "segments": norm_segments,
+            }
+        except Exception:
+            return {"module_title": module_title, "segments": []}
+
 # Singleton instance
 gemini_service = GeminiService()

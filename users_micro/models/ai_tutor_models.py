@@ -125,3 +125,21 @@ class AITutorCheckpoint(Base):
     completed_at = Column(DateTime, nullable=True)
 
     session: AITutorSession = relationship("AITutorSession", back_populates="checkpoints")
+
+
+class LearnerProfile(Base):
+    __tablename__ = "learner_profiles"
+    __allow_unmapped__ = True
+
+    id = Column(Integer, primary_key=True, index=True)
+    student_id = Column(Integer, nullable=False, index=True)
+    course_id = Column(Integer, nullable=True, index=True)
+
+    # Aggregated stats and history snippets
+    topics = Column(JSON, nullable=True)  # [{key, name, avg_score, samples}]
+    recent_sessions = Column(JSON, nullable=True)  # [{session_id, title, date, avg_score}]
+    streak_days = Column(Integer, nullable=True, default=0)
+    mastery_by_skill = Column(JSON, nullable=True)  # optional future expansion
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
