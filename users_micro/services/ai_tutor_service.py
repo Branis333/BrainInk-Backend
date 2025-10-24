@@ -385,14 +385,30 @@ class AITutorService:
         )
         db.flush()
 
+        # Backend checkpoint throttling and deduplication
         if tutor_turn.checkpoint and tutor_turn.checkpoint.required:
-            session.status = TutorSessionStatus.AWAITING_CHECKPOINT
-            checkpoint = AITutorCheckpoint(
-                session_id=session.id,
-                checkpoint_type=tutor_turn.checkpoint.checkpoint_type.value,
-                prompt=tutor_turn.checkpoint.instructions,
-            )
-            db.add(checkpoint)
+            should_create = self._should_create_checkpoint(session, tutor_turn)
+            if should_create:
+                session.status = TutorSessionStatus.AWAITING_CHECKPOINT
+                checkpoint = AITutorCheckpoint(
+                    session_id=session.id,
+                    checkpoint_type=tutor_turn.checkpoint.checkpoint_type.value,
+                    prompt=tutor_turn.checkpoint.instructions,
+                )
+                db.add(checkpoint)
+                # Track last checkpoint segment and prompt for throttling
+                settings = session.tutor_settings or {}
+                settings["last_checkpoint_segment_index"] = session.current_segment_index
+                settings["last_checkpoint_prompt"] = self._normalise_text(tutor_turn.checkpoint.instructions)
+                session.tutor_settings = settings
+            else:
+                # Treat as a regular turn without creating a checkpoint; respect advance_segment
+                session.status = TutorSessionStatus.IN_PROGRESS
+                if tutor_response.get("advance_segment", True):
+                    session.current_segment_index = min(
+                        session.current_segment_index + 1,
+                        len(session.content_segments) - 1,
+                    )
         else:
             session.status = TutorSessionStatus.IN_PROGRESS
             if tutor_response.get("advance_segment", True):
@@ -403,6 +419,49 @@ class AITutorService:
 
         session.updated_at = datetime.utcnow()
         return tutor_turn
+
+    def _normalise_text(self, text: Optional[str]) -> str:
+        if not text:
+            return ""
+        # Simple normalisation for dedupe: lowercase, collapse whitespace, strip punctuation at ends
+        cleaned = " ".join(str(text).lower().strip().split())
+        return cleaned
+
+    def _should_create_checkpoint(self, session: AITutorSession, tutor_turn: TutorTurn) -> bool:
+        """Decide whether to create a checkpoint, throttling duplicates and frequency.
+
+        Rules:
+        - If the same checkpoint (type + normalised prompt) appeared in the last 3 checkpoints, skip.
+        - Enforce a minimum segment gap (default 2) between checkpoints unless no prior checkpoint.
+        """
+        if not tutor_turn.checkpoint or not tutor_turn.checkpoint.required:
+            return False
+
+        # No throttling if this is the very first checkpoint in session
+        recent_checkpoints = list(session.checkpoints or [])
+        if not recent_checkpoints:
+            return True
+
+        min_gap = 2
+        settings = session.tutor_settings or {}
+        last_cp_segment = settings.get("last_checkpoint_segment_index")
+
+        if isinstance(last_cp_segment, int):
+            # If too soon since last checkpoint, skip creating a new one
+            if (session.current_segment_index - last_cp_segment) < min_gap:
+                return False
+
+        # Dedupe by comparing against last few checkpoint prompts and types
+        target_type = tutor_turn.checkpoint.checkpoint_type.value
+        target_prompt_norm = self._normalise_text(tutor_turn.checkpoint.instructions)
+        for cp in reversed(recent_checkpoints[-3:]):
+            try:
+                if (cp.checkpoint_type == target_type) and (self._normalise_text(cp.prompt) == target_prompt_norm):
+                    return False
+            except Exception:
+                continue
+
+        return True
 
     def _fallback_tutor_turn(self) -> Dict[str, Any]:
         return {
