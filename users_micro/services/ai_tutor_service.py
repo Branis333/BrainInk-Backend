@@ -77,6 +77,35 @@ class AITutorService:
                 detail="Selected content does not contain any readable text",
             )
 
+        # Derive grade level from course metadata when available
+        def _derive_grade_from_meta(meta: Dict[str, Any]) -> Optional[int]:
+            try:
+                course_info = meta or {}
+                age_min = course_info.get("course_age_min")
+                age_max = course_info.get("course_age_max")
+                age = None
+                if isinstance(age_min, int):
+                    age = age_min
+                elif isinstance(age_max, int):
+                    age = age_max
+                if age is None:
+                    return None
+                # Rough mapping: Grade ≈ age - 5 (6->1st, 7->2nd, ...)
+                g = max(1, min(12, int(age) - 5))
+                return g
+            except Exception:
+                return None
+
+        # Prefer explicit request override; else derive from course age
+        grade_level = None
+        try:
+            if getattr(request, "grade_level", None):
+                grade_level = max(1, min(12, int(request.grade_level)))
+        except Exception:
+            grade_level = None
+        if grade_level is None:
+            grade_level = _derive_grade_from_meta(content_meta)
+
         session = AITutorSession(
             student_id=student_id,
             course_id=request.course_id,
@@ -87,7 +116,8 @@ class AITutorService:
             content_segments=[{"index": idx, "text": seg} for idx, seg in enumerate(segments)],
             persona_config={
                 "persona": request.persona or "friendly",
-                "learning_focus": request.preferred_learning_focus or "balanced"
+                "learning_focus": request.preferred_learning_focus or "balanced",
+                "grade_level": grade_level,
             },
             tutor_settings={"source": content_meta},
         )
@@ -342,6 +372,18 @@ class AITutorService:
                 raise HTTPException(status_code=404, detail="Course block not found")
             if request.course_id and block.course_id != request.course_id:
                 raise HTTPException(status_code=400, detail="Block does not belong to provided course")
+            # Pull course metadata including age range to derive grade
+            try:
+                course = block.course
+                course_meta = {
+                    "course_title": getattr(course, "title", None),
+                    "course_subject": getattr(course, "subject", None),
+                    "course_age_min": getattr(course, "age_min", None),
+                    "course_age_max": getattr(course, "age_max", None),
+                    "course_difficulty": getattr(course, "difficulty_level", None),
+                }
+            except Exception:
+                course_meta = {}
             return (
                 block.content or "",
                 {
@@ -350,6 +392,7 @@ class AITutorService:
                     "week": block.week,
                     "block_number": block.block_number,
                     "course_id": block.course_id,
+                    **course_meta,
                 },
             )
 
@@ -363,12 +406,25 @@ class AITutorService:
                 raise HTTPException(status_code=404, detail="Lesson not found")
             if request.course_id and lesson.course_id != request.course_id:
                 raise HTTPException(status_code=400, detail="Lesson does not belong to provided course")
+            # Pull course metadata including age range to derive grade
+            try:
+                course = lesson.course
+                course_meta = {
+                    "course_title": getattr(course, "title", None),
+                    "course_subject": getattr(course, "subject", None),
+                    "course_age_min": getattr(course, "age_min", None),
+                    "course_age_max": getattr(course, "age_max", None),
+                    "course_difficulty": getattr(course, "difficulty_level", None),
+                }
+            except Exception:
+                course_meta = {}
             return (
                 lesson.content or "",
                 {
                     "type": "lesson",
                     "title": lesson.title,
                     "course_id": lesson.course_id,
+                    **course_meta,
                 },
             )
 
@@ -700,9 +756,31 @@ class AITutorService:
         except Exception:
             pass
 
+        # Always anchor the explanation to the exact text snippet for grounding
+        anchor_line = None
+        try:
+            snippet_text = (snip.get("snippet") or "").strip()
+            if snippet_text:
+                anchor_line = f"From the text: \"{snippet_text[:180]}\""
+        except Exception:
+            anchor_line = None
+
+        # Simplify explanation language (short sentences, common words)
+        try:
+            grade = None
+            try:
+                grade = (session.persona_config or {}).get("grade_level")
+            except Exception:
+                grade = None
+            narration_text = self._simplify_text(narration_text, grade_level=grade)
+        except Exception:
+            pass
+
+        if anchor_line:
+            narration_text = anchor_line + "\n\n" + narration_text.strip()
+
         if bridge_parts:
-            narration_text = narration_text.strip()
-            narration_text = narration_text + "\n\n" + " ".join(bridge_parts)
+            narration_text = narration_text.strip() + "\n\n" + " ".join(bridge_parts)
 
         return TutorTurn(
             narration=narration_text,
@@ -710,6 +788,104 @@ class AITutorService:
             follow_up_prompts=list(follow)[:3],
             checkpoint=checkpoint_model,
         )
+
+    def _simplify_text(self, text: str, grade_level: Optional[int] = None) -> str:
+        """Apply lightweight readability simplifications without changing meaning.
+
+        Heuristics:
+        - Replace some complex words with simpler ones.
+        - Keep sentences short (split on commas/and if very long).
+        - Limit to ~3 sentences for clarity.
+        """
+        import re
+
+        if not text:
+            return text
+
+        # Common replacements
+        replacements = {
+            "utilize": "use",
+            "utilises": "uses",
+            "demonstrates": "shows",
+            "illustrates": "shows",
+            "fundamental": "basic",
+            "underlying": "basic",
+            "manifests": "shows",
+            "constitutes": "is",
+            "occurs": "happens",
+            "subsequently": "then",
+            "consequently": "so",
+            "therefore": "so",
+            "component": "part",
+            "mechanism": "way",
+            "concept": "idea",
+            "phenomena": "things that happen",
+            "phenomenon": "thing that happens",
+            "conserved": "kept the same",
+            "transfer": "move",
+            "transfers": "moves",
+            "transferred": "moved",
+            "convert": "change",
+            "converts": "changes",
+            "conversion": "change",
+        }
+
+        def simple_replace(t: str) -> str:
+            def repl(match: re.Match) -> str:
+                w = match.group(0)
+                low = w.lower()
+                rep = replacements.get(low)
+                if not rep:
+                    return w
+                # Preserve capitalization
+                if w.istitle():
+                    return rep.capitalize()
+                if w.isupper():
+                    return rep.upper()
+                return rep
+            return re.sub(r"[A-Za-z]+", repl, t)
+
+        text = simple_replace(text)
+
+        # Split into sentences
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        cleaned: list[str] = []
+        for s in sentences:
+            s = s.strip()
+            if not s:
+                continue
+            # Choose target word length by grade (younger -> shorter)
+            max_words = 22
+            if isinstance(grade_level, int):
+                if grade_level <= 3:
+                    max_words = 12
+                elif grade_level <= 5:
+                    max_words = 16
+                elif grade_level <= 7:
+                    max_words = 20
+                else:
+                    max_words = 22
+            # If very long (>max_words), split on commas or 'and'
+            words = s.split()
+            if len(words) > max_words:
+                # Try commas first
+                parts = re.split(r",\s+|\s+and\s+", s)
+                for p in parts:
+                    p = p.strip()
+                    if p and p[-1] not in ".!?":
+                        p += "."
+                    if p:
+                        cleaned.append(p)
+            else:
+                if s and s[-1] not in ".!?":
+                    s += "."
+                cleaned.append(s)
+
+        # Limit total sentences based on grade
+        max_sentences = 3
+        if isinstance(grade_level, int) and grade_level <= 3:
+            max_sentences = 2
+        return " ".join(cleaned[:max_sentences]).strip()
 
     def _build_learner_profile(self, db: Session, student_id: int, course_id: Optional[int]) -> Dict[str, Any]:
         """Compute a lightweight per-student profile from historical sessions and checkpoints.

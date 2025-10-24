@@ -32,6 +32,12 @@ class SessionStartRequest(BaseModel):
     course_id: Optional[int] = Field(None, description="Course identifier")
     block_id: Optional[int] = Field(None, description="Course block identifier")
     lesson_id: Optional[int] = Field(None, description="Lesson identifier")
+    grade_level: Optional[int] = Field(
+        None,
+        description="Optional override for student grade level (1-12) to adjust language style",
+        ge=1,
+        le=12,
+    )
     persona: Optional[str] = Field(
         None,
         description="Optional persona keyword to adapt tutor style (e.g., 'friendly', 'energetic')",
@@ -46,6 +52,7 @@ class SessionStartRequest(BaseModel):
             "example": {
                 "course_id": 21,
                 "block_id": 83,
+                "grade_level": 5,
                 "persona": "friendly",
                 "preferred_learning_focus": "step-by-step reasoning",
             }

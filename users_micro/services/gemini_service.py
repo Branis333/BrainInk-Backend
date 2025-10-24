@@ -2766,6 +2766,12 @@ class GeminiService:
         """Generate a conversational turn for the AI tutor overlay."""
 
         persona_label = self._describe_persona(persona)
+        grade_level = None
+        try:
+            if persona and isinstance(persona.get("grade_level"), int):
+                grade_level = max(1, min(12, int(persona.get("grade_level"))))
+        except Exception:
+            grade_level = None
         history_text = self._render_history_for_prompt(history)
         learner_line = learner_message or "(no new learner message)"
         segment_text = content_segment.get("text", "")
@@ -2916,6 +2922,9 @@ class GeminiService:
 
         label = persona.get("persona") or "friendly"
         focus = persona.get("learning_focus") or "balanced skill support"
+        grade = persona.get("grade_level")
+        if isinstance(grade, int):
+            return f"a {label} AI tutor for Grade {grade} students with focus on {focus}"
         return f"a {label} AI tutor with focus on {focus}"
 
     def _render_history_for_prompt(self, history: List[Dict[str, Any]]) -> str:
@@ -3293,29 +3302,59 @@ class GeminiService:
         """
         persona_label = self._describe_persona(persona)
 
-        # Build compact JSON array of segment texts for the model
+    # Build compact JSON array of segment texts for the model
         part_lines: List[str] = []
+        # Map index -> original segment text for robust post-fill
+        index_to_text: Dict[int, str] = {}
         for seg in segments:
             idx = seg.get("index")
             text = (seg.get("text") or "").strip()
             if not text:
                 continue
-            trimmed = text if len(text) <= 2200 else text[:2200]
+            # Avoid trimming here to ensure full coverage; upstream segmentation already bounds size
+            trimmed = text
+            try:
+                if isinstance(idx, (int, float)):
+                    index_to_text[int(idx)] = text
+            except Exception:
+                pass
             part_lines.append(json.dumps({"index": idx, "text": trimmed}))
         segments_json = "[\n" + ",\n".join(part_lines) + "\n]"
 
+        # Grade awareness (if provided via persona_config)
+        grade_level = None
+        try:
+            if persona and isinstance(persona.get("grade_level"), int):
+                grade_level = max(1, min(12, int(persona.get("grade_level"))))
+        except Exception:
+            grade_level = None
+
+        grade_line = (f"Grade level: Grade {grade_level}\n" if grade_level else "")
         prompt = (
             f"You are {persona_label}. Prepare the full lesson plan up-front so the session runs smoothly.\n"
+            f"{grade_line}"
             f"Module title: {module_title or '(untitled)'}\n\n"
             "CONTENT SEGMENTS (JSON of {index, text}):\n"
             f"{segments_json}\n\n"
             "TASK:\n"
-            "- For EACH segment, select 2–5 short, meaningful snippets from the text (exact sentence spans preferred).\n"
+            "- For EACH segment, select 2–6 short, meaningful snippets from the text.\n"
+            "- IMPORTANT: Each 'snippet' MUST be an EXACT substring from the provided segment text (copy the sentence(s) as-is; do NOT paraphrase).\n"
             "- For each snippet, write a clear explanation (2–4 sentences).\n"
             "- ALSO include: a simpler 'easier_explanation' (1–2 sentences) AND, when appropriate, an 'enrichment_explanation' (2–3 sentences) for advanced learners.\n"
             "- Optionally add a short 'question' per snippet.\n"
             "- Optionally add a 'checkpoint' with: required=true, checkpoint_type ('photo'|'reflection'|'quiz'), instructions, criteria[].\n"
             "- Include 1–3 concise 'follow_ups' per snippet.\n\n"
+            "GROUNDING RULES (STRICT):\n"
+            "- Use ONLY the information present in the provided segment text. Do NOT introduce new facts or topics not mentioned in the text.\n"
+            "- You may define or restate terms that appear in the text, but avoid adding outside knowledge.\n"
+            "- Tie each explanation to the exact snippet by reusing 1–2 short quoted phrases from it when helpful.\n\n"
+            "STYLE RULES (SIMPLE LANGUAGE):\n"
+            "- Aim for an age-appropriate reading level based on the grade.\n"
+            "- Prefer short sentences (≤ 16–18 words each).\n"
+            "- Use common words. Replace complex words with simpler ones (e.g., 'use' instead of 'utilize').\n"
+            "- Define any term from the text in a brief, plain way.\n"
+            "- Keep 'easier_explanation' to 1 short sentence in kid-friendly words.\n"
+            "- Prefer 'question' as True/False or a short 1-sentence prompt.\n\n"
             "Return STRICT JSON with the following schema ONLY:\n"
             "{\n"
             "  \"module_title\": string,\n"
@@ -3355,6 +3394,33 @@ class GeminiService:
                 return {"module_title": module_title, "segments": []}
             segs = raw.get("segments") or []
             norm_segments: List[Dict[str, Any]] = []
+            
+            def _normalise_space(s: str) -> str:
+                return " ".join((s or "").split()).strip().lower()
+            
+            def _best_sentence_match(full_text: str, target: str) -> Optional[str]:
+                # Split by common sentence boundaries
+                import re as _re
+                sentences = _re.split(r'(?<=[.!?])\s+', full_text)
+                t_words = set(w for w in _normalise_space(target).split() if len(w) > 2)
+                best = None
+                best_score = 0.0
+                for s in sentences:
+                    s_norm = _normalise_space(s)
+                    if not s_norm:
+                        continue
+                    s_words = set(w for w in s_norm.split() if len(w) > 2)
+                    if not s_words:
+                        continue
+                    inter = len(t_words & s_words)
+                    union = len(t_words | s_words) or 1
+                    score = inter / union
+                    if score > best_score:
+                        best_score = score
+                        best = s.strip()
+                # Consider it a match only if reasonably overlapping
+                return best if best_score >= 0.35 else None
+
             for s in segs:
                 idx = s.get("index")
                 text = s.get("text")
@@ -3363,19 +3429,64 @@ class GeminiService:
                 snippets = s.get("snippets") or []
                 norm_snips: List[Dict[str, Any]] = []
                 for sn in snippets:
+                    raw_snip = (sn.get("snippet") or "").strip()
+                    expl = (sn.get("explanation") or "").strip()
+                    easier = (sn.get("easier_explanation") or None)
+                    enrich = (sn.get("enrichment_explanation") or None)
+                    question = (sn.get("question") or None)
+                    follow = list(sn.get("follow_ups") or [])
+                    cp = sn.get("checkpoint") or None
+
+                    # Enforce that snippet is a substring of the original segment text
+                    try:
+                        idx_int = int(idx) if idx is not None else 0
+                    except Exception:
+                        idx_int = 0
+                    full_text = text or index_to_text.get(idx_int) or ""
+                    snip_final = raw_snip
+                    if full_text:
+                        if _normalise_space(raw_snip) not in _normalise_space(full_text):
+                            # Attempt to locate a best sentence match
+                            replacement = _best_sentence_match(full_text, raw_snip or expl)
+                            if replacement:
+                                snip_final = replacement
+                            else:
+                                # Fallback: take first ~140 chars from full_text to ensure highlightability
+                                snip_final = full_text.strip()[:140]
+
                     norm_snips.append({
-                        "snippet": (sn.get("snippet") or "").strip(),
-                        "explanation": (sn.get("explanation") or "").strip(),
-                        "easier_explanation": (sn.get("easier_explanation") or None),
-                        "enrichment_explanation": (sn.get("enrichment_explanation") or None),
-                        "question": (sn.get("question") or None),
-                        "follow_ups": list(sn.get("follow_ups") or []),
-                        "checkpoint": sn.get("checkpoint") or None,
+                        "snippet": snip_final,
+                        "explanation": expl,
+                        "easier_explanation": easier,
+                        "enrichment_explanation": enrich,
+                        "question": question,
+                        "follow_ups": follow,
+                        "checkpoint": cp,
                     })
+                # Robustly backfill missing text/title using original segments
+                try:
+                    idx_int = int(idx) if idx is not None else 0
+                except Exception:
+                    idx_int = 0
+                text_fallback = text or index_to_text.get(idx_int)
+                # Derive a lightweight title if missing
+                if not title:
+                    # Prefer the first snippet as a hint; otherwise the first sentence of the text
+                    candidate = None
+                    try:
+                        if norm_snips and norm_snips[0].get("snippet"):
+                            candidate = norm_snips[0]["snippet"].strip()
+                    except Exception:
+                        candidate = None
+                    if not candidate and text_fallback:
+                        # First 8-12 words of the text as a pseudo-title
+                        words = str(text_fallback).split()
+                        candidate = " ".join(words[:10]).strip()
+                    title = candidate or None
                 norm_segments.append({
                     "index": int(idx) if idx is not None else 0,
                     "title": title,
-                    "text": text,
+                    "text": text_fallback,
                     "difficulty": difficulty,
                     "snippets": norm_snips,
                 })
