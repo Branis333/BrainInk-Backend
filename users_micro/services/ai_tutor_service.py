@@ -77,6 +77,40 @@ class AITutorService:
                 detail="Selected content does not contain any readable text",
             )
 
+        # Reuse an existing in-progress session for this student/content instead of creating a new one.
+        # This ensures the pre-generated lesson plan and state are preserved across app restarts.
+        try:
+            from models.ai_tutor_models import AITutorSession as _Sess, TutorSessionStatus as _Stat
+            existing = (
+                db.query(_Sess)
+                .filter(
+                    _Sess.student_id == student_id,
+                    _Sess.course_id == getattr(request, "course_id", None),
+                    _Sess.block_id == getattr(request, "block_id", None),
+                    _Sess.lesson_id == getattr(request, "lesson_id", None),
+                    _Sess.status.in_([_Stat.IN_PROGRESS, _Stat.AWAITING_CHECKPOINT]),
+                )
+                .order_by(_Sess.updated_at.desc())
+                .first()
+            )
+        except Exception:
+            logger.exception("Failed querying for existing AI tutor session; proceeding to create new")
+            existing = None
+
+        if existing:
+            # Make sure a lesson plan exists (older sessions might not have it)
+            try:
+                await self._ensure_lesson_plan(db, existing, content_text, segments)
+                db.flush()
+            except Exception:
+                logger.exception("Failed ensuring lesson plan for existing session")
+
+            # Generate the next tutor turn from the plan (or fallback rules)
+            tutor_turn = await self._generate_tutor_turn(db, existing, learner_message=None)
+            db.commit()
+            db.refresh(existing)
+            return self._snapshot(existing), tutor_turn
+
         # Derive grade level from course metadata when available
         def _derive_grade_from_meta(meta: Dict[str, Any]) -> Optional[int]:
             try:
@@ -144,7 +178,7 @@ class AITutorService:
         except Exception:
             logger.exception("Failed to ensure tables via create_all")
 
-        # Build lesson plan up-front (pre-generated explanations, questions, checkpoints)
+    # Build lesson plan up-front (pre-generated explanations, questions, checkpoints)
         await self._ensure_lesson_plan(db, session, content_text, segments)
 
         # Build learner profile snapshot from historical sessions/checkpoints
@@ -210,6 +244,56 @@ class AITutorService:
         db.commit()
         db.refresh(session)
         return tutor_turn
+
+    async def resume_session(
+        self,
+        student_id: int,
+        db: Session,
+        course_id: Optional[int] = None,
+        block_id: Optional[int] = None,
+        lesson_id: Optional[int] = None,
+    ) -> Tuple[TutorSessionSnapshot, TutorTurn]:
+        """Resume the latest open session for a student (optionally filtered by course/block/lesson),
+        ensuring a lesson plan exists and returning the next tutor turn without regenerating content.
+        """
+        from models.ai_tutor_models import AITutorSession as _Sess, TutorSessionStatus as _Stat
+
+        q = (
+            db.query(_Sess)
+            .filter(
+                _Sess.student_id == student_id,
+                _Sess.status.in_([_Stat.IN_PROGRESS, _Stat.AWAITING_CHECKPOINT]),
+            )
+        )
+        if course_id is not None:
+            q = q.filter(_Sess.course_id == course_id)
+        if block_id is not None:
+            q = q.filter(_Sess.block_id == block_id)
+        if lesson_id is not None:
+            q = q.filter(_Sess.lesson_id == lesson_id)
+
+        session = q.order_by(_Sess.updated_at.desc()).first()
+        if not session:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No open session to resume")
+
+        # Ensure a lesson plan exists; older sessions may not have one
+        try:
+            # Reconstruct segments text from stored session content
+            seg_texts: List[str] = []
+            try:
+                seg_texts = [str(s.get("text", "")) for s in (session.content_segments or [])]
+            except Exception:
+                seg_texts = []
+            content_text = " ".join([t for t in seg_texts if t])
+            await self._ensure_lesson_plan(db, session, content_text, seg_texts or [""])
+            db.flush()
+        except Exception:
+            logger.exception("Failed ensuring lesson plan during resume; proceeding")
+
+        tutor_turn = await self._generate_tutor_turn(db, session, learner_message=None)
+        db.commit()
+        db.refresh(session)
+        return self._snapshot(session), tutor_turn
 
     async def submit_checkpoint(
         self,

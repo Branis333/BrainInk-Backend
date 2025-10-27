@@ -151,6 +151,30 @@ async def list_ai_tutor_sessions(
     return TutorSessionListResponse(items=items, total=len(items))
 
 
+@router.get("/sessions/resume", response_model=SessionStartResponse)
+async def resume_ai_tutor_session(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    course_id: Optional[int] = None,
+    block_id: Optional[int] = None,
+    lesson_id: Optional[int] = None,
+):
+    """Resume the latest open AI Tutor session for the current user.
+
+    Optional filters (course_id, block_id, lesson_id) can be supplied to
+    target a specific content context. Returns the session snapshot and
+    the next tutor turn (from the pre-generated lesson plan when available).
+    """
+    snapshot, tutor_turn = await ai_tutor_service.resume_session(
+        student_id=current_user["user_id"],
+        db=db,
+        course_id=course_id,
+        block_id=block_id,
+        lesson_id=lesson_id,
+    )
+    return SessionStartResponse(session=snapshot, tutor_turn=tutor_turn)
+
+
 def _serialize_interactions(interactions: List[AITutorInteraction]) -> List[TutorInteractionOut]:
     role_map = {
         TutorInteractionRole.SYSTEM: TutorMessageRole.system,
