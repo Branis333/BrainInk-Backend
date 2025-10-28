@@ -5,6 +5,11 @@ from enum import Enum
 from typing import List, Optional, Dict, Any
 
 from pydantic import BaseModel, Field
+try:
+    # Pydantic v2
+    from pydantic import ConfigDict  # type: ignore
+except Exception:  # pragma: no cover
+    ConfigDict = None  # type: ignore
 
 
 class TutorMessageRole(str, Enum):
@@ -174,8 +179,12 @@ class TutorInteractionOut(BaseModel):
     input_type: TutorInputType
     created_at: datetime
 
-    class Config:
-        orm_mode = True
+    # Pydantic v2 renamed orm_mode -> from_attributes
+    if ConfigDict is not None:  # v2 path
+        model_config = ConfigDict(from_attributes=True)
+    else:  # v1 fallback
+        class Config:  # type: ignore
+            orm_mode = True
 
 
 class TutorSessionDetail(BaseModel):

@@ -114,19 +114,29 @@ async def complete_ai_tutor_session(
     return TutorSessionDetail(session=snapshot, interactions=interactions_out)
 
 
-@router.get("/sessions/{session_id}", response_model=TutorSessionDetail)
-async def get_ai_tutor_session(
-    session_id: int,
+# IMPORTANT: Place static route "/sessions/resume" before dynamic "/sessions/{session_id}"
+@router.get("/sessions/resume", response_model=SessionStartResponse)
+async def resume_ai_tutor_session(
     db: db_dependency,
     current_user: dict = user_dependency,
+    course_id: Optional[int] = None,
+    block_id: Optional[int] = None,
+    lesson_id: Optional[int] = None,
 ):
-    snapshot, interactions = ai_tutor_service.get_session_detail(
-        session_id=session_id,
+    """Resume the latest open AI Tutor session for the current user.
+
+    Optional filters (course_id, block_id, lesson_id) can be supplied to
+    target a specific content context. Returns the session snapshot and
+    the next tutor turn (from the pre-generated lesson plan when available).
+    """
+    snapshot, tutor_turn = await ai_tutor_service.resume_session(
         student_id=current_user["user_id"],
         db=db,
+        course_id=course_id,
+        block_id=block_id,
+        lesson_id=lesson_id,
     )
-    interaction_models = _serialize_interactions(interactions)
-    return TutorSessionDetail(session=snapshot, interactions=interaction_models)
+    return SessionStartResponse(session=snapshot, tutor_turn=tutor_turn)
 
 
 @router.get("/sessions", response_model=TutorSessionListResponse)
@@ -151,28 +161,19 @@ async def list_ai_tutor_sessions(
     return TutorSessionListResponse(items=items, total=len(items))
 
 
-@router.get("/sessions/resume", response_model=SessionStartResponse)
-async def resume_ai_tutor_session(
+@router.get("/sessions/{session_id}", response_model=TutorSessionDetail)
+async def get_ai_tutor_session(
+    session_id: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    course_id: Optional[int] = None,
-    block_id: Optional[int] = None,
-    lesson_id: Optional[int] = None,
 ):
-    """Resume the latest open AI Tutor session for the current user.
-
-    Optional filters (course_id, block_id, lesson_id) can be supplied to
-    target a specific content context. Returns the session snapshot and
-    the next tutor turn (from the pre-generated lesson plan when available).
-    """
-    snapshot, tutor_turn = await ai_tutor_service.resume_session(
+    snapshot, interactions = ai_tutor_service.get_session_detail(
+        session_id=session_id,
         student_id=current_user["user_id"],
         db=db,
-        course_id=course_id,
-        block_id=block_id,
-        lesson_id=lesson_id,
     )
-    return SessionStartResponse(session=snapshot, tutor_turn=tutor_turn)
+    interaction_models = _serialize_interactions(interactions)
+    return TutorSessionDetail(session=snapshot, interactions=interaction_models)
 
 
 def _serialize_interactions(interactions: List[AITutorInteraction]) -> List[TutorInteractionOut]:
