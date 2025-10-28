@@ -153,7 +153,12 @@ class AITutorService:
                 "learning_focus": request.preferred_learning_focus or "balanced",
                 "grade_level": grade_level,
             },
-            tutor_settings={"source": content_meta},
+            tutor_settings={
+                "source": content_meta,
+                # Default to strict grounding so the tutor stays anchored to the provided content
+                # (no enrichment detours unless explicitly enabled later).
+                "strict_grounding": True,
+            },
         )
         db.add(session)
         db.flush()
@@ -570,6 +575,8 @@ class AITutorService:
                         "checkpoint": tutor_turn.checkpoint.dict() if tutor_turn.checkpoint else None,
                         "follow_up_prompts": tutor_turn.follow_up_prompts,
                         "source": "lesson_plan",
+                        "seg_idx": int((session.tutor_settings or {}).get("plan_state", {}).get("segment_index", 0)),
+                        "snip_idx": int((session.tutor_settings or {}).get("plan_state", {}).get("snippet_index", 0)),
                     },
                 )
             )
@@ -750,9 +757,10 @@ class AITutorService:
         retry_used_for = state.get("retry_used_for", {})
         use_easier = bool(force_easier) and bool(snip.get("easier_explanation"))
 
-        # Difficulty adaptation: if enrichment is available and we have strong recent performance, use it
+        # Difficulty adaptation: gate enrichment by strict grounding
         use_enrichment = False
-        if not use_easier:
+        strict_grounding = bool((session.tutor_settings or {}).get("strict_grounding", True))
+        if not use_easier and not strict_grounding:
             # Look at recent checkpoint scores to gauge proficiency
             recent_scores = [cp.score for cp in (session.checkpoints or []) if cp.score is not None]
             avg = sum(recent_scores[-3:]) / max(1, len(recent_scores[-3:])) if recent_scores[-3:] else None
@@ -866,6 +874,7 @@ class AITutorService:
         if bridge_parts:
             narration_text = narration_text.strip() + "\n\n" + " ".join(bridge_parts)
 
+        # Emit a compact, grounded turn; follow-ups strictly from plan snippet
         return TutorTurn(
             narration=narration_text,
             comprehension_check=question,
