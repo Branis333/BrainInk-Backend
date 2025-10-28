@@ -8,6 +8,7 @@ NOTE: These notes are STANDALONE - not tied to courses or assignments
 """
 
 import logging
+import json
 import aiofiles
 import hashlib
 from pathlib import Path
@@ -53,6 +54,57 @@ def generate_unique_filename(original_filename: str, user_id: int, note_id: int)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     unique_name = f"note_{note_id}_user_{user_id}_{timestamp}_{original_filename}"
     return unique_name
+
+
+def _to_list(value):
+    """Best-effort conversion of potentially stringified JSON arrays to actual lists.
+    - If value is already a list or None, return as-is
+    - If value is a JSON string representing a list, parse it
+    - If it's a comma-separated string, split to list
+    - If it's an empty string or 'null', return None
+    """
+    if value is None or isinstance(value, list):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8", errors="ignore")
+        except Exception:
+            value = str(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or s.lower() == "null":
+            return None
+        # Try JSON first
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
+        # Fallback: comma-separated
+        if "," in s:
+            return [part.strip() for part in s.split(",") if part.strip()]
+        # As a last resort, wrap string in list if it looks like a bracket-starting fragment
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s + "")
+                if isinstance(parsed, list):
+                    return parsed
+            except Exception:
+                return None
+        return [s]
+    # Unknown type -> coerce to string list
+    return [str(value)]
+
+
+def _normalise_note_instance(note: StudentNote) -> StudentNote:
+    """Mutate ORM instance fields to expected types for Pydantic serialization."""
+    note.key_points = _to_list(getattr(note, "key_points", None))
+    note.main_topics = _to_list(getattr(note, "main_topics", None))
+    note.learning_concepts = _to_list(getattr(note, "learning_concepts", None))
+    note.questions_generated = _to_list(getattr(note, "questions_generated", None))
+    note.tags = _to_list(getattr(note, "tags", None))
+    return note
 
 
 # ===============================
@@ -302,7 +354,7 @@ async def get_student_note(
             detail="Note not found"
         )
     
-    return note
+    return _normalise_note_instance(note)
 
 
 @router.get("", response_model=StudentNoteListResponse)
@@ -341,11 +393,10 @@ async def list_student_notes(
     
     # Get paginated results, ordered by most recent first
     notes = query.order_by(desc(StudentNote.created_at)).offset(offset).limit(limit).all()
+    # Normalise any legacy/stringified JSON fields to lists for safe serialization
+    notes = [_normalise_note_instance(n) for n in notes]
     
-    return StudentNoteListResponse(
-        total=total,
-        notes=notes
-    )
+    return StudentNoteListResponse(total=total, notes=notes)
 
 
 @router.get("/search/query", response_model=StudentNoteListResponse)
@@ -401,11 +452,9 @@ async def search_student_notes(
     
     # Apply pagination
     notes = query.offset(offset).limit(limit).all()
+    notes = [_normalise_note_instance(n) for n in notes]
     
-    return StudentNoteListResponse(
-        total=total,
-        notes=notes
-    )
+    return StudentNoteListResponse(total=total, notes=notes)
 
 
 @router.put("/{note_id}", response_model=StudentNoteOut)
