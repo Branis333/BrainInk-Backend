@@ -35,3 +35,6 @@ pillow==10.1.0
 reportlab==4.0.7
 pypdf==3.17.4
 apscheduler 
+
+# Explicit dependency to fix deployment error (google.api_core requires it)
+packaging>=23.1
