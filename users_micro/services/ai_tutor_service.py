@@ -153,7 +153,12 @@ class AITutorService:
                 "learning_focus": request.preferred_learning_focus or "balanced",
                 "grade_level": grade_level,
             },
-            tutor_settings={"source": content_meta},
+            tutor_settings={
+                "source": content_meta,
+                # Default to strict grounding so the tutor stays anchored to the provided content
+                # (no enrichment detours unless explicitly enabled later).
+                "strict_grounding": True,
+            },
         )
         db.add(session)
         db.flush()
@@ -570,6 +575,8 @@ class AITutorService:
                         "checkpoint": tutor_turn.checkpoint.dict() if tutor_turn.checkpoint else None,
                         "follow_up_prompts": tutor_turn.follow_up_prompts,
                         "source": "lesson_plan",
+                        "seg_idx": int((session.tutor_settings or {}).get("plan_state", {}).get("segment_index", 0)),
+                        "snip_idx": int((session.tutor_settings or {}).get("plan_state", {}).get("snippet_index", 0)),
                     },
                 )
             )
@@ -675,6 +682,45 @@ class AITutorService:
             session.tutor_settings = settings
             return
 
+        # Try to reuse a prior plan for the same context (course/block/lesson) to avoid regeneration
+        try:
+            from models.ai_tutor_models import AITutorSession as _Sess, TutorSessionStatus as _Stat
+            q = (
+                db.query(_Sess)
+                .filter(
+                    _Sess.student_id == session.student_id,
+                    _Sess.course_id == session.course_id,
+                    (_Sess.block_id == session.block_id) if session.block_id is not None else _Sess.block_id.is_(None),
+                    (_Sess.lesson_id == session.lesson_id) if session.lesson_id is not None else _Sess.lesson_id.is_(None),
+                    _Sess.id != session.id,
+                )
+                .order_by(_Sess.updated_at.desc())
+            )
+            # Consider any prior session (completed or open) to harvest an existing plan
+            prior = None
+            for row in q.limit(5):
+                try:
+                    ts = row.tutor_settings or {}
+                    if ts.get("lesson_plan"):
+                        prior = ts.get("lesson_plan")
+                        break
+                except Exception:
+                    continue
+            if prior:
+                settings["lesson_plan"] = prior
+                settings["plan_state"] = {
+                    "segment_index": 0,
+                    "snippet_index": 0,
+                    "awaiting": None,
+                    "retry_used_for": {},
+                    "force_easier": False,
+                }
+                session.tutor_settings = settings
+                db.flush()
+                return
+        except Exception:
+            logger.exception("Failed attempting to reuse existing lesson plan; will generate new")
+
         segment_payload = [{"index": i, "text": seg} for i, seg in enumerate(segments)]
         try:
             plan = await self.gemini.generate_lesson_plan_for_segments(
@@ -750,9 +796,10 @@ class AITutorService:
         retry_used_for = state.get("retry_used_for", {})
         use_easier = bool(force_easier) and bool(snip.get("easier_explanation"))
 
-        # Difficulty adaptation: if enrichment is available and we have strong recent performance, use it
+        # Difficulty adaptation: gate enrichment by strict grounding
         use_enrichment = False
-        if not use_easier:
+        strict_grounding = bool((session.tutor_settings or {}).get("strict_grounding", True))
+        if not use_easier and not strict_grounding:
             # Look at recent checkpoint scores to gauge proficiency
             recent_scores = [cp.score for cp in (session.checkpoints or []) if cp.score is not None]
             avg = sum(recent_scores[-3:]) / max(1, len(recent_scores[-3:])) if recent_scores[-3:] else None
@@ -766,7 +813,7 @@ class AITutorService:
         else:
             narration_text = snip.get("explanation") or "Let's explore this idea."
         question = snip.get("question")
-        follow = snip.get("follow_ups") or []
+        follow = list(snip.get("follow_ups") or [])
         cp = snip.get("checkpoint")
 
         # Determine awaiting state
@@ -866,6 +913,18 @@ class AITutorService:
         if bridge_parts:
             narration_text = narration_text.strip() + "\n\n" + " ".join(bridge_parts)
 
+        # If we're not awaiting a response or checkpoint and there's more content ahead,
+        # include a simple Continue CTA to guide progression.
+        try:
+            has_more_snippets = (sn_idx + 1) < len(snippets)
+            has_more_segments = (seg_idx + 1) < len(plan.get("segments", []))
+            if (awaiting is None) and (has_more_snippets or has_more_segments):
+                if "Continue" not in follow:
+                    follow.insert(0, "Continue")
+        except Exception:
+            pass
+
+        # Emit a compact, grounded turn; follow-ups strictly from plan snippet (plus optional Continue)
         return TutorTurn(
             narration=narration_text,
             comprehension_check=question,
