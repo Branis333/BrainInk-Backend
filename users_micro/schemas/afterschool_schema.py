@@ -623,3 +623,20 @@ class NoteAnalysisResponse(BaseModel):
     
     processed_at: Optional[datetime]
     processing_duration_seconds: Optional[float]
+
+# ===============================
+# PRACTICE QUIZ SCHEMAS
+# ===============================
+
+class PracticeQuizQuestion(BaseModel):
+    id: int
+    question: str
+    options: List[str]
+    correct_index: int
+    explanation: Optional[str] = None
+
+
+class PracticeQuizOut(BaseModel):
+    title: str
+    topic: Optional[str] = None
+    questions: List[PracticeQuizQuestion]

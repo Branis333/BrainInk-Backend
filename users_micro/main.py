@@ -6,6 +6,7 @@ from Endpoints.after_school import (
     grades as after_school_grades,
     uploads as after_school_uploads,
     reading_assistant,
+    quiz as after_school_quiz,
     assignments as after_school_assignments,
     ai_tutor as after_school_ai_tutor,
     notes as after_school_notes,
@@ -124,6 +125,7 @@ app.include_router(after_school_grades.router)  # Already has prefix /after-scho
 app.include_router(after_school_uploads.router)  # Already has prefix /after-school/uploads
 app.include_router(after_school_uploads.legacy_router)  # Legacy compatibility for older mobile clients
 app.include_router(reading_assistant.router)  # Already has prefix /after-school/reading-assistant
+app.include_router(after_school_quiz.router)  # New: /after-school/quiz (ephemeral practice quizzes)
 app.include_router(after_school_assignments.router)  # New: /after-school/assignments
 app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
