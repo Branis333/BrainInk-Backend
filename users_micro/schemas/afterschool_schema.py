@@ -454,6 +454,27 @@ class StudentProgressOut(BaseModel):
     class Config:
         from_attributes = True
 
+
+# ===============================
+# PROGRESS DIGEST SCHEMAS
+# ===============================
+
+class ProgressDigestOut(BaseModel):
+    id: int
+    user_id: int
+    scope: str  # "weekly" | "course"
+    period_start: datetime
+    period_end: datetime
+    summary: str
+    assignments_count: int
+    avg_grade: Optional[float]
+    course_id: Optional[int]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 # ===============================
 # RESPONSE SCHEMAS
 # ===============================

@@ -11,6 +11,7 @@ from Endpoints.after_school import (
     ai_tutor as after_school_ai_tutor,
     notes as after_school_notes,
     notifications,
+    progress as after_school_progress,
 )
 from Endpoints.after_school.notification_scheduler import setup_notification_scheduler
 from db.database import get_engine, test_connection
@@ -130,6 +131,7 @@ app.include_router(after_school_assignments.router)  # New: /after-school/assign
 app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
 app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
+app.include_router(after_school_progress.router)  # New: /after-school/progress (digested progress summaries)
 
 @app.get("/")
 def root():
