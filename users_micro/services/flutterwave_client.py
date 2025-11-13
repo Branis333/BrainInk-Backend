@@ -1,0 +1,60 @@
+import os
+import httpx
+from typing import Any, Dict
+
+
+FLW_BASE = os.getenv("FLW_BASE", "https://api.flutterwave.com")
+FLW_SECRET_KEY = os.getenv("FLW_SECRET_KEY", "")
+FLW_PUBLIC_KEY = os.getenv("FLW_PUBLIC_KEY", "")
+FLW_PLAN_ID = os.getenv("FLW_PLAN_ID", "")  # optional; set after creating plan
+FLW_REDIRECT_URL = os.getenv("FLW_REDIRECT_URL", "")  # optional
+
+
+class FlutterwaveClient:
+    def __init__(self):
+        if not FLW_SECRET_KEY:
+            raise RuntimeError("FLW_SECRET_KEY is not configured")
+        self.client = httpx.AsyncClient(base_url=FLW_BASE, headers={
+            "Authorization": f"Bearer {FLW_SECRET_KEY}",
+            "Content-Type": "application/json"
+        }, timeout=30)
+
+    async def ensure_plan(self, amount: float, currency: str, interval: str, name: str = "Afterskool Monthly") -> str:
+        global FLW_PLAN_ID
+        if FLW_PLAN_ID:
+            return FLW_PLAN_ID
+        # Create plan
+        payload = {
+            "amount": amount,
+            "name": name,
+            "interval": interval,
+            "currency": currency
+        }
+        r = await self.client.post("/v3/payment-plans", json=payload)
+        r.raise_for_status()
+        data = r.json()
+        plan_id = str(data.get("data", {}).get("id"))
+        FLW_PLAN_ID = plan_id
+        return plan_id
+
+    async def create_payment(self, email: str, amount: float, currency: str, plan_id: str, tx_ref: str) -> Dict[str, Any]:
+        payload = {
+            "tx_ref": tx_ref,
+            "amount": amount,
+            "currency": currency,
+            "redirect_url": FLW_REDIRECT_URL or "https://brainink.org/pay/thanks",  # harmless fallback
+            "payment_plan": plan_id,
+            "customer": {"email": email},
+            "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"}
+        }
+        r = await self.client.post("/v3/payments", json=payload)
+        r.raise_for_status()
+        return r.json()
+
+    async def verify_transaction(self, transaction_id: str) -> Dict[str, Any]:
+        r = await self.client.get(f"/v3/transactions/{transaction_id}/verify")
+        r.raise_for_status()
+        return r.json()
+
+    async def close(self):
+        await self.client.aclose()
