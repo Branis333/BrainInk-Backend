@@ -92,12 +92,31 @@ async def get_course_progress(
         sessions_count = len(all_sessions)
         total_study_time = sum([s.duration_minutes or 0 for s in all_sessions])
 
-        # Completion percentage: prefer blocks when structure exists
+        # Assignment completion: passed (>=80%) only
+        total_assignments = db.query(CourseAssignment).filter(
+            CourseAssignment.course_id == course_id,
+            CourseAssignment.is_active == True
+        ).count()
+
+        passed_assignments = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == course_id,
+            StudentAssignment.status == "passed"
+        ).count()
+
+        assignments_pct = (passed_assignments / total_assignments * 100.0) if total_assignments > 0 else None
+
+        # Completion percentage combines blocks and assignments when both exist
         completion_percentage = 0.0
+        parts = []
         if total_blocks > 0:
-            completion_percentage = (blocks_completed / total_blocks) * 100.0
+            parts.append((blocks_completed / total_blocks) * 100.0)
         elif total_lessons > 0:
-            completion_percentage = (lessons_completed / total_lessons) * 100.0
+            parts.append((lessons_completed / total_lessons) * 100.0)
+        if assignments_pct is not None:
+            parts.append(assignments_pct)
+        if parts:
+            completion_percentage = sum(parts) / len(parts)
 
         # Clamp and round
         completion_percentage = round(max(0.0, min(100.0, completion_percentage)), 2)

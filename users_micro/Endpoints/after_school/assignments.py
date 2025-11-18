@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, asc
+from sqlalchemy import and_, asc, desc
 from typing import Optional
 
 from db.connection import db_dependency
@@ -11,6 +11,69 @@ router = APIRouter(prefix="/after-school/assignments", tags=["After-School Assig
 
 # Dependency for current user
 user_dependency = Depends(get_current_user)
+
+PASS_THRESHOLD = 80  # minimum percentage required to consider an assignment completed
+
+async def _extract_numeric_score(status_payload: dict) -> Optional[float]:
+    if not isinstance(status_payload, dict):
+        return None
+    for key in [
+        "score", "final_score", "percentage", "grade", "ai_score",
+        "overall", "overall_score", "overall_percentage",
+    ]:
+        val = status_payload.get(key)
+        try:
+            if isinstance(val, (int, float)):
+                return float(val)
+        except Exception:
+            continue
+    return None
+
+async def _previous_assignment(db, assignment: CourseAssignment) -> Optional[CourseAssignment]:
+    return (
+        db.query(CourseAssignment)
+        .filter(
+            CourseAssignment.course_id == assignment.course_id,
+            CourseAssignment.is_active == True,
+            CourseAssignment.id < assignment.id,
+        )
+        .order_by(desc(CourseAssignment.id))
+        .first()
+    )
+
+async def _has_passed_assignment(assignment_id: int, db, current_user: dict) -> bool:
+    try:
+        status_payload = await get_assignment_status_with_grade(
+            assignment_id=assignment_id, db=db, current_user=current_user
+        )
+    except HTTPException as e:
+        if e.status_code == 404:
+            return False
+        raise
+
+    if not isinstance(status_payload, dict):
+        return False
+
+    s = (status_payload.get("status") or status_payload.get("state") or "").lower()
+    if s == "passed":
+        return True
+
+    score = await _extract_numeric_score(status_payload)
+    if score is not None and score >= PASS_THRESHOLD:
+        return True
+    return False
+
+async def _lock_info_for_assignment(db, current_user: dict, assignment: CourseAssignment):
+    prev_def = await _previous_assignment(db, assignment)
+    if prev_def is None:
+        return {"locked": False, "required_assignment_id": None}
+    passed = await _has_passed_assignment(prev_def.id, db, current_user)
+    if passed:
+        return {"locked": False, "required_assignment_id": None}
+    return {
+        "locked": True,
+        "required_assignment_id": prev_def.id,
+    }
 
 @router.get("/one")
 async def get_one_assignment(
@@ -57,8 +120,26 @@ async def get_one_assignment(
     student_pick = student_q.first()
 
     if student_pick:
-        # Return the detailed view for this assignment id
-        return await get_single_assignment(assignment_id=student_pick.assignment_id, db=db, current_user=current_user)
+        # Enforce sequential unlock: ensure previous assignment is passed
+        current_def = db.query(CourseAssignment).filter(CourseAssignment.id == student_pick.assignment_id).first()
+        if current_def:
+            prev_def = await _previous_assignment(db, current_def)
+            if prev_def is not None and not await _has_passed_assignment(prev_def.id, db, current_user):
+                # Return the previous (actionable) assignment with lock meta
+                prev_payload = await get_single_assignment(assignment_id=prev_def.id, db=db, current_user=current_user)
+                lock_info = {"locked": True, "required_assignment_id": prev_def.id}
+                if isinstance(prev_payload, dict):
+                    prev_payload.setdefault("locked", lock_info["locked"])  # previous itself isn't locked
+                    prev_payload.setdefault("required_assignment_id", None)
+                return prev_payload
+
+        payload = await get_single_assignment(assignment_id=student_pick.assignment_id, db=db, current_user=current_user)
+        # Add lock info to payload (first assignment remains unlocked)
+        if isinstance(payload, dict) and current_def is not None:
+            lock_info = await _lock_info_for_assignment(db, current_user, current_def)
+            payload["locked"] = lock_info["locked"]
+            payload["required_assignment_id"] = lock_info["required_assignment_id"]
+        return payload
 
     # Second try: any student assignment in the scope regardless of status (earliest due)
     fallback_student_q = db.query(StudentAssignment).join(CourseAssignment, CourseAssignment.id == StudentAssignment.assignment_id)
@@ -77,7 +158,21 @@ async def get_one_assignment(
     fallback_student_q = fallback_student_q.order_by(asc(StudentAssignment.due_date))
     fallback_student = fallback_student_q.first()
     if fallback_student:
-        return await get_single_assignment(assignment_id=fallback_student.assignment_id, db=db, current_user=current_user)
+        current_def = db.query(CourseAssignment).filter(CourseAssignment.id == fallback_student.assignment_id).first()
+        if current_def:
+            prev_def = await _previous_assignment(db, current_def)
+            if prev_def is not None and not await _has_passed_assignment(prev_def.id, db, current_user):
+                prev_payload = await get_single_assignment(assignment_id=prev_def.id, db=db, current_user=current_user)
+                if isinstance(prev_payload, dict):
+                    prev_payload.setdefault("locked", False)
+                    prev_payload.setdefault("required_assignment_id", None)
+                return prev_payload
+        payload = await get_single_assignment(assignment_id=fallback_student.assignment_id, db=db, current_user=current_user)
+        if isinstance(payload, dict) and current_def is not None:
+            lock_info = await _lock_info_for_assignment(db, current_user, current_def)
+            payload["locked"] = lock_info["locked"]
+            payload["required_assignment_id"] = lock_info["required_assignment_id"]
+        return payload
 
     # Final try: any course assignment definition in scope (not yet assigned to user)
     definition_q = db.query(CourseAssignment).filter(CourseAssignment.course_id == course_id, CourseAssignment.is_active == True)
@@ -165,6 +260,15 @@ async def get_one_assignment(
             "is_assigned": False
         }
 
+    # Enforce sequential unlock for definition pick as well
+    prev_def = await _previous_assignment(db, definition_pick)
+    if prev_def is not None and not await _has_passed_assignment(prev_def.id, db, current_user):
+        prev_payload = await get_single_assignment(assignment_id=prev_def.id, db=db, current_user=current_user)
+        if isinstance(prev_payload, dict):
+            prev_payload.setdefault("locked", False)
+            prev_payload.setdefault("required_assignment_id", None)
+        return prev_payload
+
     # Build response similar to get_single_assignment but without a student record
     try:
         status = await get_assignment_status_with_grade(
@@ -179,6 +283,7 @@ async def get_one_assignment(
         else:
             raise
 
+    lock_info = await _lock_info_for_assignment(db, current_user, definition_pick)
     return {
         "assignment": {
             "id": definition_pick.id,
@@ -199,7 +304,9 @@ async def get_one_assignment(
             "is_active": definition_pick.is_active
         },
         "student_status": status,
-        "is_assigned": False
+        "is_assigned": False,
+        "locked": lock_info["locked"],
+        "required_assignment_id": lock_info["required_assignment_id"],
     }
 
 @router.get("/{assignment_id}")
@@ -225,6 +332,9 @@ async def get_single_assignment(
     assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
     if not assignment:
         raise HTTPException(status_code=404, detail="Assignment not found")
+    
+    # Compute lock info for UI (do not hard-error; expose lock state)
+    lock_info = await _lock_info_for_assignment(db, current_user, assignment)
     
     # Get student's assignment record if exists
     student_assignment = db.query(StudentAssignment).filter(
@@ -268,7 +378,9 @@ async def get_single_assignment(
             "is_active": assignment.is_active
         },
         "student_status": status,
-        "is_assigned": student_assignment is not None
+        "is_assigned": student_assignment is not None,
+        "locked": lock_info["locked"],
+        "required_assignment_id": lock_info["required_assignment_id"],
     }
 
 
