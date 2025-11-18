@@ -5,7 +5,7 @@ from typing import Optional
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from Endpoints.after_school.grades import get_assignment_status_with_grade
-from models.afterschool_models import CourseAssignment, StudentAssignment
+from models.afterschool_models import CourseAssignment, StudentAssignment, StudySession
 
 router = APIRouter(prefix="/after-school/assignments", tags=["After-School Assignments (Public)"])
 
@@ -63,17 +63,33 @@ async def _has_passed_assignment(assignment_id: int, db, current_user: dict) -> 
         return True
     return False
 
+async def _has_completed_block(db, current_user: dict, block_id: Optional[int]) -> bool:
+    """Return True if the user has completed the correlating block (module)."""
+    if not block_id:
+        return True
+    user_id = current_user["user_id"]
+    completed = (
+        db.query(StudySession)
+        .filter(
+            StudySession.user_id == user_id,
+            StudySession.block_id == block_id,
+            StudySession.status == 'completed'
+        )
+        .first()
+    )
+    return completed is not None
+
 async def _lock_info_for_assignment(db, current_user: dict, assignment: CourseAssignment):
-    prev_def = await _previous_assignment(db, assignment)
-    if prev_def is None:
+    """
+    Lock rule: an assignment is locked if its correlating block (module) has not
+    been marked as completed by the student. If the assignment has no block linkage,
+    it is considered unlocked.
+    """
+    # Gate by block completion
+    if await _has_completed_block(db, current_user, getattr(assignment, 'block_id', None)):
         return {"locked": False, "required_assignment_id": None}
-    passed = await _has_passed_assignment(prev_def.id, db, current_user)
-    if passed:
-        return {"locked": False, "required_assignment_id": None}
-    return {
-        "locked": True,
-        "required_assignment_id": prev_def.id,
-    }
+    # When locked by module gating, we don't force a specific prior assignment; keep field for compatibility
+    return {"locked": True, "required_assignment_id": None}
 
 @router.get("/one")
 async def get_one_assignment(
