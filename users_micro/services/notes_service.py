@@ -168,6 +168,71 @@ Make the analysis educational, comprehensive, and helpful for student learning a
                     "questions_generated": []
                 }
             
+            # After base analysis, derive learning objectives (2-7) and attach related videos
+            objectives: List[Dict[str, Any]] = []
+            try:
+                objectives_prompt = f"""You are an expert curriculum designer.
+
+Using the following analyzed notes context, extract 2 to 7 clear learning objectives. For each objective, also generate a concise 2-4 sentence summary that focuses only on that objective.
+
+Return strict JSON with this shape:
+{{
+  "objectives": [
+    {{
+      "objective": "...",
+      "summary": "..."
+    }}
+  ]
+}}
+
+NOTES SUMMARY:
+{analysis_result.get('summary','')}
+
+KEY POINTS:
+{analysis_result.get('key_points', [])}
+
+MAIN TOPICS:
+{analysis_result.get('main_topics', [])}
+
+SUBJECT: {note_subject or ''}
+"""
+                obj_resp = await gemini_service._generate_json_response(
+                    prompt=objectives_prompt,
+                    attachments=None,
+                    temperature=0.2,
+                    max_output_tokens=800,
+                )
+                raw_objectives = obj_resp.get("objectives") or []
+                # Coerce into expected list of dicts with keys objective, summary
+                for idx, o in enumerate(raw_objectives):
+                    if isinstance(o, dict):
+                        objective_text = o.get("objective") or o.get("title") or o.get("goal")
+                        summary_text = o.get("summary") or o.get("description")
+                    else:
+                        objective_text = str(o)
+                        summary_text = None
+                    if not objective_text:
+                        continue
+                    objectives.append({
+                        "objective": objective_text,
+                        "summary": summary_text or "",
+                    })
+            except Exception as e:
+                logger.warning(f"Failed to derive objectives: {e}")
+                objectives = []
+
+            # Attach related YouTube videos per objective (2-3 each)
+            enriched_objectives: List[Dict[str, Any]] = []
+            for o in objectives[:7]:
+                topic = o.get("objective") or note_subject or note_title
+                try:
+                    videos = await gemini_service.generate_youtube_links(topic=topic, count=3)
+                except Exception as e:
+                    logger.warning(f"YouTube link generation failed for '{topic}': {e}")
+                    videos = []
+                enriched = {**o, "videos": videos}
+                enriched_objectives.append(enriched)
+
             # Validate and return response
             logger.info(f"✅ Gemini Vision analysis completed for: {note_title}")
             
@@ -178,7 +243,8 @@ Make the analysis educational, comprehensive, and helpful for student learning a
                 "key_points": analysis_result.get("key_points", []),
                 "main_topics": analysis_result.get("main_topics", []),
                 "learning_concepts": analysis_result.get("learning_concepts", []),
-                "questions_generated": analysis_result.get("questions_generated", [])
+                "questions_generated": analysis_result.get("questions_generated", []),
+                "objectives": enriched_objectives,
             }
             
         except json.JSONDecodeError as e:
@@ -201,8 +267,85 @@ Make the analysis educational, comprehensive, and helpful for student learning a
                 "key_points": [],
                 "main_topics": [],
                 "learning_concepts": [],
-                "questions_generated": []
+                "questions_generated": [],
             }
+
+    @staticmethod
+    async def generate_flashcards_from_content(content: str, count: int = 8) -> List[Dict[str, str]]:
+        """Generate flashcards (front/back) from given content using Gemini."""
+        count = max(5, min(10, int(count or 8)))
+        prompt = f"""Create {count} concise flashcards from the following study content. Return strict JSON:
+{{"flashcards": [{{"front": "question/prompt", "back": "concise answer"}}]}}
+
+CONTENT:
+{content}
+"""
+        try:
+            resp = await gemini_service._generate_json_response(
+                prompt=prompt,
+                attachments=None,
+                temperature=0.2,
+                max_output_tokens=600,
+            )
+            cards = resp.get("flashcards") or []
+            result = []
+            for c in cards[:count]:
+                if isinstance(c, dict):
+                    front = c.get("front") or c.get("q") or c.get("question")
+                    back = c.get("back") or c.get("a") or c.get("answer")
+                elif isinstance(c, list) and len(c) >= 2:
+                    front, back = c[0], c[1]
+                else:
+                    continue
+                if front and back:
+                    result.append({"front": str(front), "back": str(back)})
+            return result[:count]
+        except Exception as e:
+            logger.error(f"Flashcards generation failed: {e}")
+            return []
+
+    @staticmethod
+    async def generate_quiz_for_objective(objective: str, summary: Optional[str], count: int = 7) -> List[Dict[str, Any]]:
+        """Generate MCQ quiz for a specific objective with correct answer indices."""
+        count = max(5, min(10, int(count or 7)))
+        prompt = f"""Generate {count} multiple-choice questions for the learning objective below.
+Each question must have exactly 4 options and provide the correct `answer_index` (0-3). Return strict JSON:
+{{"questions": [{{"question": "...", "options": ["A","B","C","D"], "answer_index": 1}}]}}
+
+OBJECTIVE: {objective}
+OBJECTIVE SUMMARY: {summary or ''}
+"""
+        try:
+            resp = await gemini_service._generate_json_response(
+                prompt=prompt,
+                attachments=None,
+                temperature=0.2,
+                max_output_tokens=900,
+            )
+            raw = resp.get("questions") or []
+            questions: List[Dict[str, Any]] = []
+            for q in raw[:count]:
+                if not isinstance(q, dict):
+                    continue
+                text = q.get("question") or q.get("q")
+                options = q.get("options") or q.get("choices") or []
+                ans_idx = q.get("answer_index")
+                if text and isinstance(options, list) and len(options) == 4:
+                    try:
+                        ans_idx = int(ans_idx)
+                    except Exception:
+                        ans_idx = None
+                    if ans_idx is None or not (0 <= ans_idx < 4):
+                        # If missing, try to infer from `answer`
+                        correct = q.get("answer")
+                        if correct in options:
+                            ans_idx = options.index(correct)
+                    if ans_idx is not None and 0 <= ans_idx < 4:
+                        questions.append({"question": str(text), "options": [str(o) for o in options], "answer_index": ans_idx})
+            return questions[:count]
+        except Exception as e:
+            logger.error(f"Quiz generation failed: {e}")
+            return []
     
     @staticmethod
     def generate_unique_filename(original_filename: str, user_id: int, note_id: int) -> str:

@@ -370,6 +370,18 @@ class StudentNote(Base):
     learning_concepts = Column(JSON, nullable=True)  # Key learning concepts
     questions_generated = Column(JSON, nullable=True)  # AI-generated questions based on notes
     
+    # Enhanced learning structure
+    # objectives: [{"objective": str, "summary": str, "videos": [{title,url,type,description,thumbnail,channel,search_query}]}]
+    objectives = Column(JSON, nullable=True)
+    # Flashcards generated per objective: index-aligned list of lists
+    # objective_flashcards: [[{"front": str, "back": str}], ...]
+    objective_flashcards = Column(JSON, nullable=True)
+    # Flashcards generated from entire note summary
+    overall_flashcards = Column(JSON, nullable=True)
+    # Per-objective quiz progress tracking (stored on quiz grade submissions)
+    # objective_progress: [{"objective_index": int, "latest_grade": float, "performance_summary": str, "last_quiz_at": str}]
+    objective_progress = Column(JSON, nullable=True)
+    
     # Processing status
     processing_status = Column(String(50), default="pending")  # pending, processing, completed, failed
     processing_error = Column(Text, nullable=True)  # Error message if processing failed

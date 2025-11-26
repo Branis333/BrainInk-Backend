@@ -548,6 +548,7 @@ class StudentNoteAnalysisResult(BaseModel):
     main_topics: Optional[List[str]] = Field(None, description="Main topics/concepts")
     learning_concepts: Optional[List[str]] = Field(None, description="Learning concepts")
     questions_generated: Optional[List[str]] = Field(None, description="AI-generated questions")
+    objectives: Optional[List[Dict]] = Field(None, description="Learning objectives with summaries and related videos")
     
     class Config:
         from_attributes = True
@@ -579,6 +580,10 @@ class StudentNoteOut(BaseModel):
     main_topics: Optional[List[str]]
     learning_concepts: Optional[List[str]]
     questions_generated: Optional[List[str]]
+    objectives: Optional[List[Dict]]
+    objective_flashcards: Optional[List[List[Dict]]]
+    overall_flashcards: Optional[List[Dict]]
+    objective_progress: Optional[List[Dict]]
     
     # Metadata
     is_public: bool
@@ -641,10 +646,53 @@ class NoteAnalysisResponse(BaseModel):
     main_topics: Optional[List[str]]
     learning_concepts: Optional[List[str]]
     questions_generated: Optional[List[str]]
+    objectives: Optional[List[Dict]]
     
     processed_at: Optional[datetime]
     processing_duration_seconds: Optional[float]
 
+class Flashcard(BaseModel):
+    front: str
+    back: str
+
+class QuizQuestion(BaseModel):
+    question: str
+    options: List[str]
+    answer_index: int
+
+class ObjectiveQuizResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    objective: str
+    num_questions: int
+    questions: List[QuizQuestion]
+    generated_at: datetime
+
+class FlashcardsResponse(BaseModel):
+    note_id: int
+    scope: str  # "objective" or "overall"
+    objective_index: Optional[int]
+    count: int
+    flashcards: List[Flashcard]
+    generated_at: datetime
+
+class QuizGradeRequest(BaseModel):
+    grade_percentage: float = Field(..., ge=0, le=100)
+    performance_summary: Optional[str] = None
+
+class QuizSubmitRequest(BaseModel):
+    objective_index: int
+    questions: List[QuizQuestion]
+    user_answers: List[int]
+
+class QuizSubmitResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    total_questions: int
+    correct_count: int
+    grade_percentage: float
+    performance_summary: Optional[str]
+    submitted_at: datetime
 # ===============================
 # PRACTICE QUIZ SCHEMAS
 # ===============================
