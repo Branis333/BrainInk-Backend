@@ -7,6 +7,7 @@ from models.payments_models import Subscription
 from datetime import datetime, timedelta
 import os
 import uuid
+import httpx
 
 router = APIRouter(prefix="/payments/flutterwave", tags=["payments"])
 sub_router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])  # alias for mobile app
@@ -23,6 +24,33 @@ def get_db():
 from Endpoints.auth import user_dependency  # uses OAuth2 bearer to set user context
 
 
+async def _convert_usd(amount_usd: float, to_currency: str) -> float:
+    to_currency = (to_currency or "USD").upper()
+    if to_currency == "USD":
+        return float(amount_usd)
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get("https://api.exchangerate.host/convert", params={"from": "USD", "to": to_currency, "amount": amount_usd})
+            r.raise_for_status()
+            data = r.json()
+            result = data.get("result")
+            if result is None:
+                raise ValueError("no conversion result")
+            return float(result)
+    except Exception:
+        # Fallback multipliers (approximate; only used if API unavailable)
+        fallback = {"NGN": 1500.0, "UGX": 3800.0, "RWF": 1300.0}
+        rate = fallback.get(to_currency)
+        if rate:
+            return float(amount_usd) * rate
+        return float(amount_usd)
+
+
+def _round_for_currency(amount: float, currency: str) -> float:
+    zero_decimal = {"UGX", "RWF"}
+    return round(amount, 0 if currency.upper() in zero_decimal else 2)
+
+
 @router.post("/initiate", response_model=InitiateSubscriptionResponse)
 async def initiate_subscription(payload: InitiateSubscriptionRequest, user: user_dependency, request: Request, db: Session = Depends(get_db)):
     """Initiate a subscription payment. Attaches user_id in meta so webhook can map the event."""
@@ -36,15 +64,22 @@ async def initiate_subscription(payload: InitiateSubscriptionRequest, user: user
         raise HTTPException(status_code=503, detail="Payment service is not configured. Please contact support.")
     
     try:
-        plan_id = await client.ensure_plan(amount=payload.amount, currency=payload.currency, interval=payload.interval)
+        # Convert $5 equivalent when charging non-USD currencies
+        target_currency = (payload.currency or "USD").upper()
+        amount_to_charge = payload.amount
+        if target_currency != "USD":
+            converted = await _convert_usd(payload.amount, target_currency)
+            amount_to_charge = _round_for_currency(converted, target_currency)
+
+        plan_id = await client.ensure_plan(amount=amount_to_charge, currency=target_currency, interval=payload.interval)
         tx_ref = f"sub_{user_id}_{uuid.uuid4().hex[:10]}"
         res = await client.create_payment(
             email=user_email,
-            amount=payload.amount,
-            currency=payload.currency,
+            amount=amount_to_charge,
+            currency=target_currency,
             plan_id=plan_id,
             tx_ref=tx_ref,
-            meta={"user_id": user_id}
+            meta={"user_id": user_id, "country": {"USD":"US","NGN":"NG","UGX":"UG","RWF":"RW"}.get(target_currency, "US")}
         )
         checkout_url = res.get("data", {}).get("link")
         if not checkout_url:

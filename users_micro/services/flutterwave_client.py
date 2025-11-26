@@ -52,6 +52,17 @@ class FlutterwaveClient:
         return plan_id
 
     async def create_payment(self, email: str, amount: float, currency: str, plan_id: str, tx_ref: str, meta: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        currency = currency.upper()
+        # Prefer MoMo options where applicable
+        mo_options = {
+            "UGX": "mobilemoneyuganda",
+            "RWF": "mobilemoneyrwanda",
+            "GHS": "mobilemoneygh",
+            "ZMW": "mobilemoneyzambia",
+        }
+        payment_options = ["card", "banktransfer", "ussd"]
+        if currency in mo_options:
+            payment_options.append(mo_options[currency])
         payload = {
             "tx_ref": tx_ref,
             "amount": amount,
@@ -61,8 +72,7 @@ class FlutterwaveClient:
             "customer": {"email": email},
             "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"},
             "meta": meta or {},
-            # Allow multiple options including card and mobile money (test mode varies by region)
-            "payment_options": "card,banktransfer,ussd,mobilemoney"
+            "payment_options": ",".join(payment_options)
         }
         r = await self.client.post("/v3/payments", json=payload)
         r.raise_for_status()
