@@ -138,3 +138,36 @@ async def get_status(user: user_dependency, db: Session = Depends(get_db)):
 async def get_status_alias(user: user_dependency, db: Session = Depends(get_db)):
     # alias path used by mobile client
     return await get_status(user=user, db=db)
+
+
+@router.get("/_debug/config")
+async def payments_debug_config(db: Session = Depends(get_db)):
+    """Return non-sensitive payment configuration and DB status for diagnostics.
+    Secrets are redacted. Intended for admin troubleshooting only.
+    """
+    from services.flutterwave_client import FLW_BASE, FLW_PUBLIC_KEY, FLW_SECRET_KEY, FLW_PLAN_ID, FLW_REDIRECT_URL
+    # DB ping
+    db_ok = True
+    try:
+        # Lightweight query to check DB
+        _ = db.execute("SELECT 1").scalar()
+    except Exception:
+        db_ok = False
+
+    return {
+        "db": {"connected": db_ok},
+        "flutterwave": {
+            "base": FLW_BASE,
+            "public_key_present": bool(FLW_PUBLIC_KEY),
+            "secret_key_present": bool(FLW_SECRET_KEY),
+            "plan_id": FLW_PLAN_ID or None,
+            "redirect_url": FLW_REDIRECT_URL or None,
+        },
+        "routes": {
+            "initiate": "/payments/flutterwave/initiate",
+            "verify": "/payments/flutterwave/verify",
+            "status": "/payments/flutterwave/status",
+            "webhook": "/payments/flutterwave/webhook",
+            "alias_status": "/subscriptions/status",
+        }
+    }
