@@ -1,3 +1,12 @@
+import os
+import sys
+
+# Ensure the parent directory is on sys.path so 'users_micro.*' imports work
+_pkg_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_pkg_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
