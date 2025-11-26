@@ -287,7 +287,13 @@ CONTENT:
                 temperature=0.2,
                 max_output_tokens=600,
             )
-            cards = resp.get("flashcards") or []
+            # Gemini may return either a dict {"flashcards": [...]} or a raw list [...]
+            if isinstance(resp, list):
+                cards = resp
+            elif isinstance(resp, dict):
+                cards = resp.get("flashcards") or resp.get("cards") or []
+            else:
+                cards = []
             result = []
             for c in cards[:count]:
                 if isinstance(c, dict):
