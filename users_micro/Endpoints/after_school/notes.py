@@ -24,7 +24,9 @@ from Endpoints.auth import get_current_user
 from models.afterschool_models import StudentNote, NoteAnalysisLog
 from schemas.afterschool_schema import (
     StudentNoteCreate, StudentNoteUpdate, StudentNoteOut, StudentNoteListResponse,
-    NoteUploadResponse, NoteAnalysisResponse, MessageResponse
+    NoteUploadResponse, NoteAnalysisResponse, MessageResponse,
+    ObjectiveQuizResponse, FlashcardsResponse, QuizGradeRequest, Flashcard, QuizQuestion,
+    QuizSubmitRequest, QuizSubmitResponse
 )
 from services.notes_service import notes_service
 
@@ -264,6 +266,7 @@ async def upload_and_analyze_notes(
                 student_note.main_topics = analysis_result.get("main_topics")
                 student_note.learning_concepts = analysis_result.get("learning_concepts")
                 student_note.questions_generated = analysis_result.get("questions_generated")
+                student_note.objectives = analysis_result.get("objectives")
                 student_note.ai_processed = True
                 student_note.processing_status = "completed"
                 student_note.processed_at = datetime.utcnow()
@@ -316,7 +319,8 @@ async def upload_and_analyze_notes(
                 "key_points": student_note.key_points,
                 "main_topics": student_note.main_topics,
                 "learning_concepts": student_note.learning_concepts,
-                "questions_generated": student_note.questions_generated
+                "questions_generated": student_note.questions_generated,
+                "objectives": student_note.objectives,
             } if student_note.ai_processed else None,
             "processed_at": student_note.processed_at.isoformat() if student_note.processed_at else None,
             "created_at": student_note.created_at.isoformat() if student_note.created_at else None
@@ -397,6 +401,296 @@ async def list_student_notes(
     notes = [_normalise_note_instance(n) for n in notes]
     
     return StudentNoteListResponse(total=total, notes=notes)
+
+
+# ===============================
+# OBJECTIVE QUIZ & FLASHCARDS
+# ===============================
+
+@router.post("/{note_id}/objectives/{objective_index}/quiz", response_model=ObjectiveQuizResponse)
+async def generate_objective_quiz(
+    note_id: int,
+    objective_index: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    num_questions: int = Form(7, ge=5, le=10),
+):
+    """Generate 5-10 MCQ questions for a specific objective."""
+    user_id = current_user["user_id"]
+
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.objectives or not isinstance(note.objectives, list):
+        raise HTTPException(status_code=400, detail="Objectives not available for this note")
+
+    # Support 1-based objective index from client; normalise to 0-based
+    idx = objective_index
+    if idx >= len(note.objectives) and 1 <= objective_index <= len(note.objectives):
+        idx = objective_index - 1
+    if idx < 0 or idx >= len(note.objectives):
+        raise HTTPException(status_code=400, detail="Invalid objective index")
+
+    obj = note.objectives[idx]
+    objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
+    objective_summary = obj.get("summary") if isinstance(obj, dict) else None
+
+    questions = await notes_service.generate_quiz_for_objective(objective_text, objective_summary, num_questions)
+    return ObjectiveQuizResponse(
+        note_id=note.id,
+        objective_index=idx,
+        objective=objective_text,
+        num_questions=len(questions),
+        questions=[QuizQuestion(**q) for q in questions],
+        generated_at=datetime.utcnow(),
+    )
+
+
+@router.post("/{note_id}/objectives/{objective_index}/quiz/grade", response_model=MessageResponse)
+async def submit_objective_quiz_grade(
+    note_id: int,
+    objective_index: int,
+    payload: QuizGradeRequest,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+):
+    """Store/update the latest grade percentage and a short performance summary for an objective."""
+    user_id = current_user["user_id"]
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.objectives or not isinstance(note.objectives, list):
+        raise HTTPException(status_code=400, detail="Objectives not available for this note")
+
+    # Normalise index
+    idx = objective_index
+    if idx >= len(note.objectives) and 1 <= objective_index <= len(note.objectives):
+        idx = objective_index - 1
+    if idx < 0 or idx >= len(note.objectives):
+        raise HTTPException(status_code=400, detail="Invalid objective index")
+
+    progress = note.objective_progress or []
+    # Ensure list large enough
+    while len(progress) < len(note.objectives):
+        progress.append({})
+    progress[idx] = {
+        "objective_index": idx,
+        "latest_grade": float(payload.grade_percentage),
+        "performance_summary": payload.performance_summary or "",
+        "last_quiz_at": datetime.utcnow().isoformat(),
+    }
+    note.objective_progress = progress
+    note.updated_at = datetime.utcnow()
+    db.commit()
+
+    return MessageResponse(message="Objective quiz grade stored successfully")
+
+
+@router.post("/{note_id}/objectives/{objective_index}/flashcards", response_model=FlashcardsResponse)
+async def generate_objective_flashcards(
+    note_id: int,
+    objective_index: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    count: int = Form(8, ge=5, le=10),
+):
+    """Generate flashcards for a specific objective and persist them on the note."""
+    user_id = current_user["user_id"]
+
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.objectives or not isinstance(note.objectives, list):
+        raise HTTPException(status_code=400, detail="Objectives not available for this note")
+
+    idx = objective_index
+    if idx >= len(note.objectives) and 1 <= objective_index <= len(note.objectives):
+        idx = objective_index - 1
+    if idx < 0 or idx >= len(note.objectives):
+        raise HTTPException(status_code=400, detail="Invalid objective index")
+
+    obj = note.objectives[idx]
+    content = obj.get("summary") or obj.get("objective") or note.summary or ""
+    cards = await notes_service.generate_flashcards_from_content(content, count)
+
+    # Persist in objective_flashcards
+    existing = note.objective_flashcards or []
+    while len(existing) < len(note.objectives):
+        existing.append([])
+    existing[idx] = cards
+    note.objective_flashcards = existing
+    note.updated_at = datetime.utcnow()
+    db.commit()
+
+    return FlashcardsResponse(
+        note_id=note.id,
+        scope="objective",
+        objective_index=idx,
+        count=len(cards),
+        flashcards=[Flashcard(**c) for c in cards],
+        generated_at=datetime.utcnow(),
+    )
+
+
+@router.post("/{note_id}/flashcards", response_model=FlashcardsResponse)
+async def generate_overall_flashcards(
+    note_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    count: int = Form(8, ge=5, le=10),
+):
+    """Generate flashcards from the entire note summary and persist them."""
+    user_id = current_user["user_id"]
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.summary:
+        raise HTTPException(status_code=400, detail="Note has no summary yet")
+
+    cards = await notes_service.generate_flashcards_from_content(note.summary, count)
+    note.overall_flashcards = cards
+    note.updated_at = datetime.utcnow()
+    db.commit()
+
+    return FlashcardsResponse(
+        note_id=note.id,
+        scope="overall",
+        objective_index=None,
+        count=len(cards),
+        flashcards=[Flashcard(**c) for c in cards],
+        generated_at=datetime.utcnow(),
+    )
+
+
+# ===============================
+# SIMPLE ROUTES (OBJECTIVE VIA PARAM)
+# ===============================
+
+@router.post("/{note_id}/quiz", response_model=ObjectiveQuizResponse)
+async def generate_quiz_from_note(
+    note_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    num_questions: int = Form(7, ge=5, le=10),
+    objective_index: int = Form(..., description="Objective index (1-based or 0-based)")
+):
+    """Wrapper: generate quiz for a specific objective using simpler route."""
+    return await generate_objective_quiz(
+        note_id=note_id,
+        objective_index=objective_index,
+        db=db,
+        current_user=current_user,
+        num_questions=num_questions,
+    )
+
+
+@router.post("/{note_id}/quiz/submit", response_model=QuizSubmitResponse)
+async def submit_quiz_answers(
+    note_id: int,
+    payload: QuizSubmitRequest,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+):
+    """Submit quiz answers for a specific objective, compute grade, store progress, and return results."""
+    user_id = current_user["user_id"]
+
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.objectives or not isinstance(note.objectives, list):
+        raise HTTPException(status_code=400, detail="Objectives not available for this note")
+
+    # Normalise index
+    idx = payload.objective_index
+    if idx >= len(note.objectives) and 1 <= payload.objective_index <= len(note.objectives):
+        idx = payload.objective_index - 1
+    if idx < 0 or idx >= len(note.objectives):
+        raise HTTPException(status_code=400, detail="Invalid objective index")
+
+    # Compute score
+    questions = payload.questions
+    answers = payload.user_answers
+    if not questions or not answers or len(questions) != len(answers):
+        raise HTTPException(status_code=400, detail="questions and user_answers length must match and be non-empty")
+
+    total = len(questions)
+    correct = 0
+    for q, a in zip(questions, answers):
+        try:
+            if int(a) == int(q.answer_index):
+                correct += 1
+        except Exception:
+            continue
+    grade_percentage = round((correct / total) * 100, 2)
+
+    # Optional performance summary generation
+    perf_summary = None
+    try:
+        obj = note.objectives[idx]
+        objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
+        summary_text = obj.get("summary") if isinstance(obj, dict) else ""
+        feedback_prompt = (
+            f"Provide a single short paragraph (max 4 sentences) of feedback for a student who scored {grade_percentage}% "
+            f"on the objective '{objective_text}'. Base it on this objective summary: {summary_text}."
+        )
+        fb = await notes_service.generate_flashcards_from_content(feedback_prompt, count=1)
+        # Reuse flashcard generator to get concise text; pick 'back' or 'front' as feedback container
+        if fb:
+            perf_summary = fb[0].get("back") or fb[0].get("front")
+    except Exception:
+        perf_summary = None
+
+    # Persist progress
+    progress = note.objective_progress or []
+    while len(progress) < len(note.objectives):
+        progress.append({})
+    progress[idx] = {
+        "objective_index": idx,
+        "latest_grade": grade_percentage,
+        "performance_summary": perf_summary or "",
+        "last_quiz_at": datetime.utcnow().isoformat(),
+    }
+    note.objective_progress = progress
+    note.updated_at = datetime.utcnow()
+    db.commit()
+
+    return QuizSubmitResponse(
+        note_id=note.id,
+        objective_index=idx,
+        total_questions=total,
+        correct_count=correct,
+        grade_percentage=grade_percentage,
+        performance_summary=perf_summary,
+        submitted_at=datetime.utcnow(),
+    )
+
+
+@router.post("/{note_id}/flashcards", response_model=FlashcardsResponse)
+async def generate_flashcards_for_note(
+    note_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    count: int = Form(8, ge=5, le=10),
+    objective_index: int = Form(..., description="Objective index (1-based or 0-based)")
+):
+    """Wrapper: generate flashcards for a specific objective using simpler route."""
+    return await generate_objective_flashcards(
+        note_id=note_id,
+        objective_index=objective_index,
+        db=db,
+        current_user=current_user,
+        count=count,
+    )
 
 
 @router.get("/search/query", response_model=StudentNoteListResponse)

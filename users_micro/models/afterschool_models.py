@@ -286,6 +286,49 @@ class StudentProgress(Base):
     )
 
 
+class ProgressDigest(Base):
+    """
+    Stores AI-digested progress summaries for a student.
+
+    Two scopes supported:
+    - weekly: Summary across all courses for a 7-day window (period_start..period_end)
+    - course: Cumulative summary for a single course (uses course_id; period covers earliest to latest included feedback)
+
+    We persist digests so students can review past weeks and regenerate course summaries on demand.
+    """
+    __tablename__ = "as_progress_digests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    course_id = Column(Integer, ForeignKey("as_courses.id"), nullable=True, index=True)
+
+    # weekly | course
+    scope = Column(String(20), nullable=False)
+
+    # Time window for which this digest was generated
+    period_start = Column(DateTime, nullable=False)
+    period_end = Column(DateTime, nullable=False)
+
+    # AI generated content
+    summary = Column(Text, nullable=False)
+
+    # Derived metrics for quick display
+    assignments_count = Column(Integer, nullable=False, default=0)
+    avg_grade = Column(Float, nullable=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Helpful relationship (optional usage)
+    course = relationship("Course")
+
+    __table_args__ = (
+        # Uniqueness by (user, scope, period_start, course)
+        # For weekly digests, course_id will be NULL; DB will allow multiple NULLs, so we also rely on app-level upsert.
+        UniqueConstraint('user_id', 'scope', 'period_start', 'course_id', name='uq_as_progress_digest_instance'),
+    )
+
+
 # ===============================
 # STUDENT NOTES & AI ANALYSIS
 # ===============================
@@ -326,6 +369,18 @@ class StudentNote(Base):
     main_topics = Column(JSON, nullable=True)  # Array of main topics/concepts
     learning_concepts = Column(JSON, nullable=True)  # Key learning concepts
     questions_generated = Column(JSON, nullable=True)  # AI-generated questions based on notes
+    
+    # Enhanced learning structure
+    # objectives: [{"objective": str, "summary": str, "videos": [{title,url,type,description,thumbnail,channel,search_query}]}]
+    objectives = Column(JSON, nullable=True)
+    # Flashcards generated per objective: index-aligned list of lists
+    # objective_flashcards: [[{"front": str, "back": str}], ...]
+    objective_flashcards = Column(JSON, nullable=True)
+    # Flashcards generated from entire note summary
+    overall_flashcards = Column(JSON, nullable=True)
+    # Per-objective quiz progress tracking (stored on quiz grade submissions)
+    # objective_progress: [{"objective_index": int, "latest_grade": float, "performance_summary": str, "last_quiz_at": str}]
+    objective_progress = Column(JSON, nullable=True)
     
     # Processing status
     processing_status = Column(String(50), default="pending")  # pending, processing, completed, failed
