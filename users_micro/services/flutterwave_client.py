@@ -20,9 +20,23 @@ class FlutterwaveClient:
         }, timeout=30)
 
     async def ensure_plan(self, amount: float, currency: str, interval: str, name: str = "Afterskool Monthly") -> str:
+        """Ensure a payment plan exists matching amount/currency/interval.
+        If `FLW_PLAN_ID` is set, verify it; if it mismatches, create a fresh plan.
+        """
         global FLW_PLAN_ID
         if FLW_PLAN_ID:
-            return FLW_PLAN_ID
+            try:
+                r = await self.client.get(f"/v3/payment-plans/{FLW_PLAN_ID}")
+                r.raise_for_status()
+                data = r.json().get("data", {})
+                plan_currency = str(data.get("currency", "")).upper()
+                plan_amount = float(data.get("amount", 0))
+                plan_interval = str(data.get("interval", "")).lower()
+                if plan_currency == currency.upper() and abs(plan_amount - float(amount)) < 0.0001 and plan_interval == interval.lower():
+                    return FLW_PLAN_ID
+            except Exception:
+                # If verification fails, fall back to creating a new plan
+                pass
         # Create plan
         payload = {
             "amount": amount,
@@ -47,6 +61,8 @@ class FlutterwaveClient:
             "customer": {"email": email},
             "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"},
             "meta": meta or {},
+            # Allow multiple options including card and mobile money (test mode varies by region)
+            "payment_options": "card,banktransfer,ussd,mobilemoney"
         }
         r = await self.client.post("/v3/payments", json=payload)
         r.raise_for_status()
