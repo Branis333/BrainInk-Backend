@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 
-from db.connection import db_dependency
+from users_micro.db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
     Course, CourseLesson, CourseBlock, CourseAssignment, StudentAssignment,

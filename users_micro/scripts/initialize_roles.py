@@ -3,7 +3,7 @@ Script to initialize default roles in the database
 Run this after creating the database tables
 """
 from sqlalchemy.orm import sessionmaker
-from db.connection import engine
+from users_micro.db.connection import engine
 from models.study_area_models import Role, UserRole
 
 def initialize_roles():

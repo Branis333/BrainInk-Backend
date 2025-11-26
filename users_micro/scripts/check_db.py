@@ -1,4 +1,4 @@
-from db.connection import engine
+from users_micro.db.connection import engine
 from sqlalchemy import text
 
 try:

@@ -6,7 +6,7 @@ import string
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from db.connection import db_dependency
+from users_micro.db.connection import db_dependency
 from models.study_area_models import (
     Role, School, Classroom, Student, Teacher,
     SchoolRequest, SchoolRequestStatus, UserRole,

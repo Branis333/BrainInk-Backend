@@ -12,7 +12,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime
 from sqlalchemy.orm import Session
-from db.connection import SessionLocal
+from users_micro.db.connection import SessionLocal
 from models.reading_assistant_models import ReadingContent, ReadingLevel, DifficultyLevel
 
 # MASSIVE CONTENT LIBRARY - 50+ reading passages

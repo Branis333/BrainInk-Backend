@@ -11,7 +11,7 @@ from pathlib import Path
 # Add the parent directory to the path to import our modules
 sys.path.append(str(Path(__file__).parent))
 
-from db.connection import get_db
+from users_micro.db.connection import get_db
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 

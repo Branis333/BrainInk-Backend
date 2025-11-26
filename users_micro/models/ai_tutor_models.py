@@ -17,7 +17,6 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import Enum as SQLEnum
-
 from db.database import Base
 
 

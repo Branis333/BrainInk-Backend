@@ -5,7 +5,7 @@ from alembic import context
 from dotenv import load_dotenv
 
 # Import Base metadata for autogenerate
-from db.database import Base  # assumes db/database.py defines Base
+from users_micro.db.database import Base  # assumes db/database.py defines Base
 from models import afterschool_models  # noqa: F401 ensure models are imported
 
 # this is the Alembic Config object, which provides

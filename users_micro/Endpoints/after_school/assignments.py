@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import and_, asc, desc
 from typing import Optional
 
-from db.connection import db_dependency
+from users_micro.db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from Endpoints.after_school.grades import get_assignment_status_with_grade
 from models.afterschool_models import CourseAssignment, StudentAssignment, StudySession

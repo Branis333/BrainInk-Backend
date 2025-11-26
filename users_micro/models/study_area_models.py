@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, Enum, DateTime, Boolean, Text, Table, UniqueConstraint, LargeBinary
 from sqlalchemy.orm import relationship
-from db.connection import Base
+from users_micro.db.connection import Base
 import enum
 from datetime import datetime
 

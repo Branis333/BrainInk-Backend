@@ -1,3 +1,12 @@
+import os
+import sys
+
+# Ensure the parent directory is on sys.path so 'users_micro.*' imports work
+_pkg_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_pkg_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
@@ -30,6 +39,7 @@ import models.study_area_models as study_models
 import models.afterschool_models as afterschool_models
 import models.reading_assistant_models as reading_models
 import models.ai_tutor_models as ai_tutor_models
+import models.payments_models as payments_models
 from sqlalchemy import text
 
 app = FastAPI(
@@ -101,7 +111,7 @@ async def startup_event():
 async def create_tables_startup():
     try:
         engine = get_engine()
-        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base, ai_tutor_models.Base]:
+        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base, ai_tutor_models.Base, payments_models.Base]:
             base.metadata.create_all(bind=engine, checkfirst=True)
         logger.info("✅ Tables ensured (lazy engine)")
     except Exception as e:
@@ -134,6 +144,7 @@ app.include_router(after_school_notes.router)  # New: /after-school/notes (image
 app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
 app.include_router(after_school_progress.router)  # New: /after-school/progress (digested progress summaries)
 app.include_router(payments.router)  # New: /payments/flutterwave
+app.include_router(payments.sub_router)  # Alias: /subscriptions/status for mobile client compatibility
 
 @app.get("/")
 def root():

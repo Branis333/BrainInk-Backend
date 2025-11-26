@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
     print("Importing database connection...")
-    from db.connection import initialize_database
+    from users_micro.db.connection import initialize_database
     
     print("Initializing database...")
     initialize_database()

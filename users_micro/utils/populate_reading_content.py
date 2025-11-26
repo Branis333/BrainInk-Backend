@@ -6,7 +6,7 @@ This script populates the database with age-appropriate content for K-3 students
 import asyncio
 from datetime import datetime
 from sqlalchemy.orm import Session
-from db.connection import SessionLocal
+from users_micro.db.connection import SessionLocal
 from models.reading_assistant_models import ReadingContent, ReadingLevel, DifficultyLevel
 
 # Sample content for different reading levels
