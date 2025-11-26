@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, ForeignKey, Float, JSON, Enum as SQLEnum
 from sqlalchemy.orm import relationship
-from db.database import Base
+from users_micro.db.database import Base
 import enum
 
 class ReadingLevel(enum.Enum):

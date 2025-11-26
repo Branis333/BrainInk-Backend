@@ -1,7 +1,7 @@
 """
 Create database tables script
 """
-from db.connection import engine
+from users_micro.db.connection import engine
 from models.users_models import Base as UserBase
 from models.study_area_models import Base as StudyBase
 from sqlalchemy import text

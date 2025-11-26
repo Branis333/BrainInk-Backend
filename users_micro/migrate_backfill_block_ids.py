@@ -31,10 +31,10 @@ from sqlalchemy.orm import sessionmaker
 sys.path.append(os.path.dirname(__file__))
 
 try:
-    from db.database import engine as app_engine, SessionLocal as AppSession
+    from users_micro.db.database import engine as app_engine, SessionLocal as AppSession
     ENGINE = app_engine
     SessionLocal = AppSession
-    print("✅ Using existing database configuration from db.database")
+    print("✅ Using existing database configuration from users_micro.db.database")
 except Exception as e:
     # Fallback to DATABASE_URL
     DATABASE_URL = os.getenv("DATABASE_URL")

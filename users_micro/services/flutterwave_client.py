@@ -13,7 +13,7 @@ FLW_REDIRECT_URL = os.getenv("FLW_REDIRECT_URL", "")  # optional
 class FlutterwaveClient:
     def __init__(self):
         if not FLW_SECRET_KEY:
-            raise RuntimeError("FLW_SECRET_KEY is not configured")
+            raise RuntimeError("Payment service not configured. FLW_SECRET_KEY environment variable is required.")
         self.client = httpx.AsyncClient(base_url=FLW_BASE, headers={
             "Authorization": f"Bearer {FLW_SECRET_KEY}",
             "Content-Type": "application/json"
@@ -37,7 +37,7 @@ class FlutterwaveClient:
         FLW_PLAN_ID = plan_id
         return plan_id
 
-    async def create_payment(self, email: str, amount: float, currency: str, plan_id: str, tx_ref: str) -> Dict[str, Any]:
+    async def create_payment(self, email: str, amount: float, currency: str, plan_id: str, tx_ref: str, meta: Dict[str, Any] | None = None) -> Dict[str, Any]:
         payload = {
             "tx_ref": tx_ref,
             "amount": amount,
@@ -45,7 +45,8 @@ class FlutterwaveClient:
             "redirect_url": FLW_REDIRECT_URL or "https://brainink.org/pay/thanks",  # harmless fallback
             "payment_plan": plan_id,
             "customer": {"email": email},
-            "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"}
+            "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"},
+            "meta": meta or {},
         }
         r = await self.client.post("/v3/payments", json=payload)
         r.raise_for_status()

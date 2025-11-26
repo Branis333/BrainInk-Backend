@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 # Add the parent directory to the path to import our modules
 sys.path.append(str(Path(__file__).parent))
 
-from db.database import get_db
+from users_micro.db.database import get_db
 from models.study_area_models import StudentPDF
 
 

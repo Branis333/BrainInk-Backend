@@ -3,7 +3,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path
 
-from db.connection import db_dependency
+from users_micro.db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import CourseAssignment, StudentAssignment, CourseBlock, StudentNote
 from schemas.afterschool_schema import PracticeQuizOut

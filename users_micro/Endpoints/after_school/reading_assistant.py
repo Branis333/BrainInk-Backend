@@ -11,7 +11,7 @@ from pathlib import Path
 import uuid
 import json
 
-from db.connection import db_dependency
+from users_micro.db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.reading_assistant_models import (
     ReadingContent, ReadingSession, ReadingAttempt, 

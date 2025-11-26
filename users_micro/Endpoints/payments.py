@@ -9,6 +9,7 @@ import os
 import uuid
 
 router = APIRouter(prefix="/payments/flutterwave", tags=["payments"])
+sub_router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])  # alias for mobile app
 
 def get_db():
     SessionLocal = get_session_local()
@@ -19,30 +20,32 @@ def get_db():
         db.close()
 
 
-def get_current_user_id(request: Request) -> int:
-    # Replace with your real auth; for now, extract from request.state if set by auth dependency
-    uid = getattr(request.state, "user_id", None)
-    if not uid:
-        # Try a simple header override for dev/testing
-        uid = request.headers.get("X-Debug-UserId")
-    if not uid:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    try:
-        return int(uid)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid user id context")
+from Endpoints.auth import user_dependency  # uses OAuth2 bearer to set user context
 
 
 @router.post("/initiate", response_model=InitiateSubscriptionResponse)
-async def initiate_subscription(payload: InitiateSubscriptionRequest, request: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(request)
+async def initiate_subscription(payload: InitiateSubscriptionRequest, user: user_dependency, request: Request, db: Session = Depends(get_db)):
+    """Initiate a subscription payment. Attaches user_id in meta so webhook can map the event."""
+    user_id = int(user.get("user_id"))
     user_email = request.headers.get("X-User-Email", f"user{user_id}@brainink.org")
 
-    client = FlutterwaveClient()
+    try:
+        client = FlutterwaveClient()
+    except RuntimeError as e:
+        # FlutterwaveClient raises RuntimeError when FLW_SECRET_KEY is not configured
+        raise HTTPException(status_code=503, detail="Payment service is not configured. Please contact support.")
+    
     try:
         plan_id = await client.ensure_plan(amount=payload.amount, currency=payload.currency, interval=payload.interval)
         tx_ref = f"sub_{user_id}_{uuid.uuid4().hex[:10]}"
-        res = await client.create_payment(email=user_email, amount=payload.amount, currency=payload.currency, plan_id=plan_id, tx_ref=tx_ref)
+        res = await client.create_payment(
+            email=user_email,
+            amount=payload.amount,
+            currency=payload.currency,
+            plan_id=plan_id,
+            tx_ref=tx_ref,
+            meta={"user_id": user_id}
+        )
         checkout_url = res.get("data", {}).get("link")
         if not checkout_url:
             raise HTTPException(status_code=502, detail="Flutterwave did not return a checkout link")
@@ -52,8 +55,8 @@ async def initiate_subscription(payload: InitiateSubscriptionRequest, request: R
 
 
 @router.post("/verify", response_model=SubscriptionStatus)
-async def verify_subscription(req: VerifyRequest, request: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(request)
+async def verify_subscription(req: VerifyRequest, user: user_dependency, db: Session = Depends(get_db)):
+    user_id = int(user.get("user_id"))
     # Flutterwave sends transaction_id to your redirect URL, but since we only have tx_ref here,
     # you may store mapping in DB or rely on webhook to finalize. For demo, we mark as active for 30 days.
     sub = db.query(Subscription).filter(Subscription.user_id == user_id).one_or_none()
@@ -71,7 +74,11 @@ async def verify_subscription(req: VerifyRequest, request: Request, db: Session 
 
 @router.post("/webhook")
 async def webhook(request: Request, db: Session = Depends(get_db)):
-    # Validate signature header
+    """Flutterwave webhook handler.
+    Expects verif-hash header to match FLW_WEBHOOK_SECRET.
+    Uses meta.user_id (attached during initiation) to update subscription.
+    Handles: charge.completed, subscription.charge.completed
+    """
     secret_hash = os.getenv("FLW_WEBHOOK_SECRET", "")
     payload = await request.json()
     signature = request.headers.get("verif-hash")
@@ -80,23 +87,54 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
 
     event_type = payload.get("event") or payload.get("event.type")
     data = payload.get("data", {})
+    meta = data.get("meta", {}) or {}
+    user_id = meta.get("user_id")
 
-    # Identify user by email or meta if you passed it during payment
-    email = data.get("customer", {}).get("email")
-    # TODO: map email -> user_id via users table; for now accept a header override only in dev
-    # If you include user_id in meta when creating the payment, extract it here instead.
+    if user_id is None:
+        # Fallback attempt: map by email if meta missing
+        email = data.get("customer", {}).get("email")
+        # TODO: look up user by email in users table. For now ignore if no user_id.
+        return {"skipped": True, "reason": "missing user_id meta"}
 
-    # Update subscription state on charge.completed or subscription.charge.completed
-    if "charge.completed" in (event_type or "") or "subscription.charge.completed" in (event_type or ""):
-        # You should look up user by email; here we skip and no-op
-        pass
-    return {"received": True}
+    # Only proceed on relevant events
+    if event_type in {"charge.completed", "subscription.charge.completed"}:
+        try:
+            user_id_int = int(user_id)
+        except ValueError:
+            return {"skipped": True, "reason": "invalid user_id meta"}
+        sub = db.query(Subscription).filter(Subscription.user_id == user_id_int).one_or_none()
+        now = datetime.utcnow()
+        # Determine next period end: if subscription cycle info provided use it else +30 days
+        cycle_end = now + timedelta(days=30)
+        plan_info = data.get("plan", {})
+        interval = plan_info.get("interval")  # e.g., monthly
+        if interval == "monthly":
+            cycle_end = now + timedelta(days=30)
+        if not sub:
+            sub = Subscription(user_id=user_id_int, active=True, status="active", current_period_end=cycle_end, last_payment_id=data.get("id"))
+            db.add(sub)
+        else:
+            sub.active = True
+            sub.status = "active"
+            sub.current_period_end = cycle_end
+            sub.last_payment_id = data.get("id")
+        db.commit()
+        db.refresh(sub)
+        return {"updated": True, "user_id": user_id_int, "expires": sub.current_period_end.isoformat()}
+
+    return {"ignored": True, "event": event_type}
 
 
 @router.get("/status", response_model=SubscriptionStatus)
-async def get_status(request: Request, db: Session = Depends(get_db)):
-    user_id = get_current_user_id(request)
+async def get_status(user: user_dependency, db: Session = Depends(get_db)):
+    user_id = int(user.get("user_id"))
     sub = db.query(Subscription).filter(Subscription.user_id == user_id).one_or_none()
     if not sub or not sub.active:
         return SubscriptionStatus(active=False)
     return SubscriptionStatus(active=True, expiresAt=sub.current_period_end, lastPaymentId=sub.last_payment_id)
+
+
+@sub_router.get("/status", response_model=SubscriptionStatus)
+async def get_status_alias(user: user_dependency, db: Session = Depends(get_db)):
+    # alias path used by mobile client
+    return await get_status(user=user, db=db)

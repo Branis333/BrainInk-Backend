@@ -4,7 +4,7 @@ This will add description, capacity, and location columns without deleting exist
 """
 
 from sqlalchemy import text
-from db.connection import engine
+from users_micro.db.connection import engine
 import sys
 
 def migrate_classroom_table():

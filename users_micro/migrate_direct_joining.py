@@ -4,7 +4,7 @@ Run this to update the SchoolRequest table with new fields
 """
 
 from sqlalchemy import text
-from db.connection import engine
+from users_micro.db.connection import engine
 
 def migrate_school_requests():
     """Add new fields to school_requests table"""

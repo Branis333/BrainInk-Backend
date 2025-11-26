@@ -29,6 +29,7 @@ import models.study_area_models as study_models
 import models.afterschool_models as afterschool_models
 import models.reading_assistant_models as reading_models
 import models.ai_tutor_models as ai_tutor_models
+import models.payments_models as payments_models
 from sqlalchemy import text
 
 app = FastAPI(
@@ -100,7 +101,7 @@ async def startup_event():
 async def create_tables_startup():
     try:
         engine = get_engine()
-        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base, ai_tutor_models.Base]:
+        for base in [models.Base, study_models.Base, afterschool_models.Base, reading_models.Base, ai_tutor_models.Base, payments_models.Base]:
             base.metadata.create_all(bind=engine, checkfirst=True)
         logger.info("✅ Tables ensured (lazy engine)")
     except Exception as e:
@@ -132,6 +133,7 @@ app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
 app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
 app.include_router(payments.router)  # New: /payments/flutterwave
+app.include_router(payments.sub_router)  # Alias: /subscriptions/status for mobile client compatibility
 
 @app.get("/")
 def root():

@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 sys.path.append(os.path.join(os.path.dirname(__file__)))
 
 try:
-    from db.database import engine, SessionLocal
+    from users_micro.db.database import engine, SessionLocal
     print("✅ Using existing database configuration")
 except ImportError:
     # Fallback database configuration

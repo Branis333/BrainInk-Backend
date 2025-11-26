@@ -18,7 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from sqlalchemy.types import Enum as SQLEnum
 
-from db.database import Base
+from users_micro.db.database import Base
 
 
 class TutorSessionStatus(Enum):
