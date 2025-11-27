@@ -362,18 +362,37 @@ CONTENT:
 
     @staticmethod
     async def generate_quiz_for_objective(objective: str, summary: Optional[str], count: int = 7) -> List[Dict[str, Any]]:
-        """Generate MCQ quiz for a specific objective with correct answer indices."""
+        """Generate MCQ quiz for a specific objective with correct answer indices.
+        Adds robust retries and a deterministic fallback to avoid empty quizzes.
+        """
         count = max(5, min(10, int(count or 7)))
-        prompt = f"""Generate {count} multiple-choice questions for the learning objective below.
-Each question must have exactly 4 options and provide the correct `answer_index` (0-3). Return strict JSON:
-{{"questions": [{{"question": "...", "options": ["A","B","C","D"], "answer_index": 1}}]}}
 
-OBJECTIVE: {objective}
-OBJECTIVE SUMMARY: {summary or ''}
-"""
-        try:
+        def _build_prompt(strict: bool = False) -> str:
+            schema = (
+                "{{\n"
+                "  \"questions\": [\n"
+                "    {\n"
+                "      \"question\": \"...\",\n"
+                "      \"options\": [\"A\",\"B\",\"C\",\"D\"],\n"
+                "      \"answer_index\": 0\n"
+                "    }\n"
+                "  ]\n"
+                "}}"
+            )
+            base = (
+                f"Generate {count} multiple-choice questions for the learning objective below.\n"
+                "Each question must have exactly 4 options and provide the correct `answer_index` (0-3).\n"
+            )
+            if strict:
+                base += "Return STRICT JSON ONLY, with no extra text. Match this schema exactly:\n" + schema + "\n\n"
+            else:
+                base += "Return strict JSON in this shape:\n" + schema + "\n\n"
+            base += f"OBJECTIVE: {objective}\nOBJECTIVE SUMMARY: {summary or ''}\n"
+            return base
+
+        async def _attempt(strict: bool) -> List[Dict[str, Any]]:
             resp = await gemini_service._generate_json_response(
-                prompt=prompt,
+                prompt=_build_prompt(strict),
                 attachments=None,
                 temperature=0.2,
                 max_output_tokens=900,
@@ -392,16 +411,55 @@ OBJECTIVE SUMMARY: {summary or ''}
                     except Exception:
                         ans_idx = None
                     if ans_idx is None or not (0 <= ans_idx < 4):
-                        # If missing, try to infer from `answer`
                         correct = q.get("answer")
                         if correct in options:
                             ans_idx = options.index(correct)
                     if ans_idx is not None and 0 <= ans_idx < 4:
-                        questions.append({"question": str(text), "options": [str(o) for o in options], "answer_index": ans_idx})
+                        questions.append({
+                            "question": str(text),
+                            "options": [str(o) for o in options],
+                            "answer_index": ans_idx,
+                        })
             return questions[:count]
+
+        try:
+            # First attempt
+            questions = await _attempt(strict=False)
+            if len(questions) >= 5:
+                return questions
+
+            # Second, stricter attempt if too few
+            questions = await _attempt(strict=True)
+            if len(questions) >= 5:
+                return questions
         except Exception as e:
             logger.error(f"Quiz generation failed: {e}")
-            return []
+
+        # Deterministic fallback: simple comprehension-style questions
+        fallback_questions: List[Dict[str, Any]] = []
+        expl = (summary or objective or "").strip()
+        if not expl:
+            expl = "This objective focuses on understanding the core concept and its practical meaning."
+        stem = f"Which statement best aligns with the objective: {objective}?"
+        correct = expl if len(expl) <= 120 else (expl[:117] + "...")
+        distractors_pool = [
+            f"A statement unrelated to {objective}.",
+            f"An incorrect description of {objective}.",
+            "A definition of an unrelated topic.",
+            "A vague statement that does not explain the concept.",
+        ]
+        for i in range(count):
+            # Rotate distractors to add minor variety
+            d1 = distractors_pool[i % len(distractors_pool)]
+            d2 = distractors_pool[(i + 1) % len(distractors_pool)]
+            d3 = distractors_pool[(i + 2) % len(distractors_pool)]
+            options = [correct, d1, d2, d3]
+            fallback_questions.append({
+                "question": stem,
+                "options": options,
+                "answer_index": 0,
+            })
+        return fallback_questions[:count]
     
     @staticmethod
     def generate_unique_filename(original_filename: str, user_id: int, note_id: int) -> str:
