@@ -9,7 +9,7 @@ import tempfile
 import mimetypes
 from pathlib import Path
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
     Course, CourseLesson, CourseBlock, CourseAssignment, 
@@ -463,7 +463,7 @@ async def create_course_from_textbook(
         except Exception:
             # Connection is stale, create a fresh one
             db.close()
-            from users_micro.db.connection import SessionLocal
+            from db.connection import SessionLocal
             db = SessionLocal()
             print("🔄 Refreshed database connection after AI processing")
         

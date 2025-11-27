@@ -173,16 +173,23 @@ Make the analysis educational, comprehensive, and helpful for student learning a
             try:
                 objectives_prompt = f"""You are an expert curriculum designer.
 
-Using the following analyzed notes context, extract 2 to 7 clear learning objectives. For each objective, also generate a concise 2-4 sentence summary that focuses only on that objective.
+Using the following analyzed notes context, extract 2 to 7 clear learning objectives.
+
+Important writing requirement:
+- The "objective" field is the short title of what is being learned.
+- The "summary" field must be a direct, student-facing explanation that TEACHES the idea.
+    Do not say "students will learn" or "you will learn". Instead, explain the concept plainly,
+    include any essential formula(s) with variable meanings, and—when relevant—walk through a short,
+    concrete example or mini derivation in 2–4 sentences.
 
 Return strict JSON with this shape:
 {{
-  "objectives": [
-    {{
-      "objective": "...",
-      "summary": "..."
-    }}
-  ]
+    "objectives": [
+        {{
+            "objective": "short objective/title",
+            "summary": "clear explanation that teaches the objective"
+        }}
+    ]
 }}
 
 NOTES SUMMARY:
@@ -221,16 +228,59 @@ SUBJECT: {note_subject or ''}
                 logger.warning(f"Failed to derive objectives: {e}")
                 objectives = []
 
-            # Attach related YouTube videos per objective (2-3 each)
+            # Attach related YouTube videos per objective (ensure unique links across all objectives)
+            from urllib.parse import urlparse, parse_qs
+
+            def _video_key(url: str) -> str:
+                """Create a canonical key for a YouTube URL to detect duplicates.
+                Prefers videoId from watch/short/redirect links; otherwise falls back to full URL.
+                Also handles search result URLs so each query is unique.
+                """
+                try:
+                    u = urlparse(url or "")
+                    host = (u.netloc or "").lower()
+                    path = u.path or ""
+                    qs = parse_qs(u.query or "")
+                    # youtube watch links
+                    if "youtube" in host or "youtu.be" in host:
+                        if "v" in qs and qs["v"]:
+                            return f"yt:video:{qs['v'][0]}"
+                        # youtu.be/<id>
+                        if host.endswith("youtu.be") and path.strip("/"):
+                            return f"yt:video:{path.strip('/')}"
+                        # search pages -> use the search query as key
+                        if "results" in path and "search_query" in qs and qs["search_query"]:
+                            return f"yt:search:{qs['search_query'][0]}"
+                    # Fallback to normalized url
+                    return url.strip()
+                except Exception:
+                    return url or ""
+
             enriched_objectives: List[Dict[str, Any]] = []
+            global_seen: set = set()
             for o in objectives[:7]:
                 topic = o.get("objective") or note_subject or note_title
                 try:
-                    videos = await gemini_service.generate_youtube_links(topic=topic, count=3)
+                    # Ask for extra candidates to improve uniqueness, then trim to 2–3 unique
+                    candidates = await gemini_service.generate_youtube_links(topic=topic, count=5)
                 except Exception as e:
                     logger.warning(f"YouTube link generation failed for '{topic}': {e}")
-                    videos = []
-                enriched = {**o, "videos": videos}
+                    candidates = []
+
+                unique_videos: List[Dict[str, Any]] = []
+                local_seen: set = set()
+                for item in candidates:
+                    url = (item or {}).get("url", "")
+                    key = _video_key(url)
+                    if not key or key in local_seen or key in global_seen:
+                        continue
+                    local_seen.add(key)
+                    global_seen.add(key)
+                    unique_videos.append(item)
+                    if len(unique_videos) >= 3:
+                        break
+
+                enriched = {**o, "videos": unique_videos}
                 enriched_objectives.append(enriched)
 
             # Validate and return response

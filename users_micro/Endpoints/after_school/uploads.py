@@ -15,7 +15,7 @@ from PIL import Image
 import io
 import hashlib
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
     Course, CourseLesson, CourseBlock, StudySession, AISubmission, CourseAssignment, StudentAssignment

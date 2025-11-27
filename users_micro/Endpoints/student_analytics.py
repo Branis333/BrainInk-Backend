@@ -4,7 +4,7 @@ from typing import Annotated, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from models.study_area_models import (
     Role, School, Subject, Student, Teacher, UserRole, Assignment, Grade,
     subject_students, subject_teachers

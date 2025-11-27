@@ -18,7 +18,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib.utils import ImageReader
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from models.study_area_models import (
     UserRole, Student, Teacher, Subject, StudentImage, StudentPDF, Assignment, 
     GradingSession, Grade

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Depends, status
 from typing import Annotated
 from pydantic import BaseModel
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 
 # Create router for KANA service endpoints

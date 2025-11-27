@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from typing import List
 
-from users_micro.db.database import get_session_local
+from db.database import get_session_local
 from models.afterschool_models import (
     StudentAssignment,
     NotificationPreference,

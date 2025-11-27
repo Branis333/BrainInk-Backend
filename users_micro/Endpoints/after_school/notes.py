@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import Session
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import StudentNote, NoteAnalysisLog
 from schemas.afterschool_schema import (

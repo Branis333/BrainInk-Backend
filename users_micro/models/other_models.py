@@ -1,5 +1,5 @@
 from sqlalchemy import Table, MetaData
-from users_micro.db.database import engine
+from db.database import engine
 
 # Reflect the existing tables
 metadata = MetaData()

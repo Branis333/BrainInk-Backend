@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session, joinedload
-from users_micro.db.connection import get_db, db_dependency
+from db.connection import get_db, db_dependency
 from models.users_models import User
 from models.study_area_models import (
     Syllabus, WeeklyPlan, StudentSyllabusProgress, Subject, 

@@ -12,7 +12,7 @@ import re
 import requests
 
 # Local imports
-from users_micro.db.connection import get_db, db_dependency
+from db.connection import get_db, db_dependency
 from models.study_area_models import (
     Report, ReportTemplate, ReportShare, ReportSchedule,
     Student, Teacher, Subject, Assignment, Grade, Classroom, School,

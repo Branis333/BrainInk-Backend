@@ -14,7 +14,7 @@ from sqlalchemy import (
     LargeBinary,
 )
 from sqlalchemy.orm import relationship
-from users_micro.db.database import Base
+from db.database import Base
 
 class Course(Base):
     __tablename__ = "as_courses"

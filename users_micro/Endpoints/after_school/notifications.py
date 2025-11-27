@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, or_, desc, asc
 from pydantic import BaseModel, Field
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
     Notification, 

@@ -6,7 +6,7 @@ from sqlalchemy import func, and_, or_
 import json
 import traceback
 
-from users_micro.db.connection import db_dependency
+from db.connection import db_dependency
 from models.study_area_models import (
     Role, School, Subject, Student, Teacher, UserRole, Assignment, Grade,
     CalendarEvent, CalendarEventAttendee, CalendarReminder, CalendarView,
