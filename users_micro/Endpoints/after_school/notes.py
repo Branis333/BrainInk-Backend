@@ -437,8 +437,13 @@ async def generate_objective_quiz(
         objective_text = obj.get("objective") or str(obj)
         objective_summary = obj.get("summary")
         questions = await notes_service.generate_quiz_for_objective(objective_text, objective_summary, num_questions)
+        if not questions:
+            raise HTTPException(status_code=502, detail="Failed to generate MCQ quiz; please try again")
         obj["quiz_mcq"] = questions
-        note.objectives[idx] = obj
+        # reassign to ensure SQLAlchemy JSON dirty tracking
+        updated_objectives = list(note.objectives or [])
+        updated_objectives[idx] = obj
+        note.objectives = updated_objectives
         note.updated_at = datetime.utcnow()
         db.commit()
 
@@ -489,10 +494,13 @@ async def generate_objective_written_quiz(
     else:
         objective_text = obj.get("objective") or str(obj)
         objective_summary = obj.get("summary")
-        # Written quiz always returns a single prompt without answers
         questions = await notes_service.generate_written_quiz_for_objective(objective_text, objective_summary, 1)
+        if not questions:
+            raise HTTPException(status_code=502, detail="Failed to generate written quiz; please try again")
         obj["quiz_written"] = questions
-        note.objectives[idx] = obj
+        updated_objectives = list(note.objectives or [])
+        updated_objectives[idx] = obj
+        note.objectives = updated_objectives
         note.updated_at = datetime.utcnow()
         db.commit()
 
@@ -542,7 +550,7 @@ async def submit_objective_quiz_grade(
         "performance_summary": payload.performance_summary or "",
         "last_quiz_at": datetime.utcnow().isoformat(),
     }
-    note.objective_progress = progress
+    note.objective_progress = list(progress)
     note.updated_at = datetime.utcnow()
     db.commit()
 
@@ -606,7 +614,7 @@ async def grade_objective_written_quiz(
         "last_written_quiz_at": datetime.utcnow().isoformat(),
     })
     progress[idx] = existing
-    note.objective_progress = progress
+    note.objective_progress = list(progress)
     note.updated_at = datetime.utcnow()
     db.commit()
 
@@ -657,8 +665,10 @@ async def generate_objective_flashcards(
         cards = existing[idx]
     else:
         cards = await notes_service.generate_flashcards_from_content(content, count)
+        if not cards:
+            raise HTTPException(status_code=502, detail="Failed to generate flashcards; please try again")
         existing[idx] = cards
-        note.objective_flashcards = existing
+        note.objective_flashcards = list(existing)
         note.updated_at = datetime.utcnow()
         db.commit()
 

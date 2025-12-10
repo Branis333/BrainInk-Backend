@@ -322,29 +322,29 @@ SUBJECT: {note_subject or ''}
 
     @staticmethod
     async def generate_flashcards_from_content(content: str, count: int = 8) -> List[Dict[str, str]]:
-        """Generate flashcards (front/back) from given content using Gemini."""
+        """Generate flashcards (front/back) from given content using Gemini. No fallback; errors if empty."""
         count = max(5, min(10, int(count or 8)))
-        prompt = f"""Create {count} concise flashcards from the following study content. Return strict JSON:
+
+        async def _attempt(temp: float) -> List[Dict[str, str]]:
+            prompt = f"""Create {count} concise flashcards from the following study content. Return strict JSON:
 {{"flashcards": [{{"front": "question/prompt", "back": "concise answer"}}]}}
 
 CONTENT:
 {content}
 """
-        try:
             resp = await gemini_service._generate_json_response(
                 prompt=prompt,
                 attachments=None,
-                temperature=0.2,
+                temperature=temp,
                 max_output_tokens=600,
             )
-            # Gemini may return either a dict {"flashcards": [...]} or a raw list [...]
             if isinstance(resp, list):
                 cards = resp
             elif isinstance(resp, dict):
                 cards = resp.get("flashcards") or resp.get("cards") or []
             else:
                 cards = []
-            result = []
+            result: List[Dict[str, str]] = []
             for c in cards[:count]:
                 if isinstance(c, dict):
                     front = c.get("front") or c.get("q") or c.get("question")
@@ -356,15 +356,22 @@ CONTENT:
                 if front and back:
                     result.append({"front": str(front), "back": str(back)})
             return result[:count]
+
+        try:
+            cards = await _attempt(temp=0.25)
+            if len(cards) >= 3:
+                return cards
+            cards = await _attempt(temp=0.1)
+            if len(cards) >= 3:
+                return cards
+            raise RuntimeError("Flashcard generation returned empty")
         except Exception as e:
             logger.error(f"Flashcards generation failed: {e}")
-            return []
+            raise
 
     @staticmethod
     async def generate_quiz_for_objective(objective: str, summary: Optional[str], count: int = 7) -> List[Dict[str, Any]]:
-        """Generate MCQ quiz for a specific objective with correct answer indices.
-        Adds robust retries and a deterministic fallback to avoid empty quizzes.
-        """
+        """Generate MCQ quiz for a specific objective with correct answer indices. No fallback."""
         count = max(5, min(10, int(count or 7)))
 
         def _build_prompt(strict: bool = False) -> str:
@@ -423,43 +430,17 @@ CONTENT:
             return questions[:count]
 
         try:
-            # First attempt
             questions = await _attempt(strict=False)
             if len(questions) >= 5:
                 return questions
 
-            # Second, stricter attempt if too few
             questions = await _attempt(strict=True)
             if len(questions) >= 5:
                 return questions
+            raise RuntimeError("MCQ generation returned too few questions")
         except Exception as e:
             logger.error(f"Quiz generation failed: {e}")
-
-        # Deterministic fallback: simple comprehension-style questions
-        fallback_questions: List[Dict[str, Any]] = []
-        expl = (summary or objective or "").strip()
-        if not expl:
-            expl = "This objective focuses on understanding the core concept and its practical meaning."
-        stem = f"Which statement best aligns with the objective: {objective}?"
-        correct = expl if len(expl) <= 120 else (expl[:117] + "...")
-        distractors_pool = [
-            f"A statement unrelated to {objective}.",
-            f"An incorrect description of {objective}.",
-            "A definition of an unrelated topic.",
-            "A vague statement that does not explain the concept.",
-        ]
-        for i in range(count):
-            # Rotate distractors to add minor variety
-            d1 = distractors_pool[i % len(distractors_pool)]
-            d2 = distractors_pool[(i + 1) % len(distractors_pool)]
-            d3 = distractors_pool[(i + 2) % len(distractors_pool)]
-            options = [correct, d1, d2, d3]
-            fallback_questions.append({
-                "question": stem,
-                "options": options,
-                "answer_index": 0,
-            })
-        return fallback_questions[:count]
+            raise
 
     # -----------------------------
     # WRITTEN QUIZ (FREE RESPONSE)
