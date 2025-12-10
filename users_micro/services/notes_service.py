@@ -460,6 +460,167 @@ CONTENT:
                 "answer_index": 0,
             })
         return fallback_questions[:count]
+
+    # -----------------------------
+    # WRITTEN QUIZ (FREE RESPONSE)
+    # -----------------------------
+    @staticmethod
+    async def generate_written_quiz_for_objective(objective: str, summary: Optional[str], count: int = 4) -> List[Dict[str, Any]]:
+        """Generate short written-response prompts with expected answers/rubrics."""
+        count = max(3, min(6, int(count or 4)))
+
+        prompt = (
+            f"Create {count} short-answer questions for the learning objective below. "
+            "Each question should test understanding or application (not multiple-choice).\n"
+            "Return STRICT JSON ONLY in this shape:\n"
+            "{\n"
+            "  \"questions\": [\n"
+            "    {\"prompt\": \"...\", \"expected_answer\": \"concise model answer\", \"rubric\": \"(optional) scoring hints\"}\n"
+            "  ]\n"
+            "}\n\n"
+            f"OBJECTIVE: {objective}\nOBJECTIVE SUMMARY: {summary or ''}\n"
+            "Make prompts clear and age-appropriate; answers should be concise (1-3 sentences)."
+        )
+
+        try:
+            resp = await gemini_service._generate_json_response(
+                prompt=prompt,
+                attachments=None,
+                temperature=0.25,
+                max_output_tokens=800,
+            )
+            raw = resp.get("questions") if isinstance(resp, dict) else None
+            questions: List[Dict[str, Any]] = []
+            if isinstance(raw, list):
+                for q in raw[:count]:
+                    if not isinstance(q, dict):
+                        continue
+                    prompt_text = q.get("prompt") or q.get("question") or q.get("text")
+                    expected = q.get("expected_answer") or q.get("answer") or q.get("model_answer")
+                    rubric = q.get("rubric") or q.get("notes") or q.get("explanation")
+                    if prompt_text:
+                        questions.append({
+                            "prompt": str(prompt_text),
+                            "expected_answer": str(expected) if expected else None,
+                            "rubric": str(rubric) if rubric else None,
+                        })
+            # Simple fallback if AI returns nothing
+            if not questions:
+                fallback = (
+                    f"Explain in your own words: {objective}",
+                    f"Give one real-world example of {objective}",
+                    f"List two key ideas from this topic: {objective}",
+                    f"Why is {objective} important?",
+                    f"Summarize the main takeaway about {objective}",
+                    f"Describe a scenario where {objective} applies",
+                )
+                for i in range(count):
+                    prompt_text = fallback[i % len(fallback)]
+                    questions.append({
+                        "prompt": prompt_text,
+                        "expected_answer": summary or objective,
+                        "rubric": "Reward clarity, correctness, and alignment with the objective.",
+                    })
+            return questions[:count]
+        except Exception as e:
+            logger.error(f"Written quiz generation failed: {e}")
+            return [
+                {
+                    "prompt": f"Explain the core idea of: {objective}",
+                    "expected_answer": summary or objective,
+                    "rubric": "Check if the response captures the main concept and is coherent.",
+                }
+            ]
+
+    @staticmethod
+    async def grade_written_quiz_from_images(
+        objective: str,
+        questions: List[Dict[str, Any]],
+        image_bytes: List[bytes],
+        image_names: List[str],
+    ) -> Dict[str, Any]:
+        """Grade handwritten answers from images against provided questions using Gemini Vision."""
+        try:
+            from services.gemini_service import build_inline_part
+            inline_parts = []
+            for img_bytes, img_name in zip(image_bytes, image_names):
+                ext = Path(img_name).suffix.lower().lstrip('.')
+                mime_type = SUPPORTED_FILE_TYPES.get(ext, 'image/jpeg')
+                inline_parts.append(build_inline_part(data=img_bytes, mime_type=mime_type, display_name=img_name))
+        except Exception as e:
+            logger.error(f"Failed to build inline parts for grading: {e}")
+            inline_parts = []
+
+        q_text = "\n".join([
+            f"Q{i+1}: {q.get('prompt')}\nExpected: {q.get('expected_answer') or ''}\nRubric: {q.get('rubric') or ''}"
+            for i, q in enumerate(questions)
+            if isinstance(q, dict)
+        ])
+
+        grading_prompt = (
+            "You are grading handwritten short answers.\n"
+            "Review the attached images (student answers). The questions and expected answers are provided.\n"
+            "Return STRICT JSON ONLY in this shape:\n"
+            "{\n"
+            "  \"items\": [{\"prompt\": \"...\", \"score\": 0-10, \"max_score\": 10, \"feedback\": \"...\"}],\n"
+            "  \"total_score\": number,\n"
+            "  \"max_score\": number,\n"
+            "  \"percentage\": number\n"
+            "}\n\n"
+            f"OBJECTIVE: {objective}\n"
+            "Questions:\n"
+            f"{q_text}\n"
+            "Scoring guidance: score each answer 0-10; be concise, constructive, and fair."
+        )
+
+        try:
+            resp = await gemini_service._generate_json_response(
+                prompt=grading_prompt,
+                attachments=inline_parts or None,
+                temperature=0.1,
+                max_output_tokens=900,
+            )
+            items = resp.get("items") if isinstance(resp, dict) else None
+            graded_items = []
+            if isinstance(items, list):
+                for itm in items:
+                    if not isinstance(itm, dict):
+                        continue
+                    graded_items.append({
+                        "prompt": str(itm.get("prompt") or ""),
+                        "score": float(itm.get("score") or 0.0),
+                        "max_score": float(itm.get("max_score") or 10.0),
+                        "feedback": str(itm.get("feedback") or ""),
+                    })
+            total_score = float(resp.get("total_score", 0.0)) if isinstance(resp, dict) else 0.0
+            max_score = float(resp.get("max_score", len(graded_items) * 10.0)) if isinstance(resp, dict) else len(graded_items) * 10.0
+            if not max_score:
+                max_score = max(len(graded_items), 1) * 10.0
+            percentage = resp.get("percentage") if isinstance(resp, dict) else None
+            if percentage is None:
+                percentage = round((total_score / max_score) * 100, 2) if max_score else 0.0
+            return {
+                "items": graded_items,
+                "total_score": total_score,
+                "max_score": max_score,
+                "percentage": percentage,
+            }
+        except Exception as e:
+            logger.error(f"Written quiz grading failed: {e}")
+            return {
+                "items": [
+                    {
+                        "prompt": q.get("prompt", "") if isinstance(q, dict) else "",
+                        "score": 0.0,
+                        "max_score": 10.0,
+                        "feedback": "Unable to grade; please retry.",
+                    }
+                    for q in questions
+                ],
+                "total_score": 0.0,
+                "max_score": max(len(questions), 1) * 10.0,
+                "percentage": 0.0,
+            }
     
     @staticmethod
     def generate_unique_filename(original_filename: str, user_id: int, note_id: int) -> str:

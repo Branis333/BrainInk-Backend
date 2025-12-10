@@ -545,9 +545,6 @@ class StudentNoteAnalysisResult(BaseModel):
     """Schema for AI analysis results of notes"""
     summary: Optional[str] = Field(None, description="AI-generated summary")
     key_points: Optional[List[str]] = Field(None, description="Extracted key points")
-    main_topics: Optional[List[str]] = Field(None, description="Main topics/concepts")
-    learning_concepts: Optional[List[str]] = Field(None, description="Learning concepts")
-    questions_generated: Optional[List[str]] = Field(None, description="AI-generated questions")
     objectives: Optional[List[Dict]] = Field(None, description="Learning objectives with summaries and related videos")
     
     class Config:
@@ -577,9 +574,6 @@ class StudentNoteOut(BaseModel):
     # Analysis results
     summary: Optional[str]
     key_points: Optional[List[str]]
-    main_topics: Optional[List[str]]
-    learning_concepts: Optional[List[str]]
-    questions_generated: Optional[List[str]]
     objectives: Optional[List[Dict]]
     objective_flashcards: Optional[List[List[Dict]]]
     overall_flashcards: Optional[List[Dict]]
@@ -643,9 +637,6 @@ class NoteAnalysisResponse(BaseModel):
     # Analysis results
     summary: Optional[str]
     key_points: Optional[List[str]]
-    main_topics: Optional[List[str]]
-    learning_concepts: Optional[List[str]]
-    questions_generated: Optional[List[str]]
     objectives: Optional[List[Dict]]
     
     processed_at: Optional[datetime]
@@ -667,6 +658,39 @@ class ObjectiveQuizResponse(BaseModel):
     num_questions: int
     questions: List[QuizQuestion]
     generated_at: datetime
+
+# ===============================
+# WRITTEN QUIZ (OBJECTIVE-BASED)
+# ===============================
+
+class WrittenQuizQuestion(BaseModel):
+    prompt: str
+    expected_answer: Optional[str] = Field(None, description="Concise model answer for grading context")
+    rubric: Optional[str] = Field(None, description="Optional rubric or key points to check")
+
+
+class WrittenQuizResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    objective: str
+    questions: List[WrittenQuizQuestion]
+    generated_at: datetime
+
+
+class WrittenQuizGradeItem(BaseModel):
+    prompt: str
+    score: float
+    max_score: float
+    feedback: Optional[str] = None
+
+
+class WrittenQuizGradeResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    total_score: float
+    max_score: float
+    percentage: float
+    items: List[WrittenQuizGradeItem]
 
 class FlashcardsResponse(BaseModel):
     note_id: int

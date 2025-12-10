@@ -131,18 +131,18 @@ class GeminiConfig:
         sequence: List[str] = [self.model_name]
 
         fallback_candidates = [
-            "gemini-2.5-flash",
-            "gemini-2.0-flash-latest",
-            "gemini-2.0-flash",
             "gemini-1.5-flash-latest",
             "gemini-1.5-flash",
-            "gemini-1.5-flash-8b",
+            "gemini-2.0-flash-latest",
+            "gemini-2.0-flash",
+            "gemini-2.5-flash-latest",
+            "gemini-2.5-flash",
         ]
         if self.allow_paid:
             fallback_candidates.extend([
-                "gemini-1.5-pro-latest",
                 "gemini-1.0-pro-vision-latest",
                 "gemini-pro-vision",
+                "gemini-1.5-pro-latest",
             ])
 
         for candidate in fallback_candidates:
@@ -154,13 +154,13 @@ class GeminiConfig:
     def _choose_supported_model(self, preferred_first: Optional[str] = None) -> str:
         """Pick a supported model that can handle generateContent (multimodal if possible).
         Enforce free-only models unless ALLOW_PAID_MODELS=true.
-        Free-preferred order:
-          1) preferred_first (if allowed by policy)
-          2) gemini-2.5-flash-latest, gemini-2.5-flash
-          3) gemini-2.0-flash-latest, gemini-2.0-flash
-          4) gemini-1.5-flash-latest, gemini-1.5-flash, gemini-1.5-flash-8b
-        If paid models are allowed, extend with:
-          - gemini-1.5-pro-latest, gemini-1.0-pro-vision-latest, gemini-pro-vision
+                Free-preferred order:
+                    1) preferred_first (if allowed by policy)
+                    2) gemini-1.5-flash-latest, gemini-1.5-flash
+                    3) gemini-2.0-flash-latest, gemini-2.0-flash
+                    4) gemini-2.5-flash-latest, gemini-2.5-flash
+                If paid models are allowed, extend with:
+                    - gemini-1.0-pro-vision-latest, gemini-pro-vision, gemini-1.5-pro-latest
         If none are available, choose the first model that supports generateContent.
         """
         try:
@@ -184,7 +184,7 @@ class GeminiConfig:
         free_allowed = {
             "gemini-2.5-flash-latest", "gemini-2.5-flash",
             "gemini-2.0-flash-latest", "gemini-2.0-flash",
-            "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+            "gemini-1.5-flash-latest", "gemini-1.5-flash",
         }
         paid_allowed = {"gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest", "gemini-pro-vision"}
 
@@ -198,7 +198,7 @@ class GeminiConfig:
             os.getenv("GEMINI_MODEL"),
             "gemini-2.5-flash-latest", "gemini-2.5-flash",
             "gemini-2.0-flash-latest", "gemini-2.0-flash",
-            "gemini-1.5-flash-latest", "gemini-1.5-flash", "gemini-1.5-flash-8b",
+            "gemini-1.5-flash-latest", "gemini-1.5-flash",
         ] if p]
         if self.allow_paid:
             preferred.extend(["gemini-1.5-pro-latest", "gemini-1.0-pro-vision-latest", "gemini-pro-vision"])
@@ -533,7 +533,23 @@ class GeminiService:
         missing_text_error: Optional[ValueError] = None
         used_model_name: Optional[str] = None
 
-        for model_name in self.config.get_model_sequence():
+        # Prefer vision-capable models first when attachments are present
+        if attachments:
+            vision_sequence = [
+                "gemini-1.5-flash-latest",
+                "gemini-1.5-flash",
+                "gemini-2.0-flash-latest",
+                "gemini-2.0-flash",
+                "gemini-2.5-flash-latest",
+                "gemini-2.5-flash",
+            ]
+            if getattr(self.config, "allow_paid", False):
+                vision_sequence = ["gemini-1.0-pro-vision-latest", "gemini-pro-vision", "gemini-1.5-pro-latest"] + vision_sequence
+            model_sequence = vision_sequence + [m for m in self.config.get_model_sequence() if m not in vision_sequence]
+        else:
+            model_sequence = self.config.get_model_sequence()
+
+        for model_name in model_sequence:
             try:
                 response_candidate = await asyncio.to_thread(
                     lambda name=model_name: _call_model_for_name(name)

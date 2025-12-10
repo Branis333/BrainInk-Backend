@@ -26,7 +26,8 @@ from schemas.afterschool_schema import (
     StudentNoteCreate, StudentNoteUpdate, StudentNoteOut, StudentNoteListResponse,
     NoteUploadResponse, NoteAnalysisResponse, MessageResponse,
     ObjectiveQuizResponse, FlashcardsResponse, QuizGradeRequest, Flashcard, QuizQuestion,
-    QuizSubmitRequest, QuizSubmitResponse
+    QuizSubmitRequest, QuizSubmitResponse,
+    WrittenQuizResponse, WrittenQuizGradeResponse
 )
 from services.notes_service import notes_service
 
@@ -102,9 +103,6 @@ def _to_list(value):
 def _normalise_note_instance(note: StudentNote) -> StudentNote:
     """Mutate ORM instance fields to expected types for Pydantic serialization."""
     note.key_points = _to_list(getattr(note, "key_points", None))
-    note.main_topics = _to_list(getattr(note, "main_topics", None))
-    note.learning_concepts = _to_list(getattr(note, "learning_concepts", None))
-    note.questions_generated = _to_list(getattr(note, "questions_generated", None))
     note.tags = _to_list(getattr(note, "tags", None))
     return note
 
@@ -263,9 +261,6 @@ async def upload_and_analyze_notes(
             if analysis_result and analysis_result.get("success"):
                 student_note.summary = analysis_result.get("summary")
                 student_note.key_points = analysis_result.get("key_points")
-                student_note.main_topics = analysis_result.get("main_topics")
-                student_note.learning_concepts = analysis_result.get("learning_concepts")
-                student_note.questions_generated = analysis_result.get("questions_generated")
                 student_note.objectives = analysis_result.get("objectives")
                 student_note.ai_processed = True
                 student_note.processing_status = "completed"
@@ -317,9 +312,6 @@ async def upload_and_analyze_notes(
             "analysis_results": {
                 "summary": student_note.summary,
                 "key_points": student_note.key_points,
-                "main_topics": student_note.main_topics,
-                "learning_concepts": student_note.learning_concepts,
-                "questions_generated": student_note.questions_generated,
                 "objectives": student_note.objectives,
             } if student_note.ai_processed else None,
             "processed_at": student_note.processed_at.isoformat() if student_note.processed_at else None,
@@ -448,6 +440,45 @@ async def generate_objective_quiz(
     )
 
 
+@router.post("/{note_id}/objectives/{objective_index}/quiz/written", response_model=WrittenQuizResponse)
+async def generate_objective_written_quiz(
+    note_id: int,
+    objective_index: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    num_questions: int = Form(4, ge=3, le=6),
+):
+    """Generate short-answer (written) prompts for a specific objective (no persistence)."""
+    user_id = current_user["user_id"]
+
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.objectives or not isinstance(note.objectives, list):
+        raise HTTPException(status_code=400, detail="No objectives available for this note")
+
+    idx = objective_index
+    if idx >= len(note.objectives) and 1 <= objective_index <= len(note.objectives):
+        idx = objective_index - 1
+    if idx < 0 or idx >= len(note.objectives):
+        raise HTTPException(status_code=400, detail="Objective index out of range")
+
+    obj = note.objectives[idx]
+    objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
+    objective_summary = obj.get("summary") if isinstance(obj, dict) else None
+
+    questions = await notes_service.generate_written_quiz_for_objective(objective_text, objective_summary, num_questions)
+    return WrittenQuizResponse(
+        note_id=note.id,
+        objective_index=idx,
+        objective=objective_text,
+        questions=questions,
+        generated_at=datetime.utcnow(),
+    )
+
+
 @router.post("/{note_id}/objectives/{objective_index}/quiz/grade", response_model=MessageResponse)
 async def submit_objective_quiz_grade(
     note_id: int,
@@ -488,6 +519,60 @@ async def submit_objective_quiz_grade(
     db.commit()
 
     return MessageResponse(message="Objective quiz grade stored successfully")
+
+
+@router.post("/{note_id}/objectives/{objective_index}/quiz/written/grade", response_model=WrittenQuizGradeResponse)
+async def grade_objective_written_quiz(
+    note_id: int,
+    objective_index: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    questions: str = Form(..., description="JSON array of written questions with expected_answer/rubric"),
+    files: List[UploadFile] = File(..., description="Images of handwritten answers"),
+):
+    """Grade a written quiz attempt from uploaded images using Gemini Vision (no persistence)."""
+    user_id = current_user["user_id"]
+
+    note: StudentNote = db.query(StudentNote).filter(
+        and_(StudentNote.id == note_id, StudentNote.user_id == user_id)
+    ).first()
+    if not note:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if not note.objectives or not isinstance(note.objectives, list):
+        raise HTTPException(status_code=400, detail="No objectives available for this note")
+
+    idx = objective_index
+    if idx >= len(note.objectives) and 1 <= objective_index <= len(note.objectives):
+        idx = objective_index - 1
+    if idx < 0 or idx >= len(note.objectives):
+        raise HTTPException(status_code=400, detail="Objective index out of range")
+
+    try:
+        parsed_questions = json.loads(questions)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid questions payload; must be valid JSON")
+    if not isinstance(parsed_questions, list) or not parsed_questions:
+        raise HTTPException(status_code=400, detail="Questions payload must be a non-empty JSON array")
+
+    # Load image bytes
+    image_bytes: List[bytes] = []
+    image_names: List[str] = []
+    for f in files:
+        content = await f.read()
+        image_bytes.append(content)
+        image_names.append(f.filename or "response.jpg")
+
+    objective_text = note.objectives[idx].get("objective") if isinstance(note.objectives[idx], dict) else str(note.objectives[idx])
+    graded = await notes_service.grade_written_quiz_from_images(objective_text, parsed_questions, image_bytes, image_names)
+
+    return WrittenQuizGradeResponse(
+        note_id=note.id,
+        objective_index=idx,
+        total_score=graded.get("total_score", 0.0),
+        max_score=graded.get("max_score", 0.0),
+        percentage=graded.get("percentage", 0.0),
+        items=graded.get("items", []),
+    )
 
 
 @router.post("/{note_id}/objectives/{objective_index}/flashcards", response_model=FlashcardsResponse)
