@@ -323,11 +323,14 @@ SUBJECT: {note_subject or ''}
     @staticmethod
     async def generate_flashcards_from_content(content: str, count: int = 8) -> List[Dict[str, str]]:
         """Generate flashcards (front/back) from given content using Gemini. No fallback; errors if empty."""
-        count = max(5, min(10, int(count or 8)))
+        count = max(1, min(5, int(count or 5)))  # hard-cap at 5 cards
 
-        async def _attempt(temp: float) -> List[Dict[str, str]]:
-            prompt = f"""Create {count} concise flashcards from the following study content. Return strict JSON:
-{{"flashcards": [{{"front": "question/prompt", "back": "concise answer"}}]}}
+        async def _attempt(temp: float, strict_prompt: bool) -> List[Dict[str, str]]:
+            strict_block = "Return STRICT JSON ONLY with NO extra text. Close all braces." if strict_prompt else "Return JSON only."
+            prompt = f"""Create exactly {count} concise flashcards from the content below.
+Each flashcard must have "front" (prompt) and "back" (concise answer).
+{strict_block}
+Schema: {{"flashcards": [{{"front": "...", "back": "..."}}]}}
 
 CONTENT:
 {content}
@@ -336,7 +339,7 @@ CONTENT:
                 prompt=prompt,
                 attachments=None,
                 temperature=temp,
-                max_output_tokens=600,
+                max_output_tokens=900,
             )
             if isinstance(resp, list):
                 cards = resp
@@ -354,16 +357,14 @@ CONTENT:
                 else:
                     continue
                 if front and back:
-                    result.append({"front": str(front), "back": str(back)})
+                    result.append({"front": str(front).strip(), "back": str(back).strip()})
             return result[:count]
 
         try:
-            cards = await _attempt(temp=0.25)
-            if len(cards) >= 3:
-                return cards
-            cards = await _attempt(temp=0.1)
-            if len(cards) >= 3:
-                return cards
+            for temp, strict in [(0.2, False), (0.1, True), (0.0, True)]:
+                cards = await _attempt(temp=temp, strict_prompt=strict)
+                if len(cards) >= count:
+                    return cards
             raise RuntimeError("Flashcard generation returned empty")
         except Exception as e:
             logger.error(f"Flashcards generation failed: {e}")
@@ -372,7 +373,7 @@ CONTENT:
     @staticmethod
     async def generate_quiz_for_objective(objective: str, summary: Optional[str], count: int = 7) -> List[Dict[str, Any]]:
         """Generate MCQ quiz for a specific objective with correct answer indices. No fallback."""
-        count = max(5, min(10, int(count or 7)))
+        count = max(1, min(5, int(count or 5)))  # hard-cap at 5 questions
 
         def _build_prompt(strict: bool = False) -> str:
             schema = (
@@ -387,8 +388,9 @@ CONTENT:
                 "}}"
             )
             base = (
-                f"Generate {count} multiple-choice questions for the learning objective below.\n"
+                f"Generate exactly {count} multiple-choice questions for the learning objective below.\n"
                 "Each question must have exactly 4 options and provide the correct `answer_index` (0-3).\n"
+                "Respond with JSON only—no markdown, prose, or trailing commas.\n"
             )
             if strict:
                 base += "Return STRICT JSON ONLY, with no extra text. Match this schema exactly:\n" + schema + "\n\n"
@@ -402,7 +404,7 @@ CONTENT:
                 prompt=_build_prompt(strict),
                 attachments=None,
                 temperature=0.2,
-                max_output_tokens=900,
+                max_output_tokens=1200,
             )
             raw = resp.get("questions") or []
             questions: List[Dict[str, Any]] = []
@@ -430,13 +432,10 @@ CONTENT:
             return questions[:count]
 
         try:
-            questions = await _attempt(strict=False)
-            if len(questions) >= 5:
-                return questions
-
-            questions = await _attempt(strict=True)
-            if len(questions) >= 5:
-                return questions
+            for strict in (False, True):
+                questions = await _attempt(strict=strict)
+                if len(questions) >= count:
+                    return questions
             raise RuntimeError("MCQ generation returned too few questions")
         except Exception as e:
             logger.error(f"Quiz generation failed: {e}")

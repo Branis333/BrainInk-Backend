@@ -405,10 +405,10 @@ async def generate_objective_quiz(
     objective_index: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    num_questions: int = Form(7, ge=5, le=10),
+    num_questions: int = Form(5, ge=1, le=5),
     regenerate: bool = Form(False),
 ):
-    """Generate 5-10 MCQ questions for a specific objective."""
+    """Generate up to 5 MCQ questions for a specific objective."""
     user_id = current_user["user_id"]
 
     note: StudentNote = db.query(StudentNote).filter(
@@ -634,7 +634,7 @@ async def generate_objective_flashcards(
     objective_index: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    count: int = Form(8, ge=5, le=10),
+    count: int = Form(5, ge=1, le=5),
     regenerate: bool = Form(False),
 ):
     """Generate flashcards for a specific objective and persist them on the note."""
@@ -687,7 +687,7 @@ async def generate_overall_flashcards(
     note_id: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    count: int = Form(8, ge=5, le=10),
+    count: int = Form(5, ge=1, le=5),
 ):
     """Generate flashcards from the entire note summary and persist them."""
     user_id = current_user["user_id"]
@@ -723,7 +723,7 @@ async def generate_quiz_from_note(
     note_id: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    num_questions: int = Form(7, ge=5, le=10),
+    num_questions: int = Form(5, ge=1, le=5),
     objective_index: int = Form(..., description="Objective index (1-based or 0-based)"),
     regenerate: bool = Form(False),
 ):
@@ -831,7 +831,7 @@ async def generate_flashcards_for_note(
     note_id: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    count: int = Form(8, ge=5, le=10),
+    count: int = Form(5, ge=1, le=5),
     objective_index: int = Form(..., description="Objective index (1-based or 0-based)"),
     regenerate: bool = Form(False),
 ):
