@@ -406,6 +406,7 @@ async def generate_objective_quiz(
     db: db_dependency,
     current_user: dict = user_dependency,
     num_questions: int = Form(7, ge=5, le=10),
+    regenerate: bool = Form(False),
 ):
     """Generate 5-10 MCQ questions for a specific objective."""
     user_id = current_user["user_id"]
@@ -426,10 +427,22 @@ async def generate_objective_quiz(
         raise HTTPException(status_code=400, detail="Invalid objective index")
 
     obj = note.objectives[idx]
-    objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
-    objective_summary = obj.get("summary") if isinstance(obj, dict) else None
+    if not isinstance(obj, dict):
+        obj = {"objective": str(obj)}
 
-    questions = await notes_service.generate_quiz_for_objective(objective_text, objective_summary, num_questions)
+    cached_quiz = obj.get("quiz_mcq")
+    if cached_quiz and not regenerate:
+        questions = cached_quiz
+    else:
+        objective_text = obj.get("objective") or str(obj)
+        objective_summary = obj.get("summary")
+        questions = await notes_service.generate_quiz_for_objective(objective_text, objective_summary, num_questions)
+        obj["quiz_mcq"] = questions
+        note.objectives[idx] = obj
+        note.updated_at = datetime.utcnow()
+        db.commit()
+
+    objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
     return ObjectiveQuizResponse(
         note_id=note.id,
         objective_index=idx,
@@ -446,9 +459,10 @@ async def generate_objective_written_quiz(
     objective_index: int,
     db: db_dependency,
     current_user: dict = user_dependency,
-    num_questions: int = Form(4, ge=3, le=6),
+    num_questions: int = Form(1, ge=1, le=1),
+    regenerate: bool = Form(False),
 ):
-    """Generate short-answer (written) prompts for a specific objective (no persistence)."""
+    """Generate short-answer (written) prompts for a specific objective (persisted and cached)."""
     user_id = current_user["user_id"]
 
     note: StudentNote = db.query(StudentNote).filter(
@@ -466,10 +480,23 @@ async def generate_objective_written_quiz(
         raise HTTPException(status_code=400, detail="Objective index out of range")
 
     obj = note.objectives[idx]
-    objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
-    objective_summary = obj.get("summary") if isinstance(obj, dict) else None
+    if not isinstance(obj, dict):
+        obj = {"objective": str(obj)}
 
-    questions = await notes_service.generate_written_quiz_for_objective(objective_text, objective_summary, num_questions)
+    cached_quiz = obj.get("quiz_written")
+    if cached_quiz and not regenerate:
+        questions = cached_quiz
+    else:
+        objective_text = obj.get("objective") or str(obj)
+        objective_summary = obj.get("summary")
+        # Written quiz always returns a single prompt without answers
+        questions = await notes_service.generate_written_quiz_for_objective(objective_text, objective_summary, 1)
+        obj["quiz_written"] = questions
+        note.objectives[idx] = obj
+        note.updated_at = datetime.utcnow()
+        db.commit()
+
+    objective_text = obj.get("objective") if isinstance(obj, dict) else str(obj)
     return WrittenQuizResponse(
         note_id=note.id,
         objective_index=idx,
@@ -510,7 +537,8 @@ async def submit_objective_quiz_grade(
         progress.append({})
     progress[idx] = {
         "objective_index": idx,
-        "latest_grade": float(payload.grade_percentage),
+        "latest_grade": float(payload.grade_percentage),  # legacy field
+        "latest_grade_mcq": float(payload.grade_percentage),
         "performance_summary": payload.performance_summary or "",
         "last_quiz_at": datetime.utcnow().isoformat(),
     }
@@ -565,6 +593,23 @@ async def grade_objective_written_quiz(
     objective_text = note.objectives[idx].get("objective") if isinstance(note.objectives[idx], dict) else str(note.objectives[idx])
     graded = await notes_service.grade_written_quiz_from_images(objective_text, parsed_questions, image_bytes, image_names)
 
+    # Persist written-quiz grade alongside other progress entries
+    progress = note.objective_progress or []
+    while len(progress) < len(note.objectives):
+        progress.append({})
+    existing = progress[idx] if isinstance(progress[idx], dict) else {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update({
+        "objective_index": idx,
+        "latest_grade_written": float(graded.get("percentage", 0.0)),
+        "last_written_quiz_at": datetime.utcnow().isoformat(),
+    })
+    progress[idx] = existing
+    note.objective_progress = progress
+    note.updated_at = datetime.utcnow()
+    db.commit()
+
     return WrittenQuizGradeResponse(
         note_id=note.id,
         objective_index=idx,
@@ -582,6 +627,7 @@ async def generate_objective_flashcards(
     db: db_dependency,
     current_user: dict = user_dependency,
     count: int = Form(8, ge=5, le=10),
+    regenerate: bool = Form(False),
 ):
     """Generate flashcards for a specific objective and persist them on the note."""
     user_id = current_user["user_id"]
@@ -602,16 +648,19 @@ async def generate_objective_flashcards(
 
     obj = note.objectives[idx]
     content = obj.get("summary") or obj.get("objective") or note.summary or ""
-    cards = await notes_service.generate_flashcards_from_content(content, count)
 
-    # Persist in objective_flashcards
     existing = note.objective_flashcards or []
     while len(existing) < len(note.objectives):
         existing.append([])
-    existing[idx] = cards
-    note.objective_flashcards = existing
-    note.updated_at = datetime.utcnow()
-    db.commit()
+
+    if existing[idx] and not regenerate:
+        cards = existing[idx]
+    else:
+        cards = await notes_service.generate_flashcards_from_content(content, count)
+        existing[idx] = cards
+        note.objective_flashcards = existing
+        note.updated_at = datetime.utcnow()
+        db.commit()
 
     return FlashcardsResponse(
         note_id=note.id,
@@ -665,7 +714,8 @@ async def generate_quiz_from_note(
     db: db_dependency,
     current_user: dict = user_dependency,
     num_questions: int = Form(7, ge=5, le=10),
-    objective_index: int = Form(..., description="Objective index (1-based or 0-based)")
+    objective_index: int = Form(..., description="Objective index (1-based or 0-based)"),
+    regenerate: bool = Form(False),
 ):
     """Wrapper: generate quiz for a specific objective using simpler route."""
     return await generate_objective_quiz(
@@ -674,6 +724,7 @@ async def generate_quiz_from_note(
         db=db,
         current_user=current_user,
         num_questions=num_questions,
+        regenerate=regenerate,
     )
 
 
@@ -735,16 +786,21 @@ async def submit_quiz_answers(
     except Exception:
         perf_summary = None
 
-    # Persist progress
+    # Persist progress (merge to keep any written-quiz state)
     progress = note.objective_progress or []
     while len(progress) < len(note.objectives):
         progress.append({})
-    progress[idx] = {
+    existing = progress[idx] if isinstance(progress[idx], dict) else {}
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update({
         "objective_index": idx,
         "latest_grade": grade_percentage,
-        "performance_summary": perf_summary or "",
+        "latest_grade_mcq": grade_percentage,
+        "performance_summary": perf_summary or existing.get("performance_summary", ""),
         "last_quiz_at": datetime.utcnow().isoformat(),
-    }
+    })
+    progress[idx] = existing
     note.objective_progress = progress
     note.updated_at = datetime.utcnow()
     db.commit()
@@ -766,7 +822,8 @@ async def generate_flashcards_for_note(
     db: db_dependency,
     current_user: dict = user_dependency,
     count: int = Form(8, ge=5, le=10),
-    objective_index: int = Form(..., description="Objective index (1-based or 0-based)")
+    objective_index: int = Form(..., description="Objective index (1-based or 0-based)"),
+    regenerate: bool = Form(False),
 ):
     """Wrapper: generate flashcards for a specific objective using simpler route."""
     return await generate_objective_flashcards(
@@ -775,6 +832,7 @@ async def generate_flashcards_for_note(
         db=db,
         current_user=current_user,
         count=count,
+        regenerate=regenerate,
     )
 
 

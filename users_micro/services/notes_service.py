@@ -465,21 +465,20 @@ CONTENT:
     # WRITTEN QUIZ (FREE RESPONSE)
     # -----------------------------
     @staticmethod
-    async def generate_written_quiz_for_objective(objective: str, summary: Optional[str], count: int = 4) -> List[Dict[str, Any]]:
-        """Generate short written-response prompts with expected answers/rubrics."""
-        count = max(3, min(6, int(count or 4)))
+    async def generate_written_quiz_for_objective(objective: str, summary: Optional[str], count: int = 1) -> List[Dict[str, Any]]:
+        """Generate a single short written-response prompt (no model answer)."""
+        count = 1  # enforce single-question requirement
 
         prompt = (
-            f"Create {count} short-answer questions for the learning objective below. "
-            "Each question should test understanding or application (not multiple-choice).\n"
-            "Return STRICT JSON ONLY in this shape:\n"
+            "Create 1 short-answer question for the learning objective below. "
+            "Do NOT include answers. Return STRICT JSON ONLY in this shape:\n"
             "{\n"
             "  \"questions\": [\n"
-            "    {\"prompt\": \"...\", \"expected_answer\": \"concise model answer\", \"rubric\": \"(optional) scoring hints\"}\n"
+            "    {\"prompt\": \"...\"}\n"
             "  ]\n"
             "}\n\n"
             f"OBJECTIVE: {objective}\nOBJECTIVE SUMMARY: {summary or ''}\n"
-            "Make prompts clear and age-appropriate; answers should be concise (1-3 sentences)."
+            "Make the prompt clear, specific, and answerable in 2-4 sentences."
         )
 
         try:
@@ -496,39 +495,22 @@ CONTENT:
                     if not isinstance(q, dict):
                         continue
                     prompt_text = q.get("prompt") or q.get("question") or q.get("text")
-                    expected = q.get("expected_answer") or q.get("answer") or q.get("model_answer")
-                    rubric = q.get("rubric") or q.get("notes") or q.get("explanation")
                     if prompt_text:
                         questions.append({
                             "prompt": str(prompt_text),
-                            "expected_answer": str(expected) if expected else None,
-                            "rubric": str(rubric) if rubric else None,
                         })
             # Simple fallback if AI returns nothing
             if not questions:
-                fallback = (
-                    f"Explain in your own words: {objective}",
-                    f"Give one real-world example of {objective}",
-                    f"List two key ideas from this topic: {objective}",
-                    f"Why is {objective} important?",
-                    f"Summarize the main takeaway about {objective}",
-                    f"Describe a scenario where {objective} applies",
-                )
-                for i in range(count):
-                    prompt_text = fallback[i % len(fallback)]
-                    questions.append({
-                        "prompt": prompt_text,
-                        "expected_answer": summary or objective,
-                        "rubric": "Reward clarity, correctness, and alignment with the objective.",
-                    })
+                fallback = f"Explain in your own words: {objective}"
+                questions.append({
+                    "prompt": fallback,
+                })
             return questions[:count]
         except Exception as e:
             logger.error(f"Written quiz generation failed: {e}")
             return [
                 {
                     "prompt": f"Explain the core idea of: {objective}",
-                    "expected_answer": summary or objective,
-                    "rubric": "Check if the response captures the main concept and is coherent.",
                 }
             ]
 
@@ -552,14 +534,12 @@ CONTENT:
             inline_parts = []
 
         q_text = "\n".join([
-            f"Q{i+1}: {q.get('prompt')}\nExpected: {q.get('expected_answer') or ''}\nRubric: {q.get('rubric') or ''}"
-            for i, q in enumerate(questions)
-            if isinstance(q, dict)
+            f"Q{i+1}: {q.get('prompt')}" for i, q in enumerate(questions) if isinstance(q, dict)
         ])
 
         grading_prompt = (
             "You are grading handwritten short answers.\n"
-            "Review the attached images (student answers). The questions and expected answers are provided.\n"
+            "Review the attached images (student answers). Questions are provided; no model answers are included.\n"
             "Return STRICT JSON ONLY in this shape:\n"
             "{\n"
             "  \"items\": [{\"prompt\": \"...\", \"score\": 0-10, \"max_score\": 10, \"feedback\": \"...\"}],\n"
