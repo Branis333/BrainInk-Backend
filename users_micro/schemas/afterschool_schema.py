@@ -754,6 +754,14 @@ class KanaChatRequest(BaseModel):
     screen_context: Optional[str] = Field(None, description="Optional UI context shown to the user")
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context to inject into the prompt")
     history: Optional[List[KanaMessage]] = Field(None, description="Optional client-side history when resuming after reconnect")
+    screen_capture: Optional[str] = Field(
+        None,
+        description="Base64-encoded screenshot (without data URI) to give Kana visual context",
+    )
+    screen_capture_mime: Optional[str] = Field(
+        None,
+        description="MIME type for the provided screenshot (e.g., image/jpeg)",
+    )
 
 
 class KanaChatResponse(BaseModel):

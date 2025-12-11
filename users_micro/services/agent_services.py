@@ -9,6 +9,7 @@ Responsibilities
 """
 
 import asyncio
+import base64
 import logging
 import uuid
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import google.generativeai as genai
 
 from services.gemini_service import gemini_service
+from tools.inline_attachment import build_inline_part
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,8 @@ class KanaAgentService:
 		route: Optional[str] = None,
 		screen_context: Optional[str] = None,
 		metadata: Optional[Dict[str, Any]] = None,
+		screen_capture: Optional[str] = None,
+		screen_capture_mime: Optional[str] = None,
 		client_history: Optional[List[Dict[str, Any]]] = None,
 	) -> Dict[str, Any]:
 		"""Send a message to Kana and return the reply plus updated history."""
@@ -94,15 +98,30 @@ class KanaAgentService:
 				session["history"] = history[-MAX_HISTORY_MESSAGES:]
 				history = session["history"]
 
+		attachments: List[Any] = []
+		if screen_capture:
+			try:
+				data = base64.b64decode(screen_capture)
+				mime_type = screen_capture_mime or "image/jpeg"
+				if len(data) > 1_800_000:
+					raise ValueError("screen capture too large; please compress further")
+				attachments.append(build_inline_part(data=data, mime_type=mime_type))
+			except Exception as exc:  # noqa: BLE001
+				logger.warning(
+					"Invalid screen capture provided; ignoring",
+					extra={"error": str(exc)},
+				)
+
 		prompt = self._build_prompt(
 			history=history,
 			route=route,
 			screen_context=screen_context,
 			user_id=user_id,
 			metadata=metadata,
+			has_visual=bool(attachments),
 		)
 
-		reply_text, used_model = await self._invoke_gemini(prompt)
+		reply_text, used_model = await self._invoke_gemini(prompt, attachments=attachments or None)
 
 		assistant_turn = {
 			"role": "assistant",
@@ -167,6 +186,7 @@ class KanaAgentService:
 		screen_context: Optional[str],
 		user_id: int,
 		metadata: Optional[Dict[str, Any]],
+		has_visual: bool = False,
 	) -> str:
 		"""Compose the prompt with system guidance, route-aware context, and history."""
 		system_preamble = (
@@ -180,6 +200,7 @@ class KanaAgentService:
 			f"Current route: {route or 'unknown'}",
 			f"Screen context: {screen_context or 'none provided'}",
 			f"User id: {user_id}",
+			f"Visual context: {'screenshot attached' if has_visual else 'none provided'}",
 		]
 		if metadata:
 			for key, value in metadata.items():
@@ -204,16 +225,42 @@ class KanaAgentService:
 		)
 		return prompt
 
-	async def _invoke_gemini(self, prompt: str) -> Tuple[str, str]:
+	async def _invoke_gemini(self, prompt: str, attachments: Optional[List[Any]] = None) -> Tuple[str, str]:
 		"""Call Gemini with fallbacks, returning (text, model_name)."""
 		last_error: Optional[Exception] = None
 
-		for model_name in gemini_service.config.get_model_sequence():
+		if attachments:
+			vision_sequence = [
+				"gemini-1.5-flash-latest",
+				"gemini-1.5-flash",
+				"gemini-2.0-flash-latest",
+				"gemini-2.0-flash",
+				"gemini-2.5-flash-latest",
+				"gemini-2.5-flash",
+			]
+			if getattr(gemini_service.config, "allow_paid", False):
+				vision_sequence = [
+					"gemini-1.0-pro-vision-latest",
+					"gemini-pro-vision",
+					"gemini-1.5-pro-latest",
+				] + vision_sequence
+			model_sequence = vision_sequence + [
+				m for m in gemini_service.config.get_model_sequence() if m not in vision_sequence
+			]
+		else:
+			model_sequence = gemini_service.config.get_model_sequence()
+
+		for model_name in model_sequence:
 			try:
+				payload = (
+					gemini_service._build_content_payload(prompt, attachments)
+					if attachments
+					else prompt
+				)
 				model = gemini_service.config.get_model(model_name)
 				response = await asyncio.to_thread(
 					lambda: model.generate_content(
-						prompt,
+						payload,
 						generation_config=genai.types.GenerationConfig(
 							temperature=0.35,
 							max_output_tokens=768,
@@ -231,7 +278,11 @@ class KanaAgentService:
 				last_error = exc
 				logger.warning(
 					"Kana Gemini call failed; trying fallback",
-					extra={"model_name": model_name, "error": str(exc)},
+					extra={
+						"model_name": model_name,
+						"error": str(exc),
+						"has_attachments": bool(attachments),
+					},
 				)
 				continue
 

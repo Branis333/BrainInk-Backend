@@ -50,6 +50,8 @@ async def chat_with_kana(payload: KanaChatRequest, current_user: dict = user_dep
 			route=payload.route,
 			screen_context=payload.screen_context,
 			metadata=payload.metadata,
+			screen_capture=payload.screen_capture,
+			screen_capture_mime=payload.screen_capture_mime,
 			client_history=[h.dict() for h in payload.history] if payload.history else None,
 		)
 		return KanaChatResponse(**result)
