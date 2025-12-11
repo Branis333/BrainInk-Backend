@@ -23,7 +23,26 @@ user_dependency = Depends(get_current_user)
 async def chat_with_kana(payload: KanaChatRequest, current_user: dict = user_dependency):
 	"""Send a message to Kana and return the model's reply."""
 	try:
-		user_id = int(current_user.get("id")) if current_user else 0
+		if not current_user:
+			raise HTTPException(
+				status_code=status.HTTP_401_UNAUTHORIZED,
+				detail="Missing authentication",
+			)
+
+		user_id_raw = current_user.get("user_id") or current_user.get("id")
+		if user_id_raw is None:
+			raise HTTPException(
+				status_code=status.HTTP_401_UNAUTHORIZED,
+				detail="Invalid authentication payload",
+			)
+
+		try:
+			user_id = int(user_id_raw)
+		except (TypeError, ValueError):
+			raise HTTPException(
+				status_code=status.HTTP_401_UNAUTHORIZED,
+				detail="Invalid user id in token",
+			)
 		result = await kana_agent_service.chat(
 			user_id=user_id,
 			message=payload.message,
