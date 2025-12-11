@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 # ===============================
@@ -733,3 +733,33 @@ class PracticeQuizOut(BaseModel):
     title: str
     topic: Optional[str] = None
     questions: List[PracticeQuizQuestion]
+
+
+# ===============================
+# KANA AGENT SCHEMAS
+# ===============================
+
+class KanaMessage(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+    route: Optional[str] = None
+    screen_context: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+class KanaChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=1200, description="User input to Kana")
+    session_id: Optional[str] = Field(None, description="Existing session id to continue the conversation")
+    route: Optional[str] = Field(None, description="Current route or screen identifier")
+    screen_context: Optional[str] = Field(None, description="Optional UI context shown to the user")
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context to inject into the prompt")
+    history: Optional[List[KanaMessage]] = Field(None, description="Optional client-side history when resuming after reconnect")
+
+
+class KanaChatResponse(BaseModel):
+    session_id: str
+    reply: str
+    model: Optional[str] = None
+    route: Optional[str] = None
+    screen_context: Optional[str] = None
+    history: List[KanaMessage]

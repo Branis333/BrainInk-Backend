@@ -18,6 +18,7 @@ from Endpoints.after_school import (
     quiz as after_school_quiz,
     assignments as after_school_assignments,
     ai_tutor as after_school_ai_tutor,
+    agent as after_school_agent,
     notes as after_school_notes,
     notifications,
     progress as after_school_progress,
@@ -140,6 +141,7 @@ app.include_router(reading_assistant.router)  # Already has prefix /after-school
 app.include_router(after_school_quiz.router)  # New: /after-school/quiz (ephemeral practice quizzes)
 app.include_router(after_school_assignments.router)  # New: /after-school/assignments
 app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
+app.include_router(after_school_agent.router)  # New: /after-school/kana (conversational agent)
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
 app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
 app.include_router(after_school_progress.router)  # New: /after-school/progress (digested progress summaries)
