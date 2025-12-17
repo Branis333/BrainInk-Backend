@@ -22,6 +22,7 @@ from Endpoints.after_school import (
     notes as after_school_notes,
     notifications,
     progress as after_school_progress,
+    transcribe as after_school_transcribe,
 )
 from Endpoints import payments
 from Endpoints.after_school.notification_scheduler import setup_notification_scheduler
@@ -93,7 +94,7 @@ async def startup_event():
     except Exception as e:
         print(f"⚠️ Database not available at startup: {e}")
     # Log routers (no DB dependency)
-    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router, after_school_assignments.router])
+    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router, after_school_assignments.router, after_school_transcribe.router])
     print(f"🔄 Total endpoints loaded: {total_endpoints}")
     
     # Setup notification scheduler
@@ -145,6 +146,7 @@ app.include_router(after_school_agent.router)  # New: /after-school/kana (conver
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
 app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
 app.include_router(after_school_progress.router)  # New: /after-school/progress (digested progress summaries)
+app.include_router(after_school_transcribe.router)  # New: /after-school/transcribe (Gemini-powered audio transcription)
 app.include_router(payments.router)  # New: /payments/flutterwave
 app.include_router(payments.sub_router)  # Alias: /subscriptions/status for mobile client compatibility
 
