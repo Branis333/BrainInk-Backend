@@ -1,0 +1,47 @@
+# FastAPI Core
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+pydantic[email]==2.5.0
+
+# Authentication & Security
+python-multipart==0.0.6
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+alembic==1.13.1
+
+# Environment & Configuration
+python-dotenv==1.0.0
+
+# HTTP & File Operations
+requests==2.31.0
+httpx==0.25.2
+aiofiles==23.2.1
+
+# Cryptography & Auth
+pycryptodome==3.19.0
+google-auth==2.25.2
+
+# AI Integration
+google-generativeai>=0.3.0
+google-cloud-texttospeech==2.14.1
+kokoro>=0.9.4
+soundfile==0.12.1
+numpy>=1.26.0
+torch==2.4.1
+
+# Model download helpers
+huggingface-hub>=0.26.2
+
+# Image & PDF Processing
+pillow==10.1.0
+reportlab==4.0.7
+pypdf==3.17.4
+apscheduler 
+
+# Explicit dependency to fix deployment error (google.api_core requires it)
+packaging>=23.1

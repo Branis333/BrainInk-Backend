@@ -1,0 +1,10 @@
+.env
+**start_micro_services.sh**
+**stop_micro_service.sh**
+**depoy.sh**
+example.env
+venv/
+**__pycache__**
+node_modules
+.vite
+uploads/
