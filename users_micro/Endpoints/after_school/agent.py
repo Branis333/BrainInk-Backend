@@ -16,7 +16,7 @@ from schemas.afterschool_schema import (
 	KanaTTSResponse,
 )
 from services.agent_services import kana_agent_service
-from services.kokoro_tts_service import kokoro_tts_service
+from services.azure_tts_service import azure_tts_service
 
 logger = logging.getLogger(__name__)
 
@@ -78,15 +78,21 @@ async def chat_with_kana(payload: KanaChatRequest, current_user: dict = user_dep
 
 @router.post("/tts", response_model=KanaTTSResponse)
 async def kana_tts(payload: KanaTTSRequest, current_user: dict = user_dependency):
-	"""Generate Kokoro audio for Kana's reply."""
+	"""Generate Azure speech audio for Kana's reply."""
 	_ = _require_user_id(current_user)
 	try:
-		result = await kokoro_tts_service.synthesize(
+		result = await azure_tts_service.synthesize(
 			text=payload.text,
 			voice=payload.voice,
 			speed=payload.speed or 1.0,
 		)
-		return KanaTTSResponse(**result)
+		return KanaTTSResponse(
+			audio_base64=result["audio_base64"],
+			mime_type=result["mime_type"],
+			sample_rate=result["sample_rate"],
+			voice=result["voice"],
+			duration_seconds=result["duration_seconds"],
+		)
 	except ValueError as exc:
 		raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
 	except RuntimeError as exc:

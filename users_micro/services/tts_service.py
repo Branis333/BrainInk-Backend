@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import json
 
+from services.azure_tts_service import azure_tts_service
+
 # Try to import Google TTS - will use fallback if not available
 try:
     from google.cloud import texttospeech
@@ -26,11 +28,11 @@ try:
 except ImportError:
     PYTTSX3_AVAILABLE = False
 
-try:
-    import azure.cognitiveservices.speech as speechsdk
-    AZURE_TTS_AVAILABLE = True
-except ImportError:
-    AZURE_TTS_AVAILABLE = False
+AZURE_VOICE_MAP = {
+    "child_friendly": "en-US-AvaNeural",
+    "teacher": "en-US-GuyNeural",
+    "clear": "en-US-JennyNeural",
+}
 
 
 class TTSService:
@@ -47,6 +49,10 @@ class TTSService:
     def _detect_available_tts(self) -> str:
         """Detect which TTS method is available"""
         
+        # Prefer Azure Speech if configured
+        if azure_tts_service.is_available:
+            return "azure"
+
         # Check for Google Cloud TTS (best quality)
         credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
         credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -72,10 +78,6 @@ class TTSService:
                     return "system_fallback"
             
             return "google_cloud"
-        
-        # Check for Azure TTS
-        if AZURE_TTS_AVAILABLE and os.getenv("AZURE_SPEECH_KEY"):
-            return "azure"
         
         # Check for local pyttsx3
         if PYTTSX3_AVAILABLE:
@@ -123,11 +125,16 @@ class TTSService:
                     return cached_result
             
             # Generate new audio based on available method
-            if self.tts_method == "google_cloud":
-                result = await self._generate_google_cloud_tts(text, voice_type, speed)
-            elif self.tts_method == "azure":
+            method = self.tts_method
+            if method == "azure" and not azure_tts_service.is_available:
+                method = self._detect_available_tts()
+                self.tts_method = method
+
+            if method == "azure":
                 result = await self._generate_azure_tts(text, voice_type, speed)
-            elif self.tts_method == "pyttsx3":
+            elif method == "google_cloud":
+                result = await self._generate_google_cloud_tts(text, voice_type, speed)
+            elif method == "pyttsx3":
                 result = await self._generate_pyttsx3_tts(text, voice_type, speed)
             else:
                 result = await self._generate_fallback_tts(text, voice_type, speed)
@@ -149,6 +156,36 @@ class TTSService:
                 "error": str(e)
             }
     
+    async def _generate_azure_tts(
+        self,
+        text: str,
+        voice_type: str,
+        speed: float,
+    ) -> Dict[str, Any]:
+        """Generate TTS using Azure Cognitive Services."""
+
+        mapped_voice = AZURE_VOICE_MAP.get(voice_type, AZURE_VOICE_MAP["child_friendly"])
+        result = await azure_tts_service.synthesize(
+            text=text,
+            voice=mapped_voice,
+            speed=speed,
+        )
+
+        filename = f"tts_{uuid.uuid4().hex}.wav"
+        file_path = self.output_dir / filename
+        with open(file_path, "wb") as f:
+            f.write(result["audio_bytes"])
+
+        return {
+            "success": True,
+            "audio_url": f"/reading-assistant/pronunciation-audio/{filename}",
+            "audio_file": str(file_path),
+            "duration_seconds": result["duration_seconds"],
+            "text": text,
+            "voice": result["voice"],
+            "provider": result["provider"],
+        }
+
     async def _generate_google_cloud_tts(
         self,
         text: str,

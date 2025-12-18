@@ -777,7 +777,7 @@ class KanaTTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=1200, description="Text Kana should read aloud")
     voice: Optional[str] = Field(
         None,
-        description="Optional Kokoro voice id. Falls back to bf_isabella if missing or unsupported.",
+        description="Optional voice alias. Accepts Azure voice names or the legacy Kokoro ids for backwards compatibility.",
     )
     speed: Optional[float] = Field(1.0, ge=0.5, le=1.5, description="Playback speed multiplier")
 
@@ -786,5 +786,5 @@ class KanaTTSResponse(BaseModel):
     audio_base64: str = Field(..., description="Base64-encoded WAV payload")
     mime_type: str = Field("audio/wav", description="MIME type for the encoded audio")
     sample_rate: int = Field(24000, description="Sample rate of the generated clip")
-    voice: str = Field(..., description="Resolved Kokoro voice")
+    voice: str = Field(..., description="Resolved Azure voice name")
     duration_seconds: Optional[float] = Field(None, description="Approximate clip duration")

@@ -29,13 +29,7 @@ google-auth==2.25.2
 # AI Integration
 google-generativeai>=0.3.0
 google-cloud-texttospeech==2.14.1
-kokoro>=0.9.4
-soundfile==0.12.1
-numpy>=1.26.0
-torch==2.4.1
-
-# Model download helpers
-huggingface-hub>=0.26.2
+azure-cognitiveservices-speech>=1.37.0
 
 # Image & PDF Processing
 pillow==10.1.0
