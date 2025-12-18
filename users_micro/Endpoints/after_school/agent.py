@@ -74,7 +74,6 @@ async def chat_with_kana(payload: KanaChatRequest, current_user: dict = user_dep
 	except Exception as exc:  # noqa: BLE001
 		logger.exception("Kana chat failed", extra={"error": str(exc)})
 		raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Kana failed to respond")
-<<<<<<< HEAD
 
 
 @router.post("/tts", response_model=KanaTTSResponse)
