@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/after-school/kana", tags=["Kana Agent"])
 
+
 user_dependency = Depends(get_current_user)
 
 
@@ -46,8 +47,6 @@ def _require_user_id(current_user: dict) -> int:
 			status_code=status.HTTP_401_UNAUTHORIZED,
 			detail="Invalid user id in token",
 		) from exc
-
-
 @router.post("/chat", response_model=KanaChatResponse)
 async def chat_with_kana(payload: KanaChatRequest, current_user: dict = user_dependency):
 	"""Send a message to Kana and return the model's reply."""
@@ -75,6 +74,7 @@ async def chat_with_kana(payload: KanaChatRequest, current_user: dict = user_dep
 	except Exception as exc:  # noqa: BLE001
 		logger.exception("Kana chat failed", extra={"error": str(exc)})
 		raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Kana failed to respond")
+<<<<<<< HEAD
 
 
 @router.post("/tts", response_model=KanaTTSResponse)
