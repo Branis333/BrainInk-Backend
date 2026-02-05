@@ -16,6 +16,7 @@ class CreateUserRequest(BaseModel):  # registeration Schema
 
 class Token(BaseModel):  # token validation schema
     access_token: Optional[str] = None
+    refresh_token: Optional[str] = None
     token_type: Optional[str] = None
     UserInfo: ReturnUser
     class Config:
@@ -32,6 +33,16 @@ class FromData(BaseModel):  # token validation schema
 class UserLogin(BaseModel):  # login schema
     username: Optional[str] = None
     password: Optional[str] = None
+    client_type: Literal["web", "mobile"] = "web"
+
+    class Config:
+        from_attributes = True
+
+
+class RefreshTokenRequest(BaseModel):
+    refresh_token: Optional[str] = None  # Optional for web: pulled from HttpOnly cookie
+    client_type: Literal["web", "mobile"] = "web"
+
     class Config:
         from_attributes = True
 

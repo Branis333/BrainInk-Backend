@@ -1,5 +1,5 @@
-from datetime import timedelta, datetime
-from fastapi import APIRouter, HTTPException, Depends, Response, status
+from datetime import timedelta, datetime, timezone
+from fastapi import APIRouter, HTTPException, Depends, Response, status, Cookie, Header, Body
 from typing import Annotated, Optional
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
@@ -8,6 +8,8 @@ from sqlalchemy import or_
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
+import secrets
+import hashlib
 import random
 import string
 import smtplib
@@ -15,8 +17,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from db.connection import db_dependency
-from models.users_models import User# Import User class directly
-from schemas.schemas import CreateUserRequest, UserLogin, Token
+from models.users_models import User, RefreshToken, PasswordResetCode
+from schemas.schemas import CreateUserRequest, UserLogin, Token, RefreshTokenRequest
 from schemas.return_schemas import ReturnUser
 from functions.encrypt import encrypt_any_data
 from google.oauth2 import id_token
@@ -31,6 +33,16 @@ router = APIRouter(tags=["Authentication"])
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
 
+# Token lifetimes
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "15"))
+WEB_REFRESH_TOKEN_DAYS = int(os.getenv("WEB_REFRESH_TOKEN_DAYS", "14"))
+MOBILE_REFRESH_TOKEN_DAYS = int(os.getenv("MOBILE_REFRESH_TOKEN_DAYS", "365"))
+
+# Cookie/security controls
+COOKIE_SECURE = os.getenv("COOKIE_SECURE", "false").lower() == "true"
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN")  # set if you need a specific domain
+REFRESH_TOKEN_LENGTH = int(os.getenv("REFRESH_TOKEN_LENGTH", "48"))
+
 # Password and token setup
 # Use bcrypt_sha256 to transparently hash long passwords via SHA-256 prior to bcrypt,
 # avoiding bcrypt's 72-byte input limit while remaining compatible.
@@ -42,8 +54,104 @@ bcrypt_context = CryptContext(
 )
 oauth2_bearer = OAuth2PasswordBearer(tokenUrl="login")
 
+
+def hash_refresh_token(token: str) -> str:
+    """Hash refresh tokens before storing them."""
+    return hashlib.sha256(f"{token}{SECRET_KEY}".encode("utf-8")).hexdigest()
+
+
+def hash_reset_code(code: str) -> str:
+    """Hash reset codes before storing them (so the raw code isn't stored)."""
+    return hashlib.sha256(f"{code}{SECRET_KEY}".encode("utf-8")).hexdigest()
+
+
+def generate_refresh_token() -> str:
+    return secrets.token_urlsafe(REFRESH_TOKEN_LENGTH)
+
+
+def persist_refresh_token(db, user_id: int, client_type: str, user_agent: Optional[str] = None):
+    """Persist refresh token and return the raw token plus expiry."""
+    raw_token = generate_refresh_token()
+    token_hash = hash_refresh_token(raw_token)
+    expires_at = datetime.utcnow() + timedelta(
+        days=MOBILE_REFRESH_TOKEN_DAYS if client_type == "mobile" else WEB_REFRESH_TOKEN_DAYS
+    )
+
+    db_token = RefreshToken(
+        user_id=user_id,
+        token_hash=token_hash,
+        client_type=client_type,
+        user_agent=user_agent,
+        expires_at=expires_at,
+    )
+    db.add(db_token)
+    db.commit()
+    db.refresh(db_token)
+
+    return raw_token, expires_at
+
+
+def set_refresh_cookie(response: Response, refresh_token: str, expires_at: datetime):
+    """Set secure HttpOnly cookie for web clients."""
+    if not response:
+        return
+    expires_utc = expires_at if expires_at.tzinfo else expires_at.replace(tzinfo=timezone.utc)
+    max_age = int((expires_utc - datetime.now(timezone.utc)).total_seconds())
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite="lax",
+        max_age=max_age,
+        expires=expires_utc,
+        domain=COOKIE_DOMAIN,
+        path="/",
+    )
+
+
+def revoke_refresh_token(db, token_hash: str):
+    token = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token_hash == token_hash, RefreshToken.revoked.is_(False))
+        .first()
+    )
+    if token:
+        token.revoked = True
+        token.last_used_at = datetime.utcnow()
+        db.commit()
+
+
+def issue_tokens(user: User, client_type: str, db, response: Response, user_agent: Optional[str] = None):
+    client_type = client_type or "web"
+    access_token = create_access_token(
+        user.username,
+        user.id,
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    refresh_token, refresh_expires = persist_refresh_token(
+        db, user.id, client_type=client_type, user_agent=user_agent
+    )
+
+    if client_type == "web":
+        set_refresh_cookie(response, refresh_token, refresh_expires)
+        refresh_value = None  # Web relies on HttpOnly cookie
+    else:
+        refresh_value = refresh_token
+
+    user_info = ReturnUser.from_orm(user).dict()
+    data = encrypt_any_data({"UserInfo": user_info})
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_value,
+        "token_type": "bearer",
+        "encrypted_data": data,
+    }
+
 class UserResponse(BaseModel):
     access_token: str
+    refresh_token: Optional[str] = None
     token_type: str
     encrypted_data: str
 
@@ -98,9 +206,13 @@ def authenticate_user(username: str, password: str, db):
 
 # Token creation
 def create_access_token(
-    username: str, user_id: int, acc_type: str = "user", expires_delta: timedelta = timedelta(minutes=60 * 24)
+    username: str,
+    user_id: int,
+    acc_type: str = "user",
+    expires_delta: Optional[timedelta] = None,
 ):
     encode = {"uname": username, "id": user_id, "acc_type": acc_type}
+    expires_delta = expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     expires = datetime.utcnow() + expires_delta
     encode.update({"exp": expires})
     return jwt.encode(encode, SECRET_KEY, algorithm=ALGORITHM)
@@ -127,7 +239,13 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_bearer)]):
 user_dependency = Annotated[dict, Depends(get_current_user)]
 
 @router.post("/register", response_model=UserResponse)
-async def create_user(db: db_dependency, user_request: CreateUserRequest):
+async def create_user(
+    response: Response,
+    db: db_dependency,
+    user_request: CreateUserRequest,
+    client_type: str = "web",
+    user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
+):
     """
     Register a new user account
     """
@@ -156,23 +274,19 @@ async def create_user(db: db_dependency, user_request: CreateUserRequest):
         db.commit()
         db.refresh(new_user)
         
-        # Create token
-        token = create_access_token(new_user.username, new_user.id)
-        
-        # Get user info
-        user_info = ReturnUser.from_orm(new_user).dict()
-        
-        # Encrypt data
-        data = encrypt_any_data({"UserInfo": user_info})
-        
-        return {"access_token": token, "token_type": "bearer", "encrypted_data": data}
+        return issue_tokens(new_user, client_type, db, response, user_agent=user_agent)
 
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Registration error: {str(e)}")
 
 @router.post("/login", response_model=UserResponse)
-async def login(db: db_dependency, user_login: UserLogin):
+async def login(
+    response: Response,
+    db: db_dependency,
+    user_login: UserLogin,
+    user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
+):
     """
     Authenticate user and provide access token
     """
@@ -184,24 +298,23 @@ async def login(db: db_dependency, user_login: UserLogin):
             detail="Invalid username or password",
         )
     
-    # Create token
-    token = create_access_token(user.username, user.id)
-    
-    # Get user info
-    user_info = ReturnUser.from_orm(user).dict()
-    
-    # Encrypt data
-    data = encrypt_any_data({"UserInfo": user_info})
-    
-    return {"access_token": token, "token_type": "bearer", "encrypted_data": data}
+    return issue_tokens(user, user_login.client_type, db, response, user_agent=user_agent)
 
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(
+    response: Response,
+    db: db_dependency,
+    request: RefreshTokenRequest = Body(default=RefreshTokenRequest()),
+    refresh_cookie: Optional[str] = Cookie(default=None, alias="refresh_token"),
+):
     """
-    Logout user - frontend should clear token
+    Logout user and revoke the presented refresh token.
     """
-    # Since JWTs are stateless, actual logout happens on client side
-    # We can set an empty cookie as a signal to frontend
+    token_value = request.refresh_token or refresh_cookie
+    if token_value:
+        revoke_refresh_token(db, hash_refresh_token(token_value))
+
+    response.delete_cookie(key="refresh_token", domain=COOKIE_DOMAIN, path="/")
     response.set_cookie(key="access_token", value="", max_age=0)
     return {"message": "Successfully logged out"}
 
@@ -220,9 +333,64 @@ async def get_user(current_user: user_dependency, db: db_dependency):
     
     return {"encrypted_data": encrypted_data}
 
+
+@router.post("/refresh", response_model=UserResponse)
+async def refresh_access_token(
+    response: Response,
+    db: db_dependency,
+    request: RefreshTokenRequest = Body(default=RefreshTokenRequest()),
+    refresh_cookie: Optional[str] = Cookie(default=None, alias="refresh_token"),
+    user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
+):
+    """
+    Exchange a valid refresh token for a new access token. For web clients,
+    the refresh token is read from an HttpOnly cookie.
+    """
+    incoming_token = request.refresh_token or refresh_cookie
+    if not incoming_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token is missing",
+        )
+
+    token_hash = hash_refresh_token(incoming_token)
+    token_record = (
+        db.query(RefreshToken)
+        .filter(RefreshToken.token_hash == token_hash, RefreshToken.revoked.is_(False))
+        .first()
+    )
+
+    if not token_record:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or revoked refresh token",
+        )
+
+    if datetime.utcnow() > token_record.expires_at:
+        revoke_refresh_token(db, token_hash)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has expired",
+        )
+
+    user = db.query(User).filter(User.id == token_record.user_id).first()
+    if not user:
+        revoke_refresh_token(db, token_hash)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    # Rotate refresh tokens
+    revoke_refresh_token(db, token_hash)
+    return issue_tokens(user, token_record.client_type, db, response, user_agent=user_agent)
+
     
 @router.post("/google-register", response_model=UserResponse)
-async def google_register(db: db_dependency, google_request: GoogleAuthRequest):
+async def google_register(
+    response: Response,
+    db: db_dependency,
+    google_request: GoogleAuthRequest,
+    client_type: str = "web",
+    user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
+):
     """
     Register a new user with Google authentication
     """
@@ -278,16 +446,7 @@ async def google_register(db: db_dependency, google_request: GoogleAuthRequest):
         db.commit()
         db.refresh(new_user)
         
-        # Create token
-        token = create_access_token(new_user.username, new_user.id)
-        
-        # Get user info
-        user_info = ReturnUser.from_orm(new_user).dict()
-        
-        # Encrypt data
-        data = encrypt_any_data({"UserInfo": user_info})
-        
-        return {"access_token": token, "token_type": "bearer", "encrypted_data": data}
+        return issue_tokens(new_user, client_type, db, response, user_agent=user_agent)
         
     except ValueError:
         # Invalid token
@@ -303,7 +462,13 @@ async def google_register(db: db_dependency, google_request: GoogleAuthRequest):
         )
 
 @router.post("/google-login", response_model=UserResponse)
-async def google_login(db: db_dependency, google_request: GoogleAuthRequest):
+async def google_login(
+    response: Response,
+    db: db_dependency,
+    google_request: GoogleAuthRequest,
+    client_type: str = "web",
+    user_agent: Optional[str] = Header(default=None, alias="User-Agent"),
+):
     """
     Login with Google authentication
     """
@@ -350,16 +515,7 @@ async def google_login(db: db_dependency, google_request: GoogleAuthRequest):
                 detail="User not found. Please register first."
             )
             
-        # Create token
-        token = create_access_token(user.username, user.id)
-        
-        # Get user info
-        user_info = ReturnUser.from_orm(user).dict()
-        
-        # Encrypt data
-        data = encrypt_any_data({"UserInfo": user_info})
-        
-        return {"access_token": token, "token_type": "bearer", "encrypted_data": data}
+        return issue_tokens(user, client_type, db, response, user_agent=user_agent)
         
     except ValueError:
         # Invalid token
@@ -458,7 +614,13 @@ async def update_user_profile(
         # Encrypt data
         data = encrypt_any_data({"UserInfo": user_info})
         
-        return {"access_token": token, "token_type": "bearer", "encrypted_data": data}
+        # Keep response shape consistent with login/register (refresh_token is not re-issued here)
+        return {
+            "access_token": token,
+            "refresh_token": None,
+            "token_type": "bearer",
+            "encrypted_data": data,
+        }
         
     except HTTPException:
         db.rollback()
@@ -511,9 +673,6 @@ async def delete_user_account(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Deletion error: {str(e)}"
         )
-
-# In-memory storage for reset codes (in production, use Redis or database)
-reset_codes = {}
 
 def generate_reset_code():
     """Generate a 6-digit reset code"""
@@ -615,15 +774,27 @@ async def forgot_password(db: db_dependency, request: ForgotPasswordRequest):
                 "message": "If this email exists in our system, you will receive a reset code."
             }
         
-        # Generate reset code
+        # Generate reset code (store only a hash)
         reset_code = generate_reset_code()
-        
-        # Store reset code with expiration (15 minutes)
-        reset_codes[request.email] = {
-            "code": reset_code,
-            "expires_at": datetime.utcnow() + timedelta(minutes=15),
-            "attempts": 0
-        }
+        expires_at = datetime.utcnow() + timedelta(minutes=15)
+
+        record = db.query(PasswordResetCode).filter(PasswordResetCode.email == request.email).first()
+        if record:
+            record.code_hash = hash_reset_code(reset_code)
+            record.expires_at = expires_at
+            record.attempts = 0
+            record.last_sent_at = datetime.utcnow()
+        else:
+            record = PasswordResetCode(
+                email=request.email,
+                code_hash=hash_reset_code(reset_code),
+                expires_at=expires_at,
+                attempts=0,
+                last_sent_at=datetime.utcnow(),
+            )
+            db.add(record)
+
+        db.commit()
         
         # Send email
         email_sent = send_reset_email(request.email, reset_code)
@@ -649,43 +820,42 @@ async def forgot_password(db: db_dependency, request: ForgotPasswordRequest):
         )
 
 @router.post("/verify-reset-code")
-async def verify_reset_code(request: VerifyResetCodeRequest):
-    """
-    Step 2: Verify the reset code (optional verification step)
-    """
+async def verify_reset_code(db: db_dependency, request: VerifyResetCodeRequest):
+    """Step 2: Verify the reset code (DB-backed)."""
     try:
         email = request.email
         code = request.reset_code
-        
-        # Check if reset code exists
-        if email not in reset_codes:
+
+        record = db.query(PasswordResetCode).filter(PasswordResetCode.email == email).first()
+        if not record:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No reset request found for this email"
             )
-        
-        reset_data = reset_codes[email]
-        
+
         # Check if code expired
-        if datetime.utcnow() > reset_data["expires_at"]:
-            del reset_codes[email]
+        if datetime.utcnow() > record.expires_at:
+            db.delete(record)
+            db.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Reset code has expired. Please request a new one."
             )
-        
+
         # Check attempts (max 3 attempts)
-        if reset_data["attempts"] >= 3:
-            del reset_codes[email]
+        if record.attempts >= 3:
+            db.delete(record)
+            db.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Too many failed attempts. Please request a new reset code."
             )
-        
+
         # Verify code
-        if reset_data["code"] != code:
-            reset_codes[email]["attempts"] += 1
-            remaining_attempts = 3 - reset_codes[email]["attempts"]
+        if record.code_hash != hash_reset_code(code):
+            record.attempts += 1
+            db.commit()
+            remaining_attempts = 3 - record.attempts
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid reset code. {remaining_attempts} attempts remaining."
@@ -723,34 +893,36 @@ async def reset_password(db: db_dependency, request: ResetPasswordRequest):
             )
         
         # Check if reset code exists
-        if email not in reset_codes:
+        record = db.query(PasswordResetCode).filter(PasswordResetCode.email == email).first()
+        if not record:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No reset request found for this email"
             )
-        
-        reset_data = reset_codes[email]
-        
+
         # Check if code expired
-        if datetime.utcnow() > reset_data["expires_at"]:
-            del reset_codes[email]
+        if datetime.utcnow() > record.expires_at:
+            db.delete(record)
+            db.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Reset code has expired. Please request a new one."
             )
-        
+
         # Check attempts
-        if reset_data["attempts"] >= 3:
-            del reset_codes[email]
+        if record.attempts >= 3:
+            db.delete(record)
+            db.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Too many failed attempts. Please request a new reset code."
             )
-        
+
         # Verify code
-        if reset_data["code"] != code:
-            reset_codes[email]["attempts"] += 1
-            remaining_attempts = 3 - reset_codes[email]["attempts"]
+        if record.code_hash != hash_reset_code(code):
+            record.attempts += 1
+            db.commit()
+            remaining_attempts = 3 - record.attempts
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Invalid reset code. {remaining_attempts} attempts remaining."
@@ -769,7 +941,8 @@ async def reset_password(db: db_dependency, request: ResetPasswordRequest):
         db.commit()
         
         # Clean up reset code
-        del reset_codes[email]
+        db.delete(record)
+        db.commit()
         
         return {
             "success": True,
@@ -802,25 +975,34 @@ async def resend_reset_code(db: db_dependency, request: ForgotPasswordRequest):
                 "message": "If this email exists in our system, you will receive a reset code."
             }
         
-        # Check if there's an existing reset request
-        if email in reset_codes:
-            # Check if last request was less than 2 minutes ago (rate limiting)
-            time_since_last = datetime.utcnow() - (reset_codes[email]["expires_at"] - timedelta(minutes=15))
-            if time_since_last < timedelta(minutes=2):
-                raise HTTPException(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    detail="Please wait 2 minutes before requesting another code."
-                )
+        # Check if there's an existing reset request (rate limiting)
+        existing = db.query(PasswordResetCode).filter(PasswordResetCode.email == email).first()
+        if existing and existing.last_sent_at and (datetime.utcnow() - existing.last_sent_at) < timedelta(minutes=2):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Please wait 2 minutes before requesting another code.",
+            )
         
         # Generate new reset code
         reset_code = generate_reset_code()
-        
-        # Store reset code
-        reset_codes[email] = {
-            "code": reset_code,
-            "expires_at": datetime.utcnow() + timedelta(minutes=15),
-            "attempts": 0
-        }
+
+        expires_at = datetime.utcnow() + timedelta(minutes=15)
+        if existing:
+            existing.code_hash = hash_reset_code(reset_code)
+            existing.expires_at = expires_at
+            existing.attempts = 0
+            existing.last_sent_at = datetime.utcnow()
+        else:
+            existing = PasswordResetCode(
+                email=email,
+                code_hash=hash_reset_code(reset_code),
+                expires_at=expires_at,
+                attempts=0,
+                last_sent_at=datetime.utcnow(),
+            )
+            db.add(existing)
+
+        db.commit()
         
         # Send email
         email_sent = send_reset_email(email, reset_code)
