@@ -23,6 +23,7 @@ from Endpoints.after_school import (
     notifications,
     progress as after_school_progress,
     transcribe as after_school_transcribe,
+    kana as after_school_kana,
 )
 from Endpoints import payments
 from Endpoints.after_school.notification_scheduler import setup_notification_scheduler
@@ -143,6 +144,7 @@ app.include_router(after_school_quiz.router)  # New: /after-school/quiz (ephemer
 app.include_router(after_school_assignments.router)  # New: /after-school/assignments
 app.include_router(after_school_ai_tutor.router)  # New: /after-school/ai-tutor
 app.include_router(after_school_agent.router)  # New: /after-school/kana (conversational agent)
+app.include_router(after_school_kana.router)  # New: /after-school/kana-learning (step-by-step tutor flow)
 app.include_router(after_school_notes.router)  # New: /after-school/notes (image-based student notes with AI analysis)
 app.include_router(notifications.router)  # New: /after-school/notifications (push notification system)
 app.include_router(after_school_progress.router)  # New: /after-school/progress (digested progress summaries)
