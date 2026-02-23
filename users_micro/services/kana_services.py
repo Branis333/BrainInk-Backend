@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 SESSION_TTL = timedelta(hours=8)
 MAX_STEPS = 12
 MIN_STEPS = 2
+DEFAULT_EXPECTED_STEPS = 4
+MAX_EXPECTED_STEPS = 8
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
 
@@ -48,6 +50,7 @@ class KanaLearningService:
 		prompt = (question or "").strip()
 		if not prompt:
 			raise ValueError("Question cannot be empty")
+		expected_steps = self._resolve_expected_steps(metadata)
 
 		steps_payload = await self._generate_steps(
 			question=prompt,
@@ -56,9 +59,21 @@ class KanaLearningService:
 			metadata=metadata,
 			image_base64=image_base64,
 			image_mime=image_mime,
+			expected_steps=expected_steps,
 		)
 
 		steps = self._normalize_steps(steps_payload)
+		steps = self._enforce_expected_step_count(steps, expected_steps=expected_steps, question=prompt)
+		if not steps:
+			logger.warning(
+				"Kana produced unusable steps payload; using deterministic fallback",
+				extra={
+					"user_id": user_id,
+					"payload_keys": list(steps_payload.keys()) if isinstance(steps_payload, dict) else None,
+				},
+			)
+			steps = self._normalize_steps(self._build_default_steps_payload(prompt, expected_steps=expected_steps))
+
 		if not steps:
 			raise RuntimeError("Kana could not generate learning steps")
 
@@ -193,6 +208,7 @@ class KanaLearningService:
 		metadata: Optional[Dict[str, Any]],
 		image_base64: Optional[str],
 		image_mime: Optional[str],
+		expected_steps: int,
 	) -> Dict[str, Any]:
 		context_lines = [
 			f"route={route or 'unknown'}",
@@ -219,49 +235,137 @@ class KanaLearningService:
 			"  ]\n"
 			"}\n"
 			"Rules:\n"
-			"- 2 to 8 steps only.\n"
+			f"- Return exactly {expected_steps} steps.\n"
 			"- Keep each explanation actionable and child-friendly.\n"
+			"- Keep each explanation under 240 characters.\n"
+			"- Keep each check_question under 140 characters.\n"
 			"- Do NOT solve all future steps inside one step.\n"
 			"- No markdown, no code fences, no extra keys.\n\n"
 			f"Learner question:\n{question}\n\n"
 			f"Context:\n" + "\n".join(context_lines)
 		)
+		max_tokens = max(500, min(1000, 220 * expected_steps + 180))
 
 		try:
 			payload = await gemini_service._generate_json_response(
 				prompt,
 				attachments=attachments or None,
 				temperature=0.25,
-				max_output_tokens=1400,
+				max_output_tokens=max_tokens,
 			)
-			if isinstance(payload, dict):
+			if isinstance(payload, dict) and self._normalize_steps(payload):
 				return payload
+			logger.warning(
+				"Kana step payload missing usable steps; falling back",
+				extra={"payload_type": type(payload).__name__},
+			)
 		except Exception as exc:  # noqa: BLE001
 			logger.warning("Kana step generation failed, using fallback", extra={"error": str(exc)})
 
+		retry_prompt = (
+			"Your previous output was invalid or truncated.\n"
+			"Return ONLY valid JSON and nothing else.\n"
+			f"Return exactly {expected_steps} steps.\n"
+			"No markdown. No code fences. No extra keys.\n"
+			"Each step must include: step_number, title, explanation, check_question.\n\n"
+			f"Learner question:\n{question}\n\n"
+			f"Context:\n" + "\n".join(context_lines)
+		)
+		try:
+			retry_payload = await gemini_service._generate_json_response(
+				retry_prompt,
+				attachments=attachments or None,
+				temperature=0.2,
+				max_output_tokens=max_tokens,
+			)
+			if isinstance(retry_payload, dict) and self._normalize_steps(retry_payload):
+				return retry_payload
+			logger.warning(
+				"Kana retry payload still unusable; using deterministic fallback",
+				extra={"payload_type": type(retry_payload).__name__},
+			)
+		except Exception as exc:  # noqa: BLE001
+			logger.warning("Kana retry generation failed; using fallback", extra={"error": str(exc)})
+
+		return self._build_default_steps_payload(question, expected_steps=expected_steps)
+
+	def _build_default_steps_payload(self, question: str, expected_steps: int = DEFAULT_EXPECTED_STEPS) -> Dict[str, Any]:
+		desired_steps = max(MIN_STEPS, min(expected_steps, MAX_EXPECTED_STEPS))
+		template_steps = [
+			{
+				"title": "Understand the problem",
+				"explanation": "Restate what is being asked and identify the known values.",
+				"check_question": "Can you point out what the problem asks you to find?",
+			},
+			{
+				"title": "Plan the method",
+				"explanation": "Choose the right rule, formula, or strategy before calculating.",
+				"check_question": "Why does this method fit this problem?",
+			},
+			{
+				"title": "Apply the method",
+				"explanation": "Carry out the calculation step by step and keep track of units/signs.",
+				"check_question": "Which step of your calculation is most important to get right?",
+			},
+			{
+				"title": "Check the result",
+				"explanation": "Compare the result with the original question and verify it is reasonable.",
+				"check_question": "Does your answer satisfy the original problem statement?",
+			},
+			{
+				"title": "Summarize and generalize",
+				"explanation": "Summarize the pattern used so you can solve similar questions next time.",
+				"check_question": "What pattern from this problem can you reuse in another one?",
+			},
+		]
+
+		selected_steps = template_steps[:desired_steps]
+		for index, item in enumerate(selected_steps):
+			item["step_number"] = index + 1
+
 		return {
 			"problem_summary": question,
-			"steps": [
-				{
-					"step_number": 1,
-					"title": "Understand the problem",
-					"explanation": "Restate what is being asked and identify the known values.",
-					"check_question": "Can you point out what the problem asks you to find?",
-				},
-				{
-					"step_number": 2,
-					"title": "Apply the method",
-					"explanation": "Choose the right rule or formula and apply it carefully to the known values.",
-					"check_question": "Do you see why this rule fits the problem?",
-				},
-				{
-					"step_number": 3,
-					"title": "Verify the result",
-					"explanation": "Check your final answer against the original problem and confirm it makes sense.",
-					"check_question": "Does your answer satisfy the original question?",
-				},
-			],
+			"steps": selected_steps,
 		}
+
+	def _resolve_expected_steps(self, metadata: Optional[Dict[str, Any]]) -> int:
+		if not isinstance(metadata, dict):
+			return DEFAULT_EXPECTED_STEPS
+
+		for key in ("expected_steps", "step_count", "steps_count", "steps"):
+			value = metadata.get(key)
+			if value is None:
+				continue
+			try:
+				parsed = int(value)
+			except Exception:
+				continue
+			return max(MIN_STEPS, min(parsed, MAX_EXPECTED_STEPS))
+
+		return DEFAULT_EXPECTED_STEPS
+
+	def _enforce_expected_step_count(
+		self,
+		steps: List[Dict[str, Any]],
+		*,
+		expected_steps: int,
+		question: str,
+	) -> List[Dict[str, Any]]:
+		desired_steps = max(MIN_STEPS, min(expected_steps, MAX_EXPECTED_STEPS))
+		if not steps:
+			return []
+
+		final_steps = list(steps[:desired_steps])
+		if len(final_steps) < desired_steps:
+			fallback = self._normalize_steps(self._build_default_steps_payload(question, expected_steps=desired_steps))
+			for step in fallback:
+				if len(final_steps) >= desired_steps:
+					break
+				final_steps.append(step)
+
+		for index, step in enumerate(final_steps):
+			step["step_number"] = index + 1
+		return final_steps
 
 	async def _generate_clarification(
 		self,
