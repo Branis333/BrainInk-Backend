@@ -385,14 +385,15 @@ class KanaLearningService:
 				history_lines.append(f"{role}: {content}")
 
 		history_block = "\n".join(history_lines) if history_lines else "(no prior clarification messages)"
-
 		attachments = self._build_image_attachments(image_base64=image_base64, image_mime=image_mime)
-		prompt = (
+
+		base_prompt = (
 			"You are Kana in CLARIFY mode.\n"
 			"Only explain the CURRENT STEP context.\n"
 			"Do NOT advance to the next step.\n"
 			"Be concise, concrete, and student-friendly.\n"
-			"End with one short check-for-understanding question.\n\n"
+			"Write 2-4 complete sentences, then end with exactly one short check-for-understanding question.\n"
+			"Do not output partial sentences.\n\n"
 			f"Original learner problem:\n{question}\n\n"
 			"Current step data:\n"
 			f"- step_number: {step.get('step_number')}\n"
@@ -400,40 +401,77 @@ class KanaLearningService:
 			f"- explanation: {step.get('explanation')}\n"
 			f"- check_question: {step.get('check_question')}\n\n"
 			f"Clarify chat history for this same step:\n{history_block}\n\n"
-			f"Latest learner clarify message:\n{learner_message}\n\n"
-			"Return plain text only."
+			f"Latest learner clarify message:\n{learner_message}\n"
 		)
 
+		# Attempt 1: strict JSON reply
 		try:
 			response = await gemini_service._generate_json_response(
-				(
-					"Return JSON only in shape {\"reply\":\"...\"}.\n"
-					+ prompt
-				),
+				'Return JSON only in shape {"reply":"..."}.\n' + base_prompt,
 				attachments=attachments or None,
 				temperature=0.2,
-				max_output_tokens=700,
+				max_output_tokens=950,
 			)
 			reply = (response or {}).get("reply")
-			if isinstance(reply, str) and reply.strip():
+			if isinstance(reply, str) and self._is_usable_clarification_reply(reply):
 				return reply.strip()
 		except Exception:
 			pass
 
+		# Attempt 2: retry JSON if previous was truncated/invalid
+		try:
+			retry_response = await gemini_service._generate_json_response(
+				(
+					'Your previous answer was invalid or cut off.\n'
+					'Return valid JSON only: {"reply":"..."}.\n'
+					"Reply must be complete and end with one question.\n\n"
+					+ base_prompt
+				),
+				attachments=attachments or None,
+				temperature=0.15,
+				max_output_tokens=1100,
+			)
+			retry_reply = (retry_response or {}).get("reply")
+			if isinstance(retry_reply, str) and self._is_usable_clarification_reply(retry_reply):
+				return retry_reply.strip()
+		except Exception:
+			pass
+
+		# Attempt 3: plain text fallback from model, still quality-checked
 		try:
 			model = gemini_service.config.get_model()
-			if attachments:
-				payload = gemini_service._build_content_payload(prompt, attachments)
-			else:
-				payload = prompt
+			payload = (
+				gemini_service._build_content_payload(base_prompt + "\nReturn plain text only.", attachments)
+				if attachments else base_prompt + "\nReturn plain text only."
+			)
 			raw = await asyncio.to_thread(lambda: model.generate_content(payload))
 			text = gemini_service._collect_candidate_text(raw).strip()
-			if text:
+			if self._is_usable_clarification_reply(text):
 				return text
 		except Exception as exc:  # noqa: BLE001
 			logger.warning("Kana clarification generation failed", extra={"error": str(exc)})
 
 		return "Great question. In this step, focus on the rule being applied and why it matches the values we identified. Which part feels unclear right now?"
+
+	def _is_usable_clarification_reply(self, text: str) -> bool:
+		cleaned = " ".join((text or "").split()).strip()
+		if not cleaned:
+			return False
+
+		# reject likely cut-off/too short responses
+		if len(cleaned) < 90:
+			return False
+		if cleaned[-1] not in ".?!":
+			return False
+		if "?" not in cleaned:
+			return False
+
+		# require at least ~2 sentence endings total
+		sentence_marks = cleaned.count(".") + cleaned.count("?") + cleaned.count("!")
+		if sentence_marks < 2:
+			return False
+
+		return True
 
 	def _normalize_steps(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
 		raw_steps = payload.get("steps") if isinstance(payload, dict) else None
