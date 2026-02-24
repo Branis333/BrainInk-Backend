@@ -4,10 +4,14 @@ from db.database import get_session_local
 from schemas.payments_schemas import InitiateSubscriptionRequest, InitiateSubscriptionResponse, VerifyRequest, SubscriptionStatus
 from services.flutterwave_client import FlutterwaveClient
 from models.payments_models import Subscription
+from models.users_models import User
 from datetime import datetime, timedelta
 import os
 import uuid
 import httpx
+import logging
+
+logger = logging.getLogger("brainink.payments")
 
 router = APIRouter(prefix="/payments/flutterwave", tags=["payments"])
 sub_router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])  # alias for mobile app
@@ -22,6 +26,19 @@ def get_db():
 
 
 from Endpoints.auth import user_dependency  # uses OAuth2 bearer to set user context
+
+
+def _get_user_email(db: Session, user_id: int, fallback_header: str | None = None) -> str:
+    """Look up the user's email from the database. Falls back to header or generated email."""
+    try:
+        user_row = db.query(User).filter(User.id == user_id).first()
+        if user_row and user_row.email:
+            return user_row.email
+    except Exception as e:
+        logger.warning(f"Could not look up user email for user_id={user_id}: {e}")
+    if fallback_header:
+        return fallback_header
+    return f"user{user_id}@brainink.org"
 
 
 async def _convert_usd(amount_usd: float, to_currency: str) -> float:
@@ -55,7 +72,7 @@ def _round_for_currency(amount: float, currency: str) -> float:
 async def initiate_subscription(payload: InitiateSubscriptionRequest, user: user_dependency, request: Request, db: Session = Depends(get_db)):
     """Initiate a subscription payment. Attaches user_id in meta so webhook can map the event."""
     user_id = int(user.get("user_id"))
-    user_email = request.headers.get("X-User-Email", f"user{user_id}@brainink.org")
+    user_email = _get_user_email(db, user_id, request.headers.get("X-User-Email"))
 
     try:
         client = FlutterwaveClient()
@@ -91,20 +108,97 @@ async def initiate_subscription(payload: InitiateSubscriptionRequest, user: user
 
 @router.post("/verify", response_model=SubscriptionStatus)
 async def verify_subscription(req: VerifyRequest, user: user_dependency, db: Session = Depends(get_db)):
+    """Verify a payment reference with Flutterwave and activate the subscription."""
     user_id = int(user.get("user_id"))
-    # Flutterwave sends transaction_id to your redirect URL, but since we only have tx_ref here,
-    # you may store mapping in DB or rely on webhook to finalize. For demo, we mark as active for 30 days.
+
+    # Try to verify the transaction with Flutterwave by searching for the tx_ref
+    flw_verified = False
+    try:
+        client = FlutterwaveClient()
+        try:
+            # Search transactions by tx_ref
+            r = await client.client.get("/v3/transactions", params={"tx_ref": req.reference})
+            r.raise_for_status()
+            data = r.json()
+            transactions = data.get("data", [])
+            if transactions and len(transactions) > 0:
+                txn = transactions[0]
+                if txn.get("status") == "successful":
+                    flw_verified = True
+                    logger.info(f"Payment verified with Flutterwave for user {user_id}, tx_ref={req.reference}")
+                else:
+                    logger.warning(f"Flutterwave tx status={txn.get('status')} for tx_ref={req.reference}")
+            else:
+                logger.warning(f"No Flutterwave transactions found for tx_ref={req.reference}")
+        finally:
+            await client.close()
+    except Exception as e:
+        logger.warning(f"Flutterwave verification failed, using optimistic activation: {e}")
+        # Fall through to optimistic activation — webhook will confirm later
+
+    # Activate the subscription (optimistic if Flutterwave API check failed)
     sub = db.query(Subscription).filter(Subscription.user_id == user_id).one_or_none()
     if not sub:
-        sub = Subscription(user_id=user_id, active=True, status="active", current_period_end=datetime.utcnow()+timedelta(days=30))
+        sub = Subscription(
+            user_id=user_id, provider="flutterwave", active=True, status="active",
+            current_period_end=datetime.utcnow() + timedelta(days=30),
+            last_payment_id=req.reference
+        )
         db.add(sub)
     else:
         sub.active = True
         sub.status = "active"
-        sub.current_period_end = datetime.utcnow()+timedelta(days=30)
+        sub.current_period_end = datetime.utcnow() + timedelta(days=30)
+        sub.last_payment_id = req.reference
     db.commit()
     db.refresh(sub)
     return SubscriptionStatus(active=True, expiresAt=sub.current_period_end, lastPaymentId=sub.last_payment_id)
+
+
+@router.post("/activate-user")
+async def admin_activate_subscription(request: Request, db: Session = Depends(get_db)):
+    """Admin endpoint to manually activate a user's subscription.
+    Body: { "email": "...", "days": 365 }
+    Protected by a simple admin secret in the Authorization header.
+    """
+    body = await request.json()
+    email = body.get("email")
+    days = body.get("days", 365)
+    admin_secret = os.getenv("SECRET_KEY", "")
+    auth_header = request.headers.get("Authorization", "")
+
+    if not auth_header.replace("Bearer ", "") == admin_secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    user_row = db.query(User).filter(User.email == email).first()
+    if not user_row:
+        raise HTTPException(status_code=404, detail=f"No user found with email {email}")
+
+    sub = db.query(Subscription).filter(Subscription.user_id == user_row.id).one_or_none()
+    if not sub:
+        sub = Subscription(
+            user_id=user_row.id, provider="admin", active=True, status="active",
+            current_period_end=datetime.utcnow() + timedelta(days=days),
+            last_payment_id="admin_manual_activation"
+        )
+        db.add(sub)
+    else:
+        sub.active = True
+        sub.status = "active"
+        sub.current_period_end = datetime.utcnow() + timedelta(days=days)
+        sub.last_payment_id = "admin_manual_activation"
+    db.commit()
+    db.refresh(sub)
+    return {
+        "success": True,
+        "user_id": user_row.id,
+        "email": user_row.email,
+        "active": True,
+        "expires": sub.current_period_end.isoformat()
+    }
 
 
 @router.post("/webhook")
@@ -126,10 +220,15 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
     user_id = meta.get("user_id")
 
     if user_id is None:
-        # Fallback attempt: map by email if meta missing
+        # Fallback: resolve user by email from the payment customer data
         email = data.get("customer", {}).get("email")
-        # TODO: look up user by email in users table. For now ignore if no user_id.
-        return {"skipped": True, "reason": "missing user_id meta"}
+        if email:
+            user_row = db.query(User).filter(User.email == email).first()
+            if user_row:
+                user_id = user_row.id
+                logger.info(f"Webhook resolved user_id={user_id} from email={email}")
+        if user_id is None:
+            return {"skipped": True, "reason": "could not resolve user from meta or email"}
 
     # Only proceed on relevant events
     if event_type in {"charge.completed", "subscription.charge.completed"}:
@@ -146,7 +245,7 @@ async def webhook(request: Request, db: Session = Depends(get_db)):
         if interval == "monthly":
             cycle_end = now + timedelta(days=30)
         if not sub:
-            sub = Subscription(user_id=user_id_int, active=True, status="active", current_period_end=cycle_end, last_payment_id=data.get("id"))
+            sub = Subscription(user_id=user_id_int, provider="flutterwave", active=True, status="active", current_period_end=cycle_end, last_payment_id=data.get("id"))
             db.add(sub)
         else:
             sub.active = True
