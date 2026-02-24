@@ -53,20 +53,25 @@ class FlutterwaveClient:
 
     async def create_payment(self, email: str, amount: float, currency: str, plan_id: str, tx_ref: str, meta: Dict[str, Any] | None = None) -> Dict[str, Any]:
         currency = currency.upper()
-        # Include all supported payment methods — Flutterwave's hosted checkout
-        # automatically shows only methods relevant to the customer's country/currency.
-        payment_options = [
-            "card",
-            "banktransfer",
-            "ussd",
-            "mobilemoneyuganda",   # MTN/Airtel MoMo — Uganda
-            "mobilemoneyrwanda",   # MTN MoMo — Rwanda
-            "mobilemoneyghana",    # MTN/Vodafone/AirtelTigo — Ghana
-            "mobilemoneyzambia",   # MoMo — Zambia
-            "mobilemoneyfranco",   # MoMo — Francophone Africa (Cameroon, Ivory Coast, etc.)
-            "mobilemoneytanzania", # M-Pesa — Tanzania
-            "mpesa",               # M-Pesa — Kenya
-        ]
+        # Map MoMo-specific currencies to their payment option — when user picks a
+        # MoMo currency we ONLY show MoMo so they aren't dumped on a card form.
+        momo_map = {
+            "UGX": "mobilemoneyuganda",
+            "KES": "mpesa",
+            "RWF": "mobilemoneyrwanda",
+            "GHS": "mobilemoneyghana",
+            "ZMW": "mobilemoneyzambia",
+            "TZS": "mobilemoneytanzania",
+            "XAF": "mobilemoneyfranco",
+            "XOF": "mobilemoneyfranco",
+        }
+        if currency in momo_map:
+            payment_options = [momo_map[currency]]
+        elif currency == "NGN":
+            payment_options = ["card", "banktransfer", "ussd"]
+        else:
+            # USD and other card-based currencies
+            payment_options = ["card"]
         payload = {
             "tx_ref": tx_ref,
             "amount": amount,
