@@ -53,8 +53,9 @@ class FlutterwaveClient:
 
     async def create_payment(self, email: str, amount: float, currency: str, plan_id: str, tx_ref: str, meta: Dict[str, Any] | None = None) -> Dict[str, Any]:
         currency = currency.upper()
-        # Map MoMo-specific currencies to their payment option — when user picks a
-        # MoMo currency we ONLY show MoMo so they aren't dumped on a card form.
+        # Map MoMo-specific currencies to their payment option.
+        # IMPORTANT: Flutterwave payment_plans (recurring) only work with cards.
+        # For MoMo we must omit the plan and do a one-time charge (30 days access).
         momo_map = {
             "UGX": "mobilemoneyuganda",
             "KES": "mpesa",
@@ -65,24 +66,28 @@ class FlutterwaveClient:
             "XAF": "mobilemoneyfranco",
             "XOF": "mobilemoneyfranco",
         }
-        if currency in momo_map:
+        is_momo = currency in momo_map
+        if is_momo:
             payment_options = [momo_map[currency]]
         elif currency == "NGN":
             payment_options = ["card", "banktransfer", "ussd"]
         else:
-            # USD and other card-based currencies
             payment_options = ["card"]
+
         payload = {
             "tx_ref": tx_ref,
             "amount": amount,
             "currency": currency,
             "redirect_url": FLW_REDIRECT_URL or "https://brainink-backend.onrender.com/payments/flutterwave/callback",
-            "payment_plan": plan_id,
             "customer": {"email": email},
             "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"},
             "meta": meta or {},
             "payment_options": ",".join(payment_options)
         }
+        # Only attach recurring plan for card-based payments; MoMo doesn't support recurring
+        if not is_momo and plan_id:
+            payload["payment_plan"] = plan_id
+
         r = await self.client.post("/v3/payments", json=payload)
         r.raise_for_status()
         return r.json()
