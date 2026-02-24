@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from db.database import get_session_local
 from schemas.payments_schemas import InitiateSubscriptionRequest, InitiateSubscriptionResponse, VerifyRequest, SubscriptionStatus
@@ -305,3 +306,43 @@ async def payments_debug_config(db: Session = Depends(get_db)):
             "alias_status": "/subscriptions/status",
         }
     }
+
+
+@router.get("/callback", response_class=HTMLResponse)
+async def payment_callback(request: Request):
+    """After Flutterwave payment completes, user is redirected here.
+    Shows a simple page telling them to return to the app.
+    Flutterwave appends ?status=successful&tx_ref=...&transaction_id=... to the URL.
+    """
+    status = request.query_params.get("status", "unknown")
+    tx_ref = request.query_params.get("tx_ref", "")
+    success = status == "successful"
+    
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment {'Complete' if success else 'Status'} — Afterskool</title>
+<style>
+  body {{ font-family: -apple-system, system-ui, sans-serif; background: #f9fafb; display: flex;
+         justify-content: center; align-items: center; min-height: 100vh; margin: 0; }}
+  .card {{ background: #fff; border-radius: 16px; padding: 40px 32px; text-align: center;
+           max-width: 400px; box-shadow: 0 4px 24px rgba(0,0,0,0.08); }}
+  .icon {{ font-size: 64px; margin-bottom: 16px; }}
+  h1 {{ font-size: 22px; color: #111; margin-bottom: 8px; }}
+  p {{ color: #555; line-height: 1.5; margin-bottom: 24px; }}
+  .btn {{ display: inline-block; padding: 14px 32px; background: {'#059669' if success else '#6b7280'};
+          color: #fff; border-radius: 10px; text-decoration: none; font-weight: 700; font-size: 16px; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="icon">{'✅' if success else '⏳'}</div>
+  <h1>{'Payment Successful!' if success else 'Payment Processing'}</h1>
+  <p>{'Your subscription is now active. You can close this page and return to the app.'
+      if success else 'Your payment is being processed. Close this page and return to the app — your subscription will activate shortly.'}</p>
+  <a href="#" class="btn" onclick="window.close(); return false;">Return to App</a>
+</div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)

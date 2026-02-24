@@ -67,7 +67,7 @@ class FlutterwaveClient:
             "tx_ref": tx_ref,
             "amount": amount,
             "currency": currency,
-            "redirect_url": FLW_REDIRECT_URL or "https://brainink.org/pay/thanks",  # harmless fallback
+            "redirect_url": FLW_REDIRECT_URL or "https://brainink-backend.onrender.com/payments/flutterwave/callback",
             "payment_plan": plan_id,
             "customer": {"email": email},
             "customizations": {"title": "Afterskool Subscription", "description": "Monthly access"},
