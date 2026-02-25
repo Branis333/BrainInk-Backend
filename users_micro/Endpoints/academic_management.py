@@ -1389,7 +1389,7 @@ async def grade_class_assignments(
                     kana_payload["grading_rubric"] = "Standard academic grading criteria based on correctness, completeness, and presentation quality."
                 
                 # Use environment variable or default K.A.N.A. endpoint
-                kana_base_url = "https://brainink-local.onrender.com"  # Default K.A.N.A. server
+                kana_base_url = (os.getenv("KANA_BASE_URL") or "https://brainink-local.onrender.com").strip().rstrip("/")
                 kana_endpoint = f"{kana_base_url}/api/kana/bulk-grade-pdfs"
                 
                 response = requests.post(

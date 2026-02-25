@@ -53,7 +53,7 @@ class KanaService:
     """
     
     def __init__(self):
-        self.base_url = os.getenv("KANA_BASE_URL", "https://kana-backend-app.onrender.com")
+        self.base_url = (os.getenv("KANA_BASE_URL") or "https://brainink-local.onrender.com").strip().rstrip("/")
         self.timeout = 300  # 5 minutes timeout for AI operations
         
     @staticmethod
