@@ -1,5 +1,9 @@
 import os
 import sys
+from dotenv import load_dotenv
+
+# Load environment variables as early as possible so imported modules see correct values
+load_dotenv()
 
 # Ensure the parent directory is on sys.path so 'users_micro.*' imports work
 _pkg_dir = os.path.dirname(os.path.abspath(__file__))
@@ -28,15 +32,12 @@ from Endpoints.after_school import (
 from Endpoints import payments
 from Endpoints.after_school.notification_scheduler import setup_notification_scheduler
 from db.database import get_engine, test_connection
-from dotenv import load_dotenv
 import logging
 
 # Logger setup
 logger = logging.getLogger("brainink.main")
 logging.basicConfig(level=logging.INFO)
 
-# Load environment variables
-load_dotenv()
 import models.users_models as models
 import models.study_area_models as study_models
 import models.afterschool_models as afterschool_models

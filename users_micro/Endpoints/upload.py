@@ -31,7 +31,7 @@ from schemas.assignments_schemas import (
     AssignmentStudentsResponse, BulkUploadStudentInfo, BulkUploadDeleteResponse
 )
 from Endpoints.auth import get_current_user
-from Endpoints.utils import _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, ensure_user_has_any_role, get_kana_base_url
+from Endpoints.utils import _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, ensure_user_has_any_role
 from Endpoints.kana_service import KanaService
 
 router = APIRouter(tags=["Assignment Image Upload, PDF Management & Bulk Upload"])
@@ -41,7 +41,6 @@ user_dependency = Annotated[dict, Depends(get_current_user)]
 # Configuration
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-KANA_BASE_URL = get_kana_base_url()
 
 # Legacy file path for backward compatibility (deprecated - using database storage now)
 STUDENT_PDFS_DIR = Path("uploads/student_pdfs")

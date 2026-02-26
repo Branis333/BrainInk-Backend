@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Query
 from typing import Annotated, List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 import traceback
 import traceback
+from urllib.parse import urlparse
+import os
 
 from db.connection import db_dependency
 from models.study_area_models import (
@@ -1391,6 +1393,7 @@ async def grade_class_assignments(
                 # Use environment variable or default K.A.N.A. endpoint
                 kana_base_url = get_kana_base_url()
                 kana_endpoint = f"{kana_base_url}/api/kana/bulk-grade-pdfs"
+                print(f"ℹ️ grade-class resolved KANA endpoint: {kana_endpoint}")
                 
                 response = requests.post(
                     kana_endpoint,
@@ -1533,6 +1536,41 @@ async def grade_class_assignments(
         },
         "students_data": grading_data,
         "total_students": len(grading_data)
+    }
+
+
+@router.get("/grades/grade-class/target")
+async def get_grade_class_target(
+    db: db_dependency,
+    current_user: user_dependency,
+    refresh: bool = Query(False, description="Clear cached KANA URL before resolving")
+):
+    """
+    Debug endpoint to show where /grades/grade-class will send K.A.N.A. requests.
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+
+    if refresh and hasattr(get_kana_base_url, "cache_clear"):
+        get_kana_base_url.cache_clear()
+
+    base_url = get_kana_base_url()
+    endpoint = f"{base_url}/api/kana/bulk-grade-pdfs"
+    parsed = urlparse(base_url)
+
+    return {
+        "status": "ok",
+        "source_endpoint": "/study-area/academic/grades/grade-class",
+        "resolved_kana_base_url": base_url,
+        "resolved_bulk_grade_endpoint": endpoint,
+        "host": parsed.hostname,
+        "scheme": parsed.scheme,
+        "uses_https": parsed.scheme == "https",
+        "env_snapshot": {
+            "KANA_BASE_URL": (os.getenv("KANA_BASE_URL") or "").strip().strip('"').strip("'"),
+            "KANA_API_URL": (os.getenv("KANA_API_URL") or "").strip().strip('"').strip("'"),
+            "ALLOW_LOCAL_KANA_URL": (os.getenv("ALLOW_LOCAL_KANA_URL") or "").strip(),
+            "ALLOW_LEGACY_KANA_URL": (os.getenv("ALLOW_LEGACY_KANA_URL") or "").strip()
+        }
     }
 
 # === ACADEMIC STATUS ENDPOINTS ===
