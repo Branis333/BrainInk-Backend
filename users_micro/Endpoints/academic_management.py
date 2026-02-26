@@ -1263,7 +1263,15 @@ async def grade_class_assignments(
                 student_work = {
                     "student_id": student.id,
                     "student_name": student_name,
-                    "pdfs": [{"id": pdf.id, "path": getattr(pdf, 'pdf_path', ''), "filename": getattr(pdf, 'pdf_filename', '')} for pdf in student_pdfs],
+                    "pdfs": [
+                        {
+                            "id": pdf.id,
+                            "path": getattr(pdf, 'pdf_path', ''),
+                            "filename": getattr(pdf, 'pdf_filename', ''),
+                            "data": getattr(pdf, 'pdf_data', None)
+                        }
+                        for pdf in student_pdfs
+                    ],
                     "has_work": True
                 }
                 grading_data.append(student_work)
@@ -1337,19 +1345,31 @@ async def grade_class_assignments(
                 
                 # Process each PDF for this student
                 for pdf_info in pdfs:
+                    pdf_binary_data = pdf_info.get("data")
                     pdf_path = pdf_info.get("path", "")
                     
-                    # Convert PDF file to base64
+                    # Convert PDF data to base64 (DB-first, filesystem fallback)
                     try:
-                        # Construct full path if needed
+                        if pdf_binary_data:
+                            pdf_content = bytes(pdf_binary_data)
+                            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+                            pdf_files.append(pdf_base64)
+                            student_names.append(student_name)
+                            print(f"Encoded PDF from database for {student_name} ({len(pdf_base64)} chars)")
+                            continue
+
+                        if not pdf_path:
+                            print(f"Skipping PDF for {student_name}: no database binary data and no file path")
+                            continue
+
+                        # Legacy fallback: read from file path when DB binary is unavailable
                         if not os.path.isabs(pdf_path):
-                            # Assume PDFs are stored in a relative path from backend
                             pdf_full_path = os.path.join(os.getcwd(), pdf_path)
                         else:
                             pdf_full_path = pdf_path
-                        
-                        print(f"Reading PDF from: {pdf_full_path}")
-                        
+
+                        print(f"Reading legacy PDF from path: {pdf_full_path}")
+
                         with open(pdf_full_path, 'rb') as pdf_file:
                             pdf_content = pdf_file.read()
                             pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')

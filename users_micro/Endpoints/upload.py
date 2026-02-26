@@ -9,6 +9,7 @@ import os
 import shutil
 import uuid
 import asyncio
+import tempfile
 import aiofiles
 import hashlib
 from PIL import Image
@@ -781,10 +782,24 @@ async def auto_grade_assignment(
         try:
             # Get student info
             student = db.query(Student).options(joinedload(Student.user)).filter(Student.id == pdf.student_id).first()
+
+            temp_pdf_path = None
+            pdf_path_for_grading = None
+
+            if pdf.pdf_data:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+                    temp_pdf.write(bytes(pdf.pdf_data))
+                    temp_pdf.flush()
+                    temp_pdf_path = temp_pdf.name
+                pdf_path_for_grading = temp_pdf_path
+            elif pdf.pdf_path:
+                pdf_path_for_grading = pdf.pdf_path
+            else:
+                raise Exception("No PDF binary data or file path available for grading")
             
             # Call KANA AI grading service
             grading_result = await KanaService.grade_assignment_pdf(
-                pdf_path=pdf.pdf_path,
+                pdf_path=pdf_path_for_grading,
                 assignment_title=session.assignment.title,
                 assignment_description=session.assignment.description,
                 rubric=session.assignment.rubric,
@@ -792,6 +807,12 @@ async def auto_grade_assignment(
                 feedback_type=grade_request.feedback_type,
                 student_name=f"{student.user.fname} {student.user.lname}"
             )
+
+            if temp_pdf_path:
+                try:
+                    os.unlink(temp_pdf_path)
+                except Exception:
+                    pass
             
             if grading_result.get("success", False):
                 # Create grade record
@@ -840,6 +861,11 @@ async def auto_grade_assignment(
                 })
                     
         except Exception as e:
+            if 'temp_pdf_path' in locals() and temp_pdf_path:
+                try:
+                    os.unlink(temp_pdf_path)
+                except Exception:
+                    pass
             failed_gradings += 1
             errors.append({
                 "student_id": pdf.student_id,
@@ -942,16 +968,25 @@ async def get_pdf_file(
     # Check access
     if pdf.assignment.teacher_id != teacher.id:
         raise HTTPException(status_code=403, detail="Access denied to this PDF")
-    
-    # Check if file exists
-    if not Path(pdf.pdf_path).exists():
-        raise HTTPException(status_code=404, detail="PDF file not found on disk")
-    
-    return FileResponse(
-        path=pdf.pdf_path,
-        filename=pdf.pdf_filename,
-        media_type="application/pdf"
-    )
+
+    if pdf.pdf_data:
+        return Response(
+            content=bytes(pdf.pdf_data),
+            media_type=pdf.mime_type or "application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={pdf.pdf_filename}",
+                "Content-Length": str(len(pdf.pdf_data))
+            }
+        )
+
+    if pdf.pdf_path and Path(pdf.pdf_path).exists():
+        return FileResponse(
+            path=pdf.pdf_path,
+            filename=pdf.pdf_filename,
+            media_type="application/pdf"
+        )
+
+    raise HTTPException(status_code=404, detail="PDF content not found in database or on disk")
 
 @router.get("/grading-sessions/{session_id}", response_model=GradingSessionResponse)
 async def get_grading_session(
