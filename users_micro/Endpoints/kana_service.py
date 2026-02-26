@@ -8,12 +8,14 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import base64
 from datetime import datetime
+from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException, Depends, status
 from typing import Annotated
 from pydantic import BaseModel
 
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
+from Endpoints.utils import get_kana_base_url
 
 # Create router for KANA service endpoints
 router = APIRouter(tags=["KANA AI Service"])
@@ -47,13 +49,22 @@ class QualityAnalysisRequest(BaseModel):
     pdf_path: str
     assignment_criteria: Dict[str, Any]
 
+
+def _sanitize_base_url(url: str) -> str:
+    parsed = urlparse(url)
+    scheme = parsed.scheme or "https"
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path.rstrip("/") if parsed.path and parsed.path != "/" else ""
+    return f"{scheme}://{host}{port}{path}"
+
 class KanaService:
     """
     Service class to communicate with KANA AI backend for PDF generation and grading
     """
     
     def __init__(self):
-        self.base_url = (os.getenv("KANA_BASE_URL") or "https://brainink-local.onrender.com").strip().rstrip("/")
+        self.base_url = get_kana_base_url()
         self.timeout = 300  # 5 minutes timeout for AI operations
         
     @staticmethod
@@ -686,6 +697,31 @@ async def health_check_endpoint():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Health check failed: {str(e)}"
+        )
+
+
+@router.get("/health/config")
+async def health_config_endpoint():
+    """
+    API endpoint to verify active KANA configuration without calling KANA backend.
+    """
+    try:
+        active_base_url = get_kana_base_url()
+        sanitized_base_url = _sanitize_base_url(active_base_url)
+        parsed = urlparse(sanitized_base_url)
+
+        return {
+            "status": "ok",
+            "service": "kana-config",
+            "active_kana_base_url": sanitized_base_url,
+            "kana_host": parsed.hostname,
+            "kana_scheme": parsed.scheme,
+            "uses_https": parsed.scheme == "https"
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Config health check failed: {str(e)}"
         )
 
 # Example usage and testing functions

@@ -26,7 +26,7 @@ from schemas.direct_join_schemas import SchoolSelectionResponse
 # Import shared utility functions
 from Endpoints.utils import (
     _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, 
-    ensure_user_has_any_role
+    ensure_user_has_any_role, get_kana_base_url
 )
 
 router = APIRouter(tags=["Academic Management", "Subjects", "Assignments"])
@@ -1389,7 +1389,7 @@ async def grade_class_assignments(
                     kana_payload["grading_rubric"] = "Standard academic grading criteria based on correctness, completeness, and presentation quality."
                 
                 # Use environment variable or default K.A.N.A. endpoint
-                kana_base_url = (os.getenv("KANA_BASE_URL") or "https://brainink-local.onrender.com").strip().rstrip("/")
+                kana_base_url = get_kana_base_url()
                 kana_endpoint = f"{kana_base_url}/api/kana/bulk-grade-pdfs"
                 
                 response = requests.post(

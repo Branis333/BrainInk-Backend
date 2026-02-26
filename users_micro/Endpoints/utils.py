@@ -8,6 +8,9 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 import random
 import string
+import os
+from functools import lru_cache
+from urllib.parse import urlparse
 
 from models.users_models import User
 from models.study_area_models import Role, UserRole
@@ -79,3 +82,44 @@ def assign_role_to_user_by_email(db: Session, email: str, role: UserRole) -> boo
     except Exception as e:
         print(f"❌ Error assigning role to {email}: {str(e)}")
         return False
+
+
+@lru_cache(maxsize=1)
+def get_kana_base_url() -> str:
+    default_url = "https://brainink-local.onrender.com"
+    configured_url = (os.getenv("KANA_BASE_URL") or "").strip().strip('"').strip("'")
+    base_url = (configured_url or default_url).rstrip("/")
+
+    allow_legacy = (os.getenv("ALLOW_LEGACY_KANA_URL") or "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    allow_local = (os.getenv("ALLOW_LOCAL_KANA_URL") or "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    legacy_hosts = {
+        "kana-backend-app.onrender.com",
+        "brainink-kana-backend.onrender.com",
+    }
+    local_hosts = {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or parsed.netloc).lower()
+
+    if host in local_hosts and not allow_local:
+        print(
+            f"⚠️ Ignoring local KANA_BASE_URL='{base_url}' and using '{default_url}'. "
+            "Set ALLOW_LOCAL_KANA_URL=true only for local KANA testing."
+        )
+        base_url = default_url
+        parsed = urlparse(base_url)
+        host = (parsed.hostname or parsed.netloc).lower()
+
+    if host in legacy_hosts and not allow_legacy:
+        print(
+            f"⚠️ Ignoring legacy KANA_BASE_URL='{base_url}' and using '{default_url}'. "
+            "Set ALLOW_LEGACY_KANA_URL=true only if this is intentional."
+        )
+        base_url = default_url
+
+    print(f"ℹ️ Active KANA base URL: {base_url}")
+    return base_url

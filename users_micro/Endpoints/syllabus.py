@@ -13,7 +13,7 @@ from schemas.syllabus_schemas import (
     SyllabusWithProgressResponse, TextbookAnalysisRequest, KanaProcessingResponse
 )
 from Endpoints.auth import get_current_user
-from Endpoints.utils import ensure_user_role, ensure_user_has_any_role, _get_user_roles
+from Endpoints.utils import ensure_user_role, ensure_user_has_any_role, _get_user_roles, get_kana_base_url
 from typing import List, Optional, Annotated
 import json
 import os
@@ -29,7 +29,6 @@ user_dependency = Annotated[dict, Depends(get_current_user)]
 
 # Configuration
 UPLOAD_DIR = "uploads/textbooks"
-KANA_BASE_URL = os.getenv("KANA_BASE_URL", "https://kana-backend-app.onrender.com")
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -496,7 +495,7 @@ async def upload_textbook(
                     }
                     
                     response = await client.post(
-                        f"{KANA_BASE_URL}/api/kana/process-syllabus-textbook",
+                        f"{get_kana_base_url()}/api/kana/process-syllabus-textbook",
                         files=files,
                         data=data
                     )
