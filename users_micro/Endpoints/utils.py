@@ -86,7 +86,7 @@ def assign_role_to_user_by_email(db: Session, email: str, role: UserRole) -> boo
 
 @lru_cache(maxsize=1)
 def get_kana_base_url() -> str:
-    default_url = "https://brainink-local.onrender.com"
+    default_url = "https://kana-backend-app.onrender.com"
     configured_url = (os.getenv("KANA_BASE_URL") or "").strip().strip('"').strip("'")
     base_url = (configured_url or default_url).rstrip("/")
 
