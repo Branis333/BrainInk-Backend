@@ -108,6 +108,7 @@ class Classroom(Base):
     school = relationship("School", back_populates="classrooms")
     students = relationship("Student", back_populates="classroom")
     assigned_teacher = relationship("Teacher", back_populates="assigned_classroom")
+    lesson_plans = relationship("LessonPlan", back_populates="classroom", cascade="all, delete-orphan")
 
 # --- Access Code Model ---
 class AccessCodeType(enum.Enum):
@@ -165,6 +166,7 @@ class Teacher(Base):
     assignments = relationship("Assignment", back_populates="teacher", cascade="all, delete-orphan")
     grades_given = relationship("Grade", back_populates="teacher", cascade="all, delete-orphan")
     grading_sessions = relationship("GradingSession", back_populates="teacher", cascade="all, delete-orphan")
+    lesson_plans = relationship("LessonPlan", back_populates="teacher", cascade="all, delete-orphan")
 
 # --- Subject Model ---
 class Subject(Base):
@@ -194,6 +196,7 @@ class Subject(Base):
     students = relationship("Student", secondary=subject_students, back_populates="subjects")
     assignments = relationship("Assignment", back_populates="subject", cascade="all, delete-orphan")
     syllabuses = relationship("Syllabus", back_populates="subject", cascade="all, delete-orphan")
+    lesson_plans = relationship("LessonPlan", back_populates="subject", cascade="all, delete-orphan")
     
     # Ensure subject names are unique per school
     __table_args__ = (
@@ -416,6 +419,38 @@ class GradingSession(Base):
     assignment = relationship("Assignment", back_populates="grading_sessions")
     teacher = relationship("Teacher", back_populates="grading_sessions")
     subject = relationship("Subject", back_populates="grading_sessions")
+
+
+class LessonPlan(Base):
+    __tablename__ = "lesson_plans"
+
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("teachers.id"), nullable=False, index=True)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=False, index=True)
+    subject_id = Column(Integer, ForeignKey("subjects.id"), nullable=False, index=True)
+
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=False)
+    duration_minutes = Column(Integer, nullable=False, default=45)
+    learning_objectives = Column(Text, nullable=True)  # JSON-encoded array
+    activities = Column(Text, nullable=True)  # JSON-encoded array
+    materials_needed = Column(Text, nullable=True)  # JSON-encoded array
+    assessment_strategy = Column(Text, nullable=True)
+    homework = Column(Text, nullable=True)
+    references = Column(Text, nullable=True)  # JSON-encoded array of links/resources
+
+    source_filename = Column(String, nullable=True)
+    source_mime_type = Column(String, nullable=True)
+    source_summary = Column(Text, nullable=True)
+
+    generated_by_ai = Column(Boolean, default=False)
+    created_date = Column(DateTime, default=datetime.utcnow)
+    updated_date = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    is_active = Column(Boolean, default=True)
+
+    teacher = relationship("Teacher", back_populates="lesson_plans")
+    classroom = relationship("Classroom", back_populates="lesson_plans")
+    subject = relationship("Subject", back_populates="lesson_plans")
 
 # --- Calendar Models ---
 

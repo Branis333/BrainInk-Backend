@@ -13,7 +13,7 @@ if _parent_dir not in sys.path:
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar
+from Endpoints import auth, school_management, academic_management, grades, school_invitations, class_room, modules, syllabus, upload, kana_service, reports, calendar, lesson
 from Endpoints.after_school import (
     course,
     grades as after_school_grades,
@@ -96,7 +96,7 @@ async def startup_event():
     except Exception as e:
         print(f"⚠️ Database not available at startup: {e}")
     # Log routers (no DB dependency)
-    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router, after_school_assignments.router, after_school_transcribe.router])
+    total_endpoints = sum(len(r.routes) for r in [auth.router, school_management.router, academic_management.router, grades.router, school_invitations.router, class_room.router, modules.router, syllabus.router, upload.router, kana_service.router, reports.router, calendar.router, lesson.router, course.router, after_school_grades.router, after_school_uploads.router, reading_assistant.router, after_school_assignments.router, after_school_transcribe.router])
     print(f"🔄 Total endpoints loaded: {total_endpoints}")
     
     # Setup notification scheduler
@@ -131,6 +131,7 @@ app.include_router(class_room.router, prefix="/study-area")
 app.include_router(modules.router, prefix="/study-area/modules/quizzes")
 app.include_router(syllabus.router, prefix="/study-area")
 app.include_router(upload.router, prefix="/study-area")
+app.include_router(lesson.router, prefix="/study-area")
 app.include_router(kana_service.router, prefix="/kana")
 app.include_router(reports.router, prefix="/study-area/reports")
 app.include_router(calendar.router, prefix="/study-area/calendar")
