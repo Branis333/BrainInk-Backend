@@ -26,6 +26,7 @@ COPY models/ ./models/
 COPY schemas/ ./schemas/
 COPY functions/ ./functions/
 COPY services/ ./services/
+COPY tools/ ./tools/
 
 # Create ALL upload directories that code tries to create
 RUN mkdir -p uploads/after_school \
