@@ -30,10 +30,10 @@ COPY tools/ ./tools/
 
 # Create ALL upload directories that code tries to create
 RUN mkdir -p uploads/after_school \
-             uploads/textbooks \
-             uploads/student_pdfs \
-             uploads/student_images \
-             uploads/bulk_pdfs
+    uploads/textbooks \
+    uploads/student_pdfs \
+    uploads/student_images \
+    uploads/bulk_pdfs
 
 CMD exec uvicorn --port=$PORT main:app
 

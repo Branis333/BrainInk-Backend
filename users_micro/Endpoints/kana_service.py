@@ -586,7 +586,9 @@ async def generate_pdf_endpoint(
     API endpoint to generate PDF from images
     """
     try:
-        output_path = f"uploads/pdfs/{request.output_filename}"
+        output_dir = Path("/tmp/uploads/pdfs")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_path = str(output_dir / request.output_filename)
         result = await KanaService.generate_assignment_pdf(
             image_paths=request.image_paths,
             student_name=request.student_name,

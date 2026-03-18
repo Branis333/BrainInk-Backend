@@ -50,7 +50,7 @@ ULTRA_FALLBACK_MAX_DIMENSION = 800
 ULTRA_FALLBACK_JPEG_QUALITY = 28
 
 # Legacy file path for backward compatibility (deprecated - using database storage now)
-STUDENT_PDFS_DIR = Path("uploads/student_pdfs")
+STUDENT_PDFS_DIR = Path("/tmp/uploads/student_pdfs")
 STUDENT_PDFS_DIR.mkdir(parents=True, exist_ok=True)
 
 print("📊 Using Database PDF Storage - No file system dependencies!")
@@ -1236,7 +1236,7 @@ async def bulk_upload_images_to_pdf_assignment(
                 existing_pdf.generated_date = datetime.utcnow()
                 # Backward compatibility path (store a synthetic path reference)
                 if hasattr(existing_pdf, 'pdf_path'):
-                    existing_pdf.pdf_path = f"uploads/student_pdfs/{pdf_filename}"
+                    existing_pdf.pdf_path = f"/tmp/uploads/student_pdfs/{pdf_filename}"
                 db.commit()
                 db.refresh(existing_pdf)
                 student_pdf = existing_pdf
@@ -1253,7 +1253,7 @@ async def bulk_upload_images_to_pdf_assignment(
                     mime_type="application/pdf"
                 )
                 if hasattr(student_pdf, 'pdf_path'):
-                    setattr(student_pdf, 'pdf_path', f"uploads/student_pdfs/{pdf_filename}")
+                    setattr(student_pdf, 'pdf_path', f"/tmp/uploads/student_pdfs/{pdf_filename}")
                 # NOTE: If legacy path-based mode is required and model supports pdf_path, you would set it here.
                 db.add(student_pdf)
                 db.commit()

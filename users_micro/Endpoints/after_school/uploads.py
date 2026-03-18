@@ -36,7 +36,7 @@ user_dependency = Depends(get_current_user)
 # Configuration
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".pdf", ".txt", ".doc", ".docx"}
-UPLOAD_DIR = Path("uploads/after_school")
+UPLOAD_DIR = Path("/tmp/uploads/after_school")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # ===============================
