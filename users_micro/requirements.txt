@@ -21,13 +21,14 @@ python-dotenv==1.0.0
 requests==2.31.0
 httpx==0.25.2
 aiofiles==23.2.1
-
+boto3
 # Cryptography & Auth
 pycryptodome==3.19.0
 google-auth==2.25.2
 
 # AI Integration
 google-generativeai>=0.3.0
+boto3>=1.34.0
 google-cloud-texttospeech==2.14.1
 azure-cognitiveservices-speech>=1.37.0
 

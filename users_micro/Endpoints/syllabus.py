@@ -14,6 +14,7 @@ from schemas.syllabus_schemas import (
 )
 from Endpoints.auth import get_current_user
 from Endpoints.utils import ensure_user_role, ensure_user_has_any_role, _get_user_roles, get_kana_base_url
+from services.nova_services.syllabus_services import nova_syllabus_service
 from typing import List, Optional, Annotated
 import json
 import os
@@ -418,152 +419,110 @@ async def upload_textbook(
     db: db_dependency,
     textbook: UploadFile = File(...)
 ):
-    """Upload textbook and trigger K.A.N.A. AI processing"""
+    """Upload textbook and trigger local Nova AI syllabus processing."""
     permissions = get_user_permissions(current_user, db)
-    
+
     if not permissions["can_create_syllabus"]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only principals and teachers can upload textbooks"
         )
-    
-    # Get syllabus
+
     syllabus = db.query(Syllabus).join(Subject).filter(
         Syllabus.id == syllabus_id,
         Subject.school_id == permissions["school_id"],
         Syllabus.is_active == True
     ).first()
-    
+
     if not syllabus:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Syllabus not found or access denied"
         )
-    
-    # Check if user can edit this syllabus
+
     can_edit = (
         permissions["can_edit_any_syllabus"] or
         syllabus.created_by == current_user["user_id"]
     )
-    
     if not can_edit:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You can only upload textbooks to syllabuses you created"
         )
-    
-    # Validate file type
-    if not textbook.filename.lower().endswith('.pdf'):
+
+    if not textbook.filename or not textbook.filename.lower().endswith('.pdf'):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Only PDF files are supported"
         )
-    
-    # Save file
+
     file_id = str(uuid.uuid4())
     filename = f"{file_id}_{textbook.filename}"
     file_path = os.path.join(UPLOAD_DIR, filename)
-    
+
     try:
         async with aiofiles.open(file_path, 'wb') as f:
             content = await textbook.read()
             await f.write(content)
-        
-        # Update syllabus with file info and auto-activate
+
         syllabus.textbook_filename = textbook.filename
         syllabus.textbook_path = file_path
         syllabus.ai_processing_status = "processing"
-        
-        # Auto-activate syllabus when textbook is successfully uploaded
         if syllabus.status == SyllabusStatus.draft:
             syllabus.status = SyllabusStatus.active
-            print(f"📚 Syllabus {syllabus_id} auto-activated after textbook upload")
-        
         syllabus.updated_date = datetime.utcnow()
-        
         db.commit()
-        
-        # Call K.A.N.A. AI service
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                with open(file_path, 'rb') as pdf_file:
-                    files = {'textbook': (textbook.filename, pdf_file, 'application/pdf')}
-                    data = {
-                        'syllabus_id': syllabus_id,
-                        'term_length_weeks': syllabus.term_length_weeks,
-                        'subject_name': syllabus.subject.name
-                    }
-                    
-                    response = await client.post(
-                        f"{get_kana_base_url()}/api/kana/process-syllabus-textbook",
-                        files=files,
-                        data=data
-                    )
-                    
-                    if response.status_code == 200:
-                        result = response.json()
-                        
-                        # Update syllabus with processing results
-                        syllabus.ai_processing_status = "completed"
-                        syllabus.ai_analysis_data = json.dumps(result.get('analysis_data', {}))
-                        
-                        # Auto-activate syllabus when textbook is successfully uploaded and processed
-                        if syllabus.status == SyllabusStatus.draft:
-                            syllabus.status = SyllabusStatus.active
-                            print(f"📚 Syllabus {syllabus_id} auto-activated after textbook upload")
-                        
-                        # Create weekly plans if provided
-                        if result.get('weekly_plans'):
-                            for plan_data in result['weekly_plans']:
-                                weekly_plan = WeeklyPlan(
-                                    syllabus_id=syllabus_id,
-                                    week_number=plan_data['week_number'],
-                                    title=plan_data['title'],
-                                    description=plan_data['description'],
-                                    learning_objectives=json.dumps(plan_data.get('learning_objectives', [])),
-                                    topics_covered=json.dumps(plan_data.get('topics_covered', [])),
-                                    textbook_chapters=plan_data.get('textbook_chapters'),
-                                    textbook_pages=plan_data.get('textbook_pages'),
-                                    assignments=json.dumps(plan_data.get('assignments', [])),
-                                    resources=json.dumps(plan_data.get('resources', []))
-                                )
-                                db.add(weekly_plan)
-                        
-                        db.commit()
-                        
-                        return KanaProcessingResponse(
-                            success=True,
-                            message="Textbook processed successfully",
-                            processing_id=file_id,
-                            weekly_plans=result.get('weekly_plans')
-                        )
-                    else:
-                        raise HTTPException(
-                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"K.A.N.A. processing failed: {response.text}"
-                        )
-        
-        except httpx.RequestError as e:
-            syllabus.ai_processing_status = "failed"
-            
-            # Auto-activate syllabus even if K.A.N.A. processing fails (fallback)
-            if syllabus.status == SyllabusStatus.draft:
-                syllabus.status = SyllabusStatus.active
-                print(f"📚 Syllabus {syllabus_id} auto-activated after textbook upload (K.A.N.A. failed)")
-            
-            db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to connect to K.A.N.A. service: {str(e)}"
+
+        result = await nova_syllabus_service.process_textbook(
+            file_path=file_path,
+            term_length_weeks=syllabus.term_length_weeks,
+            subject_name=syllabus.subject.name,
+            additional_preferences=None,
+        )
+
+        syllabus.ai_processing_status = "completed"
+        syllabus.ai_analysis_data = json.dumps(result.get('analysis_data', {}))
+
+        existing_plans = db.query(WeeklyPlan).filter(
+            WeeklyPlan.syllabus_id == syllabus_id,
+            WeeklyPlan.is_active == True
+        ).all()
+        for plan in existing_plans:
+            db.delete(plan)
+
+        for plan_data in result.get('weekly_plans', []):
+            db.add(
+                WeeklyPlan(
+                    syllabus_id=syllabus_id,
+                    week_number=plan_data['week_number'],
+                    title=plan_data['title'],
+                    description=plan_data['description'],
+                    learning_objectives=json.dumps(plan_data.get('learning_objectives', [])),
+                    topics_covered=json.dumps(plan_data.get('topics_covered', [])),
+                    textbook_chapters=plan_data.get('textbook_chapters'),
+                    textbook_pages=plan_data.get('textbook_pages'),
+                    assignments=json.dumps(plan_data.get('assignments', [])),
+                    resources=json.dumps(plan_data.get('resources', []))
+                )
             )
-    
+
+        db.commit()
+
+        return KanaProcessingResponse(
+            success=True,
+            message="Textbook processed successfully",
+            processing_id=file_id,
+            weekly_plans=result.get('weekly_plans')
+        )
+
     except Exception as e:
-        # Clean up file on error
+        syllabus.ai_processing_status = "failed"
+        db.commit()
         if os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"File upload failed: {str(e)}"
+            detail=f"Nova syllabus processing failed: {str(e)}"
         )
 
 # --- WEEKLY PLANS ENDPOINTS ---

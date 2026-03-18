@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
 from models.study_area_models import LessonPlan, Teacher, Subject, Classroom
-from services.gemini_service import gemini_service
+from services.nova_services.lessonplan_services import nova_lessonplan_service
 
 
 def _as_json_list(value: Optional[List[Any]]) -> str:
@@ -297,43 +297,18 @@ async def generate_and_create_lesson_plan(
 	extracted_context = ""
 	source_summary = None
 	if file_bytes and file_name:
-		extracted_context = await gemini_service.process_uploaded_textbook_file(file_bytes, file_name)
+		extracted_context = nova_lessonplan_service.extract_pdf_text_from_bytes(file_bytes)
 		source_summary = extracted_context[:4000]
 
 	objectives_hint = _clean_string_list(learning_objectives)
-	objectives_prompt = "\n".join([f"- {item}" for item in objectives_hint]) if objectives_hint else "- Not provided"
-
-	prompt = f"""
-You are generating a practical classroom lesson plan for a teacher.
-
-Return ONLY valid JSON with keys exactly:
-title, description, duration_minutes, learning_objectives, activities, materials_needed, assessment_strategy, homework
-
-Constraints:
-- title: string (max 200 chars)
-- description: string (2-6 short paragraphs)
-- duration_minutes: integer
-- learning_objectives: array of concise strings (4-8)
-- activities: array of concise, ordered steps (5-12)
-- materials_needed: array of concise strings
-- assessment_strategy: string
-- homework: string
-
-Context:
-- Subject: {subject.name}
-- Classroom: {classroom.name}
-- Teacher requested title: {title}
-- Teacher requested duration: {duration_minutes}
-- Teacher description: {description}
-- Teacher learning objectives:\n{objectives_prompt}
-
-Optional uploaded source context:\n{extracted_context[:12000] if extracted_context else "No uploaded source file."}
-""".strip()
-
-	ai_payload = await gemini_service._generate_json_response(
-		prompt,
-		temperature=0.25,
-		max_output_tokens=2200,
+	ai_payload = await nova_lessonplan_service.generate_lesson_plan(
+		subject_name=subject.name,
+		classroom_name=classroom.name,
+		title=title,
+		description=description,
+		duration_minutes=duration_minutes,
+		learning_objectives_hint=objectives_hint,
+		source_context=extracted_context,
 	)
 
 	generated_title = str(ai_payload.get("title") or title).strip()[:200]
@@ -344,33 +319,7 @@ Optional uploaded source context:\n{extracted_context[:12000] if extracted_conte
 	generated_materials = _clean_string_list(ai_payload.get("materials_needed") or [])
 	generated_assessment = str(ai_payload.get("assessment_strategy") or "").strip() or None
 	generated_homework = str(ai_payload.get("homework") or "").strip() or None
-
-	lesson_topic = f"{subject.name} {generated_title}".strip()
-	youtube_links = await gemini_service.generate_youtube_links(lesson_topic, count=3)
-	article_links = await gemini_service.generate_article_links(lesson_topic, subject.name, count=3)
-
 	references: List[Dict[str, Any]] = []
-	for item in youtube_links:
-		url = (item or {}).get("url")
-		title_value = (item or {}).get("title") or "YouTube Lesson Reference"
-		if url:
-			references.append({
-				"title": str(title_value)[:300],
-				"url": str(url)[:1000],
-				"source_type": "youtube",
-				"note": "Suggested instructional video"
-			})
-
-	for item in article_links:
-		url = (item or {}).get("url")
-		title_value = (item or {}).get("title") or "Article Reference"
-		if url:
-			references.append({
-				"title": str(title_value)[:300],
-				"url": str(url)[:1000],
-				"source_type": "article",
-				"note": "Suggested reading material"
-			})
 
 	return create_lesson_plan(
 		db,

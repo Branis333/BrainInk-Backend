@@ -14,6 +14,7 @@ import requests
 from datetime import datetime, timezone
 from pydantic import BaseModel
 import uuid
+from services.nova_services.generate_assignment_service import nova_quiz_service
 
 # Create router for quiz endpoints
 router = APIRouter(tags=["Generated Quizzes"])
@@ -332,106 +333,18 @@ async def generate_quiz_with_kana_v2(request: QuizGenerationRequest):
         )
 
 async def call_kana_service_direct(request: QuizGenerationRequest, difficulty: str, student_level: str, weakness_areas_text: str) -> Dict:
-    """Call Kana AI QuizService directly with structured request, with retry/backoff on rate limits."""
-    kana_urls = [
-        "https://kana-backend-app.onrender.com",
-        "http://localhost:10000",
-    ]
-    
-    # Exponential backoff parameters
-    max_retries = 3
-    base_delay = 1.5  # seconds
-
-    for base_url in kana_urls:
-        try:
-            print(f"🔗 Trying QuizService at: {base_url}")
-            
-            # Use the improvement quiz endpoint (most appropriate for this use case)
-            improvement_url = f"{base_url}/api/kana/generate-improvement-quiz"
-            
-            payload = {
-                "assignment_id": request.assignment_id,
-                "student_id": request.student_id,
-                "feedback": request.feedback,
-                "weakness_areas": request.weakness_areas,
-                "subject": request.subject,
-                "grade": student_level,
-                "numQuestions": 5,
-                "context": f"Student grade: {request.grade}, Difficulty: {difficulty}"
-            }
-            
-            # Retry improvement endpoint on 429/503
-            for attempt in range(max_retries):
-                response = requests.post(
-                    improvement_url,
-                    json=payload,
-                    timeout=30,
-                    headers={"Content-Type": "application/json"}
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    print(f"✅ Successfully got quiz from improvement endpoint")
-                    return data
-                if response.status_code in (429, 503):
-                    retry_after = response.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after else (base_delay * (2 ** attempt))
-                    print(f"⏳ Rate limited (status {response.status_code}). Retrying in {delay:.1f}s...")
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(delay)
-                    continue
-                # Non-retryable
-                print(f"⚠️ Improvement endpoint returned status {response.status_code}: {response.text}")
-                break
-            
-            # Fallback to description-based generation
-            description_url = f"{base_url}/api/kana/generate-quiz-by-description"
-            
-            description = f"Generate an improvement quiz based on feedback: '{request.feedback}'. Focus on {weakness_areas_text} in {request.subject}."
-            
-            payload = {
-                "description": description,
-                "numQuestions": 5,
-                "difficulty": difficulty,
-                "subject": request.subject,
-                "studentLevel": student_level,
-                "weaknessAreas": request.weakness_areas,
-                "context": f"Assignment feedback: {request.feedback}"
-            }
-            
-            # Retry description endpoint on 429/503
-            for attempt in range(max_retries):
-                response = requests.post(
-                    description_url,
-                    json=payload,
-                    timeout=30,
-                    headers={"Content-Type": "application/json"}
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    if data.get("quiz"):
-                        print(f"✅ Successfully got quiz from description endpoint")
-                        return data["quiz"]
-                if response.status_code in (429, 503):
-                    retry_after = response.headers.get("Retry-After")
-                    delay = float(retry_after) if retry_after else (base_delay * (2 ** attempt))
-                    print(f"⏳ Rate limited (status {response.status_code}) on description. Retrying in {delay:.1f}s...")
-                    import asyncio as _asyncio
-                    await _asyncio.sleep(delay)
-                    continue
-                print(f"⚠️ Description endpoint returned status {response.status_code}: {response.text}")
-                break
-                
-        except requests.exceptions.ConnectionError:
-            print(f"❌ Connection failed to {base_url}")
-            continue
-        except requests.exceptions.Timeout:
-            print(f"⏰ Timeout connecting to {base_url}")
-            continue
-        except Exception as e:
-            print(f"❌ Error with {base_url}: {e}")
-            continue
-    
-    raise Exception("All QuizService endpoints are unavailable")
+    """Generate quiz locally via Nova service (legacy name kept for compatibility)."""
+    description = f"Generate an improvement quiz based on feedback: '{request.feedback}'. Focus on {weakness_areas_text} in {request.subject}."
+    quiz = await nova_quiz_service.generate_quiz(
+        description=description,
+        num_questions=5,
+        difficulty=difficulty,
+        subject=request.subject,
+        student_level=student_level,
+        weakness_areas=request.weakness_areas,
+        context=f"Assignment feedback: {request.feedback}",
+    )
+    return quiz
 
 @router.post("/generate-with-kana")
 async def generate_quiz_with_kana(request: QuizGenerationRequest):
