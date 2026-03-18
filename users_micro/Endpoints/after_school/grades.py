@@ -1,12 +1,11 @@
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, Body
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, or_, desc, func, inspect, text
 from typing import List, Optional
 from datetime import datetime, timedelta
-import json
 import os
-import base64
-import requests
+import logging
+from pathlib import Path
 
 from db.connection import db_dependency
 from Endpoints.auth import get_current_user
@@ -15,11 +14,13 @@ from models.afterschool_models import (
     StudySession, AISubmission, StudentProgress
 )
 from schemas.afterschool_schema import (
-    StudySessionStart, StudySessionEnd, StudySessionOut,
+    StudySessionStart, StudySessionEnd, StudySessionOut, StudySessionMarkDone,
     AISubmissionUpdate, AIGradingResponse, StudentProgressOut, MessageResponse,
     CourseBlockOut, CourseAssignmentOut, StudentAssignmentOut
 )
 from services.gemini_service import gemini_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/after-school/sessions", tags=["After-School Sessions & KANA Grading"])
 
@@ -30,45 +31,47 @@ user_dependency = Depends(get_current_user)
 # STUDY SESSION MANAGEMENT
 # ===============================
 
-@router.post("/start", response_model=StudySessionOut)
-async def start_study_session(
-    session_data: StudySessionStart,
+@router.post("/mark-done", response_model=StudySessionOut)
+async def mark_block_done(
+    session_data: StudySessionMarkDone,
     db: db_dependency,
     current_user: dict = user_dependency
 ):
     """
-    Start a new study session for a lesson or course block
+    Mark a block or lesson as completed - simple and user-friendly
     
-    This enhanced endpoint supports both traditional lessons and AI-generated course blocks:
-    - Legacy lesson-based sessions for backward compatibility
-    - Modern block-based sessions for Gemini AI-generated courses
-    - Automatic progress tracking for both formats
+    This simplified endpoint allows users to mark content as done:
+    - No time tracking complexity
+    - Simple mark done functionality
+    - Automatic progress tracking
+    - Sequential completion enforcement (previous blocks must be done first)
     """
     user_id = current_user["user_id"]
     
-    # Diagnostic logging container
-    debug_context = {
-        "user_id": current_user.get("user_id"),
-        "course_id": session_data.course_id,
-        "lesson_id": session_data.lesson_id,
-        "block_id": session_data.block_id,
-        "stage": "init"
-    }
     try:
-        debug_context["stage"] = "course_lookup"
+        # Verify course exists
         course = db.query(Course).filter(Course.id == session_data.course_id).first()
         if not course:
-            debug_context["error"] = "course_not_found"
-            print("❌ StudySession start - course not found", debug_context)
             raise HTTPException(status_code=404, detail="Course not found")
 
+        # CRITICAL: Check user is enrolled in the course before allowing progress marking
+        # User must have at least one StudentAssignment in this course to mark content as done
+        user_enrollment = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == session_data.course_id
+        ).first()
+        
+        if not user_enrollment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course. Please enroll before accessing course content."
+            )
+
+        # Determine if working with lesson or block
         lesson = None
         block = None
-        session_target_type = None
-        active_session = None
-
+        
         if session_data.lesson_id:
-            debug_context["stage"] = "lesson_lookup"
             lesson = db.query(CourseLesson).filter(
                 and_(
                     CourseLesson.id == session_data.lesson_id,
@@ -77,19 +80,9 @@ async def start_study_session(
                 )
             ).first()
             if not lesson:
-                debug_context["error"] = "lesson_not_found"
-                print("❌ StudySession start - lesson not found", debug_context)
                 raise HTTPException(status_code=404, detail="Lesson not found or inactive")
-            session_target_type = "lesson"
-            active_session = db.query(StudySession).filter(
-                and_(
-                    StudySession.user_id == user_id,
-                    StudySession.lesson_id == session_data.lesson_id,
-                    StudySession.status == "in_progress"
-                )
-            ).first()
+                
         elif session_data.block_id:
-            debug_context["stage"] = "block_lookup"
             block = db.query(CourseBlock).filter(
                 and_(
                     CourseBlock.id == session_data.block_id,
@@ -98,127 +91,118 @@ async def start_study_session(
                 )
             ).first()
             if not block:
-                debug_context["error"] = "block_not_found"
-                print("❌ StudySession start - block not found", debug_context)
                 raise HTTPException(status_code=404, detail="Course block not found or inactive")
-            session_target_type = "block"
-            active_session = db.query(StudySession).filter(
-                and_(
-                    StudySession.user_id == user_id,
-                    StudySession.block_id == session_data.block_id,
-                    StudySession.status == "in_progress"
-                )
-            ).first()
+                
+            # Check if this is the very first block in the course (always accessible)
+            is_first_block = block.week == 1 and block.block_number == 1
+            
+            if not is_first_block:
+                # For any block that is NOT the very first one, check prerequisites
+                previous_completed = True
+                
+                if block.block_number > 1:
+                    # Check previous block in same week
+                    prev_block = db.query(CourseBlock).filter(
+                        and_(
+                            CourseBlock.course_id == session_data.course_id,
+                            CourseBlock.week == block.week,
+                            CourseBlock.block_number == block.block_number - 1,
+                            CourseBlock.is_active == True
+                        )
+                    ).first()
+                    if prev_block:
+                        prev_session = db.query(StudySession).filter(
+                            and_(
+                                StudySession.user_id == user_id,
+                                StudySession.block_id == prev_block.id,
+                                StudySession.status == "completed"
+                            )
+                        ).first()
+                        if not prev_session:
+                            previous_completed = False
+                            
+                elif block.week > 1:
+                    # Check last block of previous week
+                    prev_week_blocks = db.query(CourseBlock).filter(
+                        and_(
+                            CourseBlock.course_id == session_data.course_id,
+                            CourseBlock.week == block.week - 1,
+                            CourseBlock.is_active == True
+                        )
+                    ).order_by(CourseBlock.block_number.desc()).first()
+                    
+                    if prev_week_blocks:
+                        prev_session = db.query(StudySession).filter(
+                            and_(
+                                StudySession.user_id == user_id,
+                                StudySession.block_id == prev_week_blocks.id,
+                                StudySession.status == "completed"
+                            )
+                        ).first()
+                        if not prev_session:
+                            previous_completed = False
+                
+                if not previous_completed:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="You must complete the previous blocks first before accessing this one"
+                    )
         else:
-            debug_context["error"] = "missing_target"
-            print("❌ StudySession start - neither lesson_id nor block_id provided", debug_context)
             raise HTTPException(status_code=400, detail="Either lesson_id or block_id must be provided")
 
-        if active_session:
-            target_name = lesson.title if lesson else (block.title if block else "Unknown")
-            debug_context["stage"] = "active_session_exists_return"
-            print("↩️ Returning existing active session instead of error", debug_context)
-            return active_session
+        # Check if already completed
+        existing_session = db.query(StudySession).filter(
+            and_(
+                StudySession.user_id == user_id,
+                or_(
+                    and_(StudySession.lesson_id == session_data.lesson_id) if session_data.lesson_id else False,
+                    and_(StudySession.block_id == session_data.block_id) if session_data.block_id else False
+                ),
+                StudySession.status == "completed"
+            )
+        ).first()
+        
+        if existing_session:
+            return existing_session  # Already completed
 
-        # ---------------------------------------------
-        # Runtime schema self-healing for block sessions
-        # ---------------------------------------------
-        if session_target_type == "block" and session_data.block_id and not session_data.lesson_id:
-            try:
-                debug_context["stage"] = "schema_inspect"
-                insp = inspect(db.bind)
-                cols = {c['name']: c for c in insp.get_columns('as_study_sessions')}
-                changed = False
-                # Add block_id column if missing
-                if 'block_id' not in cols:
-                    print("🔧 Adding missing block_id column to as_study_sessions (runtime migration)")
-                    db.execute(text('ALTER TABLE as_study_sessions ADD COLUMN block_id INTEGER REFERENCES as_course_blocks(id)'))
-                    changed = True
-                # Drop NOT NULL from lesson_id if still enforced
-                if 'lesson_id' in cols and not cols['lesson_id'].get('nullable', True):
-                    print("🔧 Dropping NOT NULL constraint on lesson_id to allow block-based sessions")
-                    db.execute(text('ALTER TABLE as_study_sessions ALTER COLUMN lesson_id DROP NOT NULL'))
-                    changed = True
-                if changed:
-                    db.commit()  # finalize DDL
-                    debug_context["schema_auto_migrated"] = True
-                    # New transaction will begin automatically on next use
-                else:
-                    debug_context["schema_auto_migrated"] = False
-            except Exception as mig_err:
-                # Non-fatal: we surface a clearer error so user can run manual migration
-                debug_context["stage"] = "schema_migration_failed"
-                debug_context["schema_error"] = str(mig_err)[:400]
-                print("❌ Runtime schema migration failed", debug_context)
-                raise HTTPException(status_code=500, detail={
-                    "message": "Study session start failed: database schema incompatible (block sessions require nullable lesson_id & block_id column)",
-                    "code": "schema_incompatible",
-                    "schema_error": str(mig_err)[:400]
-                })
-
-        debug_context["stage"] = "create_session"
-        new_session = StudySession(
+        # Create completed session - simple mark done
+        completed_session = StudySession(
             user_id=user_id,
             course_id=session_data.course_id,
             lesson_id=session_data.lesson_id,
             block_id=session_data.block_id,
-            status="in_progress"
+            status="completed",
+            completion_percentage=100.0,
+            started_at=datetime.utcnow(),
+            ended_at=datetime.utcnow(),
+            marked_done_at=datetime.utcnow()
         )
-        db.add(new_session)
-        # Flush separately so we can surface raw integrity errors (e.g., FK / unique constraint)
-        try:
-            db.flush()  # obtain PK before progress update
-        except Exception as flush_err:
-            from sqlalchemy.exc import IntegrityError
-            debug_context["stage"] = "create_session_flush_error"
-            debug_context["flush_error_type"] = type(flush_err).__name__
-            debug_context["flush_error_message"] = str(flush_err)[:500]
-            if isinstance(flush_err, IntegrityError):
-                # Attempt to capture underlying DB error / constraint name
-                orig = getattr(flush_err, 'orig', None)
-                if orig:
-                    debug_context["flush_error_orig"] = str(orig)[:500]
-            print("❌ StudySession flush failure", debug_context)
-            # Re-raise so outer handler classifies
-            raise
+        db.add(completed_session)
+        db.flush()  # Get session ID
 
-        debug_context["stage"] = "progress_lookup"
-        # Attempt row-level lock; fallback gracefully if unsupported (e.g., SQLite)
-        progress = None
-        try:
-            progress = db.query(StudentProgress).filter(
-                and_(
-                    StudentProgress.user_id == user_id,
-                    StudentProgress.course_id == session_data.course_id
-                )
-            ).with_for_update(nowait=False).first()
-            debug_context["progress_lock"] = "acquired"
-        except Exception as lock_err:  # Broad: dialect differences
-            db.rollback()  # rollback possible partial state from failed FOR UPDATE
-            debug_context["progress_lock"] = f"lock_failed:{type(lock_err).__name__}"
-            # Retry without FOR UPDATE in a fresh transaction
-            progress = db.query(StudentProgress).filter(
-                and_(
-                    StudentProgress.user_id == user_id,
-                    StudentProgress.course_id == session_data.course_id
-                )
-            ).first()
-            debug_context["progress_lock_fallback"] = True
+        # Update or create student progress
+        progress = db.query(StudentProgress).filter(
+            and_(
+                StudentProgress.user_id == user_id,
+                StudentProgress.course_id == session_data.course_id
+            )
+        ).first()
 
         if not progress:
-            debug_context["stage"] = "progress_seed"
+            # Count total content items for this course
             total_lessons = db.query(CourseLesson).filter(
                 and_(CourseLesson.course_id == session_data.course_id, CourseLesson.is_active == True)
             ).count()
             total_blocks = db.query(CourseBlock).filter(
                 and_(CourseBlock.course_id == session_data.course_id, CourseBlock.is_active == True)
             ).count()
-            total_content_items = total_blocks if total_blocks > 0 else total_lessons
+            
             progress = StudentProgress(
                 user_id=user_id,
                 course_id=session_data.course_id,
-                total_lessons=total_content_items or 0,
-                lessons_completed=0,
+                total_lessons=total_blocks if total_blocks > 0 else total_lessons,
+                blocks_completed=1 if session_data.block_id else 0,
+                lessons_completed=1 if session_data.lesson_id else 0,
                 completion_percentage=0.0,
                 sessions_count=1,
                 total_study_time=0,
@@ -227,168 +211,205 @@ async def start_study_session(
             )
             db.add(progress)
         else:
+            # Update progress - increment completed count
+            if session_data.block_id:
+                progress.blocks_completed += 1
+            else:
+                progress.lessons_completed += 1
+                
             progress.sessions_count += 1
             progress.last_activity = datetime.utcnow()
-        try:
-            db.commit()
-        except Exception as commit_err:
-            debug_context["stage"] = "commit_failure"
-            debug_context["commit_error_type"] = type(commit_err).__name__
-            debug_context["commit_error"] = str(commit_err)[:200]
-            print("❌ StudySession commit failure", debug_context)
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            # Re-raise to outer handler
-            raise
-        db.refresh(new_session)
+            
+        # Recalculate completion percentage
+        if progress.total_lessons > 0:
+            completed_count = progress.blocks_completed if session_data.block_id else progress.lessons_completed
+            progress.completion_percentage = (completed_count / progress.total_lessons) * 100
+            
+        # Check if course is complete
+        if progress.completion_percentage >= 100:
+            progress.completed_at = datetime.utcnow()
+
+        db.commit()
+        db.refresh(completed_session)
 
         target_info = lesson.title if lesson else (f"Block {block.week}.{block.block_number}: {block.title}" if block else "Unknown")
-        print(f"📚 Started {session_target_type} session: '{target_info}' for user {user_id} (session_id={new_session.id})")
-        return new_session
+        logger.info("Marked content done", extra={
+            "user_id": user_id,
+            "course_id": session_data.course_id,
+            "lesson_id": session_data.lesson_id,
+            "block_id": session_data.block_id,
+            "target": target_info
+        })
+        return completed_session
     except HTTPException:
         db.rollback()
         raise
     except Exception as e:
-        # Attempt specific DB error classification
-        from sqlalchemy.exc import OperationalError, IntegrityError, ProgrammingError
-        internal_code = None
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        if isinstance(e, IntegrityError):
-            internal_code = "integrity_error"
-        elif isinstance(e, OperationalError):
-            internal_code = "operational_error"
-        elif isinstance(e, ProgrammingError):
-            internal_code = "programming_error"
-        else:
-            internal_code = type(e).__name__
-        debug_context["error_type"] = internal_code
-        debug_context["error_message"] = str(e)[:500]
-        print("❌ StudySession start failure", debug_context)
-        import traceback
-        traceback.print_exc()
-        # Surface a structured diagnostic while keeping 500 semantics
-        raise HTTPException(status_code=500, detail={
-            "message": "Study session start failed",
-            "code": internal_code,
-            "stage": debug_context.get("stage"),
-            "progress_lock": debug_context.get("progress_lock"),
-            "commit_error": debug_context.get("commit_error"),
-            # Additional diagnostic exposure
-            "error_message": debug_context.get("error_message"),
-            "flush_error_type": debug_context.get("flush_error_type"),
-            "flush_error_message": debug_context.get("flush_error_message"),
-            "flush_error_orig": debug_context.get("flush_error_orig")
-        })
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to mark content as done: {str(e)}")
 
-@router.put("/{session_id}/end", response_model=StudySessionOut)
-async def end_study_session(
-    session_id: int,
-    session_data: StudySessionEnd,
+# ===============================
+# ASSIGNMENT STATUS (minimal, avoid 404 for client UX)
+# ===============================
+
+@router.get("/../assignments/{assignment_id}/status")
+async def get_assignment_status_minimal(
+    assignment_id: int,
     db: db_dependency,
     current_user: dict = user_dependency
 ):
     """
-    End a study session and record completion
+    Minimal assignment status for current user.
+    Returns student's assignment record if exists, else 404 with message.
+
+    Frontend expects this route under /after-school/assignments/{id}/status.
+    This shim lives here by using a relative path (..) from sessions prefix.
+    """
+    user_id = current_user["user_id"]
+    try:
+        assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+
+        sa = db.query(StudentAssignment).filter(
+            StudentAssignment.assignment_id == assignment_id,
+            StudentAssignment.user_id == user_id
+        ).first()
+
+        if not sa:
+            # Not assigned (treat as not found to keep noise low)
+            raise HTTPException(status_code=404, detail="Not assigned")
+
+        # Build a minimal status payload compatible with frontend types
+        required_pct = 80
+        can_retry = False  # Retry policy not implemented here
+
+        return {
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "description": assignment.description or assignment.title,
+                "points": assignment.points or 100,
+                "required_percentage": required_pct
+            },
+            "student_assignment": {
+                "id": sa.id,
+                "status": sa.status,
+                "grade": float(sa.grade) if sa.grade is not None else 0.0,
+                "submitted_at": sa.submitted_at.isoformat() if sa.submitted_at else None,
+                "feedback": sa.feedback or None
+            },
+            "attempts_info": {
+                "attempts_used": 0,
+                "attempts_remaining": 0,
+                "can_retry": can_retry
+            },
+            "message": "OK",
+            "passing_grade": (sa.grade or 0) >= required_pct
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get assignment status: {str(e)}")
+
+@router.get("/blocks/{block_id}/availability")
+async def check_block_availability(
+    block_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Check if a block is available for the current user.
+    Returns availability status and reason if not available.
     """
     user_id = current_user["user_id"]
     
-    # Get the study session
-    session = db.query(StudySession).filter(
+    # Get the block
+    block = db.query(CourseBlock).filter(CourseBlock.id == block_id).first()
+    if not block:
+        raise HTTPException(status_code=404, detail="Block not found")
+    
+    # Check if already completed
+    existing_session = db.query(StudySession).filter(
         and_(
-            StudySession.id == session_id,
-            StudySession.user_id == user_id
+            StudySession.user_id == user_id,
+            StudySession.block_id == block_id,
+            StudySession.status == "completed"
         )
     ).first()
     
-    if not session:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Study session not found"
-        )
+    if existing_session:
+        return {
+            "available": True,
+            "completed": True,
+            "reason": "Block already completed"
+        }
     
-    if session.status != "in_progress":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Session is not in progress"
-        )
+    # Very first block in course is always available
+    is_first_block = block.week == 1 and block.block_number == 1
+    if is_first_block:
+        return {
+            "available": True,
+            "completed": False,
+            "reason": "First block in course - always available"
+        }
     
-    # Calculate duration
-    duration = datetime.utcnow() - session.started_at
-    duration_minutes = int(duration.total_seconds() / 60)
+    # For any other block, check prerequisites
+    previous_completed = True
+    missing_prerequisite = None
     
-    # Update session
-    session.ended_at = datetime.utcnow()
-    session.duration_minutes = duration_minutes
-    session.status = session_data.status
-    session.completion_percentage = session_data.completion_percentage
-    session.updated_at = datetime.utcnow()
-    
-    # Update student progress
-    progress = db.query(StudentProgress).filter(
-        and_(
-            StudentProgress.user_id == user_id,
-            StudentProgress.course_id == session.course_id
-        )
-    ).first()
-    
-    if progress:
-        progress.total_study_time += duration_minutes
-        progress.last_activity = datetime.utcnow()
+    if block.block_number > 1:
+        # Check previous block in same week
+        prev_block = db.query(CourseBlock).filter(
+            and_(
+                CourseBlock.course_id == block.course_id,
+                CourseBlock.week == block.week,
+                CourseBlock.block_number == block.block_number - 1,
+                CourseBlock.is_active == True
+            )
+        ).first()
         
-        # If lesson or block completed, update completion count
-        if session_data.completion_percentage >= 100:
-            # Check if this lesson or block was already completed
-            completed_before = None
+        if prev_block:
+            prev_session = db.query(StudySession).filter(
+                and_(
+                    StudySession.user_id == user_id,
+                    StudySession.block_id == prev_block.id,
+                    StudySession.status == "completed"
+                )
+            ).first()
             
-            if session.lesson_id:
-                # Traditional lesson-based completion
-                completed_before = db.query(StudySession).filter(
-                    and_(
-                        StudySession.user_id == user_id,
-                        StudySession.lesson_id == session.lesson_id,
-                        StudySession.completion_percentage >= 100,
-                        StudySession.id != session_id
-                    )
-                ).first()
-            elif session.block_id:
-                # AI-generated course block completion
-                completed_before = db.query(StudySession).filter(
-                    and_(
-                        StudySession.user_id == user_id,
-                        StudySession.block_id == session.block_id,
-                        StudySession.completion_percentage >= 100,
-                        StudySession.id != session_id
-                    )
-                ).first()
+            if not prev_session:
+                previous_completed = False
+                missing_prerequisite = f"Block {prev_block.week}.{prev_block.block_number}: {prev_block.title}"
+                
+    elif block.week > 1:
+        # Check last block of previous week
+        prev_week_blocks = db.query(CourseBlock).filter(
+            and_(
+                CourseBlock.course_id == block.course_id,
+                CourseBlock.week == block.week - 1,
+                CourseBlock.is_active == True
+            )
+        ).order_by(CourseBlock.block_number.desc()).first()
+        
+        if prev_week_blocks:
+            prev_session = db.query(StudySession).filter(
+                and_(
+                    StudySession.user_id == user_id,
+                    StudySession.block_id == prev_week_blocks.id,
+                    StudySession.status == "completed"
+                )
+            ).first()
             
-            if not completed_before:
-                progress.lessons_completed += 1
-                progress.completion_percentage = (progress.lessons_completed / progress.total_lessons) * 100
-                
-                # Log completion based on type
-                if session.lesson_id:
-                    lesson = db.query(CourseLesson).filter(CourseLesson.id == session.lesson_id).first()
-                    content_name = lesson.title if lesson else f"Lesson {session.lesson_id}"
-                else:
-                    block = db.query(CourseBlock).filter(CourseBlock.id == session.block_id).first()
-                    content_name = f"Block {block.week}.{block.block_number}: {block.title}" if block else f"Block {session.block_id}"
-                
-                print(f"✅ Content completed: '{content_name}' for user {user_id} ({progress.lessons_completed}/{progress.total_lessons})")
-                
-                # Check if course is fully completed
-                if progress.completion_percentage >= 100:
-                    progress.completed_at = datetime.utcnow()
-                    print(f"🎉 Course completed by user {user_id}!")
+            if not prev_session:
+                previous_completed = False
+                missing_prerequisite = f"Block {prev_week_blocks.week}.{prev_week_blocks.block_number}: {prev_week_blocks.title}"
     
-    db.commit()
-    db.refresh(session)
-    
-    return session
+    return {
+        "available": previous_completed,
+        "completed": False,
+        "reason": f"Must complete {missing_prerequisite} first" if not previous_completed else "Available"
+    }
 
 @router.get("/", response_model=List[StudySessionOut])
 async def get_user_sessions(
@@ -417,8 +438,84 @@ async def get_user_sessions(
 # ===============================
 # PROGRESS TRACKING ENDPOINTS (must be before /{session_id} route)
 # ===============================
-# Note: Session submissions are managed through /after-school/uploads/sessions/{session_id}/submissions
-# This avoids duplicate endpoints and provides better filtering options
+
+@router.get("/course/{course_id}/blocks-progress")
+async def get_course_blocks_progress(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get user's progress through all blocks in a course with completion status
+    """
+    user_id = current_user["user_id"]
+    
+    # Get all blocks for this course, ordered by week and block number
+    blocks = db.query(CourseBlock).filter(
+        and_(
+            CourseBlock.course_id == course_id,
+            CourseBlock.is_active == True
+        )
+    ).order_by(CourseBlock.week, CourseBlock.block_number).all()
+    
+    if not blocks:
+        raise HTTPException(status_code=404, detail="No blocks found for this course")
+    
+    # Get all completed sessions for this user and course
+    completed_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id,
+            StudySession.status == "completed"
+        )
+    ).all()
+    
+    # Create a set of completed block IDs for quick lookup
+    completed_block_ids = {session.block_id for session in completed_sessions if session.block_id}
+    
+    # Build response with availability logic
+    blocks_progress = []
+    for i, block in enumerate(blocks):
+        is_completed = block.id in completed_block_ids
+        
+        # Determine availability
+        is_available = False
+        if i == 0:  # First block is always available
+            is_available = True
+        elif is_completed:  # Already completed blocks are available
+            is_available = True
+        else:  # Check if previous block is completed
+            prev_block = blocks[i-1]
+            if prev_block.id in completed_block_ids:
+                is_available = True
+        
+        blocks_progress.append({
+            "block_id": block.id,
+            "week": block.week,
+            "block_number": block.block_number,
+            "title": block.title,
+            "description": block.description,
+            "duration_minutes": block.duration_minutes,
+            "is_completed": is_completed,
+            "is_available": is_available,
+            "completed_at": next(
+                (session.marked_done_at or session.ended_at for session in completed_sessions 
+                 if session.block_id == block.id), None
+            )
+        })
+    
+    # Calculate overall progress
+    total_blocks = len(blocks)
+    completed_count = len(completed_block_ids)
+    completion_percentage = (completed_count / total_blocks * 100) if total_blocks > 0 else 0
+    
+    return {
+        "course_id": course_id,
+        "total_blocks": total_blocks,
+        "completed_blocks": completed_count,
+        "completion_percentage": completion_percentage,
+        "blocks": blocks_progress
+    }
 
 @router.get("/progress", response_model=List[StudentProgressOut])
 async def get_student_progress(
@@ -576,7 +673,7 @@ async def grade_course_submissions(
     No manual grading required - fully AI-driven assessment process
     """
     try:
-        
+
         # Extract data from request with enhanced support
         course_id = request.get("course_id")
         lesson_id = request.get("lesson_id", None)  # Legacy lesson support
@@ -584,22 +681,32 @@ async def grade_course_submissions(
         assignment_id = request.get("assignment_id", None)  # Specific assignments
         student_ids = request.get("student_ids", [])
         grade_all_students = request.get("grade_all_students", False)
-        
-        print(f"🔍 Enhanced grading request: course_id={course_id}, lesson_id={lesson_id}, block_id={block_id}, assignment_id={assignment_id}, grade_all={grade_all_students}")
-        
+
+        logger.info(
+            "Bulk grading request received",
+            extra={
+                "course_id": course_id,
+                "lesson_id": lesson_id,
+                "block_id": block_id,
+                "assignment_id": assignment_id,
+                "grade_all_students": grade_all_students,
+                "student_ids": student_ids,
+            },
+        )
+
         if not course_id:
             raise HTTPException(status_code=400, detail="Course ID is required")
-        
+
         # Get course details
         course = db.query(Course).filter(Course.id == course_id).first()
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
-        
+
         lesson = None
         block = None
         assignment = None
         grading_context = ""
-        
+
         # Get lesson context (legacy)
         if lesson_id:
             lesson = db.query(CourseLesson).filter(
@@ -608,7 +715,7 @@ async def grade_course_submissions(
             if not lesson:
                 raise HTTPException(status_code=404, detail="Lesson not found in this course")
             grading_context = f"Lesson: {lesson.title}"
-        
+
         # Get block context (AI-generated courses)
         if block_id:
             block = db.query(CourseBlock).filter(
@@ -617,7 +724,7 @@ async def grade_course_submissions(
             if not block:
                 raise HTTPException(status_code=404, detail="Course block not found")
             grading_context = f"Block {block.week}.{block.block_number}: {block.title}"
-        
+
         # Get assignment context (comprehensive grading)
         if assignment_id:
             assignment = db.query(CourseAssignment).filter(
@@ -626,15 +733,24 @@ async def grade_course_submissions(
             if not assignment:
                 raise HTTPException(status_code=404, detail="Assignment not found in this course")
             grading_context = f"Assignment: {assignment.title}"
-        
+
         if not grading_context:
             grading_context = f"Course: {course.title} (All content)"
-        
-        print(f"📚 Found course: {course.title}, Context: {grading_context}")
-    
-    except Exception as e:
-        print(f"Error in grade_course_submissions: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+        logger.info(
+            "Resolved grading context",
+            extra={
+                "course_id": course_id,
+                "grading_context": grading_context,
+                "course_title": course.title,
+            },
+        )
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed preparing bulk grading request")
+        raise HTTPException(status_code=500, detail="Internal server error preparing grading request")
     
     # Get submissions to grade with enhanced filtering
     submissions_query = db.query(AISubmission).options(
@@ -703,20 +819,32 @@ async def grade_course_submissions(
                 "has_work": True
             }
             grading_data.append(submission_data)
-            print(f"📝 Added submission {submission.id} from {student_name}: {content_title}")
+            logger.debug(
+                "Queued submission for grading",
+                extra={
+                    "submission_id": submission.id,
+                    "user_id": submission.user_id,
+                    "student_name": student_name,
+                    "content_title": content_title,
+                },
+            )
                 
         except Exception as e:
-            print(f"❌ Error processing submission {submission.id}: {str(e)}")
+            logger.exception(
+                "Failed preparing submission for grading",
+                extra={"submission_id": submission.id, "user_id": submission.user_id},
+            )
             continue
     
     if not grading_data:
         raise HTTPException(status_code=404, detail="No valid submissions found for grading")
     
-    print(f"Total grading data entries: {len(grading_data)}")
-    
     # Process submissions using Gemini AI grading
     try:
-        print(f"🤖 Starting Gemini AI grading for {len(grading_data)} submissions...")
+        logger.info(
+            "Starting Gemini AI grading",
+            extra={"submission_count": len(grading_data), "course_id": course_id},
+        )
         
         # Prepare grading context and rubric
         assignment_title = ""
@@ -741,60 +869,181 @@ async def grade_course_submissions(
             assignment_description = course.description or f"General assessment for {course.title}"
             rubric = course.description or "General course assessment criteria"
         
-        print(f"📚 Grading Context: {assignment_title}")
-        print(f"📋 Rubric: {rubric[:100]}...")
-        
-        # Prepare submissions for Gemini AI
+        logger.info(
+            "Prepared grading context",
+            extra={
+                "assignment_title": assignment_title,
+                "rubric_preview": rubric[:80] if rubric else None,
+                "assignment_id": assignment_id,
+                "lesson_id": lesson_id,
+                "block_id": block_id,
+            },
+        )
+
+        max_points = assignment.points if assignment and assignment.points else 100
+
         submissions_for_ai = []
         for submission_data in grading_data:
             pdf_path = submission_data.get("file_path", "")
-            
-            # Read and extract content from PDF
-            try:
-                if not os.path.isabs(pdf_path):
-                    pdf_full_path = os.path.join(os.getcwd(), pdf_path)
-                else:
-                    pdf_full_path = pdf_path
-                
-                print(f"📄 Processing PDF: {pdf_full_path}")
-                
-                if os.path.exists(pdf_full_path):
-                    # For now, we'll create a placeholder text content
-                    # In production, you'd integrate a proper PDF text extraction library
-                    submission_content = f"PDF submission from {submission_data['student_name']}\n"
-                    submission_content += f"File: {submission_data['filename']}\n"
-                    submission_content += f"Subject: {course.title}\n"
-                    submission_content += "Content: [PDF content would be extracted here using PyPDF2, pdfplumber, or similar library]"
-                    
-                    submissions_for_ai.append({
-                        "submission_id": submission_data["submission_id"],
-                        "user_id": submission_data["user_id"],
-                        "student_name": submission_data["student_name"],
-                        "content": submission_content,
-                        "submission_type": submission_data["submission_type"]
-                    })
-                    
-                    print(f"✅ Prepared submission from {submission_data['student_name']}")
-                else:
-                    print(f"❌ PDF file not found: {pdf_full_path}")
-                        
-            except Exception as pdf_error:
-                print(f"❌ Error processing PDF for {submission_data['student_name']}: {pdf_error}")
+            if not pdf_path:
+                logger.warning(
+                    "Submission missing file path",
+                    extra={"submission_id": submission_data["submission_id"]},
+                )
                 continue
-        
+
+            pdf_full_path = Path(pdf_path)
+            if not pdf_full_path.is_absolute():
+                pdf_full_path = Path(os.getcwd()) / pdf_full_path
+
+            try:
+                pdf_bytes = pdf_full_path.read_bytes()
+            except FileNotFoundError:
+                logger.warning(
+                    "Submission file not found",
+                    extra={
+                        "submission_id": submission_data["submission_id"],
+                        "file_path": str(pdf_full_path),
+                    },
+                )
+                continue
+            except Exception:
+                logger.exception(
+                    "Failed reading submission file",
+                    extra={
+                        "submission_id": submission_data["submission_id"],
+                        "file_path": str(pdf_full_path),
+                    },
+                )
+                continue
+
+            submissions_for_ai.append(
+                {
+                    "submission_id": submission_data["submission_id"],
+                    "user_id": submission_data["user_id"],
+                    "student_name": submission_data["student_name"],
+                    "file_bytes": pdf_bytes,
+                    "filename": submission_data.get("filename") or f"submission_{submission_data['submission_id']}.pdf",
+                    "submission_type": submission_data["submission_type"],
+                }
+            )
+
         if not submissions_for_ai:
             raise HTTPException(status_code=404, detail="No valid submissions found for processing")
-        
-        # Use Gemini AI bulk grading
-        gemini_results = await gemini_service.grade_bulk_submissions(
-            submissions=submissions_for_ai,
-            assignment_title=assignment_title,
-            assignment_description=assignment_description,
-            rubric=rubric,
-            max_points=100
+
+        gemini_results = {"status": "completed", "student_results": [], "batch_summary": {}}
+        graded_results = []
+
+        for item in submissions_for_ai:
+            try:
+                grade_result = await gemini_service.grade_submission_from_file(
+                    file_bytes=item["file_bytes"],
+                    filename=item["filename"],
+                    assignment_title=assignment_title,
+                    assignment_description=assignment_description,
+                    rubric=rubric,
+                    max_points=max_points,
+                    submission_type=item.get("submission_type", "homework"),
+                )
+
+                # Extract score from raw data (best effort, handle malformed keys)
+                extracted_score = None
+                if isinstance(grade_result, dict):
+                    score_val = grade_result.get('score') or grade_result.get('"score"') or grade_result.get('percentage') or grade_result.get('"percentage"')
+                    if isinstance(score_val, (int, float)):
+                        extracted_score = float(score_val)
+                    elif isinstance(score_val, str):
+                        cleaned = score_val.rstrip(',').strip()
+                        try:
+                            extracted_score = float(cleaned)
+                        except:
+                            pass
+                
+                # If no score extracted, try strict grading
+                if extracted_score is None:
+                    try:
+                        strict = await gemini_service.grade_submission_from_file_strict(
+                            file_bytes=item["file_bytes"],
+                            filename=item["filename"],
+                            assignment_title=assignment_title,
+                            assignment_description=assignment_description,
+                            max_points=max_points,
+                            submission_type=item.get("submission_type", "homework"),
+                        )
+                        # Extract score from strict result
+                        if isinstance(strict, dict):
+                            strict_score_val = strict.get('score') or strict.get('"score"') or strict.get('percentage') or strict.get('"percentage"')
+                            if isinstance(strict_score_val, (int, float)):
+                                extracted_score = float(strict_score_val)
+                                grade_result["percentage"] = extracted_score
+                            elif isinstance(strict_score_val, str):
+                                cleaned = strict_score_val.rstrip(',').strip()
+                                try:
+                                    extracted_score = float(cleaned)
+                                    grade_result["percentage"] = extracted_score
+                                except:
+                                    pass
+                            
+                            # Copy feedback if missing
+                            if not grade_result.get("overall_feedback"):
+                                feedback_val = strict.get('overall_feedback') or strict.get('"overall_feedback"') or strict.get('detailed_feedback') or strict.get('"detailed_feedback"')
+                                if isinstance(feedback_val, str):
+                                    grade_result["overall_feedback"] = feedback_val.strip('"').strip(',').strip()
+                            
+                            grade_result["strict_fallback"] = True
+                    except Exception as strict_error:
+                        logger.warning(
+                            "Strict Gemini grading fallback failed",
+                            extra={
+                                "submission_id": item["submission_id"],
+                                "user_id": item["user_id"],
+                                "error": str(strict_error),
+                            },
+                        )
+
+                grade_result.update(
+                    {
+                        "submission_id": item["submission_id"],
+                        "user_id": item["user_id"],
+                        "student_name": item.get("student_name", "Unknown"),
+                        "success": True,
+                    }
+                )
+                graded_results.append(grade_result)
+            except Exception as grading_error:
+                logger.exception(
+                    "Gemini grading failed for submission",
+                    extra={"submission_id": item["submission_id"], "user_id": item["user_id"]},
+                )
+                graded_results.append(
+                    {
+                        "submission_id": item["submission_id"],
+                        "user_id": item["user_id"],
+                        "student_name": item.get("student_name", "Unknown"),
+                        "success": False,
+                        "error": str(grading_error),
+                        "percentage": 0.0,
+                        "overall_feedback": "Gemini grading failed",
+                    }
+                )
+
+        gemini_results["student_results"] = graded_results
+        successes = [r for r in graded_results if r.get("success")]
+        gemini_results["batch_summary"] = {
+            "total_submissions": len(graded_results),
+            "successfully_graded": len(successes),
+            "failed_grades": len(graded_results) - len(successes),
+            "success_rate": (len(successes) / len(graded_results) * 100) if graded_results else 0,
+        }
+
+        logger.info(
+            "Gemini AI grading completed",
+            extra={
+                "course_id": course_id,
+                "graded_count": len(successes),
+                "failed_count": gemini_results["batch_summary"].get("failed_grades", 0),
+            },
         )
-        
-        print(f"✅ Gemini AI grading completed: {gemini_results['batch_summary']['successfully_graded']} students graded")
             
         # Store Gemini AI grades in database
         grading_results = []
@@ -803,28 +1052,47 @@ async def grade_course_submissions(
             if result.get("success", False):
                 submission_id = result.get("submission_id")
                 student_name = result.get("student_name", "")
-                percentage = result.get("percentage", 0)
-                feedback = result.get("detailed_feedback", "")
+                
+                # Extract score and feedback from raw data (best effort)
+                extracted_score = None
+                extracted_feedback = None
+                
+                if isinstance(result, dict):
+                    # Extract score (handle malformed keys)
+                    score_val = result.get('score') or result.get('"score"') or result.get('percentage') or result.get('"percentage"')
+                    if isinstance(score_val, (int, float)):
+                        extracted_score = float(score_val)
+                    elif isinstance(score_val, str):
+                        cleaned = score_val.rstrip(',').strip()
+                        try:
+                            extracted_score = float(cleaned)
+                        except:
+                            pass
+                    
+                    # Extract feedback (handle malformed keys)
+                    feedback_val = result.get('overall_feedback') or result.get('"overall_feedback"') or result.get('detailed_feedback') or result.get('"detailed_feedback"')
+                    if isinstance(feedback_val, str):
+                        extracted_feedback = feedback_val.strip('"').strip(',').strip()
                 
                 try:
                     # Update the AI submission with Gemini results
                     submission = db.query(AISubmission).filter(AISubmission.id == submission_id).first()
                     if submission:
                         submission.ai_processed = True
-                        submission.ai_score = percentage
-                        submission.ai_feedback = feedback
-                        submission.ai_corrections = "\n".join(result.get("corrections", []))
-                        submission.ai_strengths = "\n".join(result.get("strengths", []))
-                        submission.ai_improvements = "\n".join(result.get("improvements", []))
+                        submission.ai_score = extracted_score
+                        submission.ai_feedback = extracted_feedback
+                        submission.ai_corrections = None  # Not using normalized fields
+                        submission.ai_strengths = None  # Not using normalized fields
+                        submission.ai_improvements = None  # Not using normalized fields
                         submission.processed_at = datetime.utcnow()
                         
                         # Update the associated study session
                         if submission.session_id:
                             session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
                             if session:
-                                session.ai_score = percentage
-                                session.ai_feedback = feedback
-                                session.ai_recommendations = "\n".join(result.get("recommendations", []))
+                                session.ai_score = extracted_score
+                                session.ai_feedback = extracted_feedback
+                                session.ai_recommendations = None  # Not using normalized fields
                                 session.updated_at = datetime.utcnow()
                         
                         # Update StudentAssignment record if this is assignment-based
@@ -837,33 +1105,51 @@ async def grade_course_submissions(
                             ).first()
                             
                             if student_assignment:
-                                student_assignment.ai_grade = percentage
-                                student_assignment.grade = percentage  # AI grade is the final grade
-                                student_assignment.feedback = feedback
+                                student_assignment.ai_grade = extracted_score
+                                student_assignment.grade = extracted_score  # AI grade is the final grade
+                                student_assignment.feedback = extracted_feedback
                                 student_assignment.status = "graded"
                                 student_assignment.updated_at = datetime.utcnow()
-                                print(f"🤖 Updated StudentAssignment {student_assignment.id} with Gemini grade {percentage}% for {student_name}")
+                                logger.info(
+                                    "Student assignment updated with AI grade",
+                                    extra={
+                                        "student_assignment_id": student_assignment.id,
+                                        "submission_id": submission_id,
+                                        "percentage": extracted_score,
+                                    },
+                                )
                             else:
-                                print(f"⚠️  No StudentAssignment found for user {submission.user_id} and assignment {submission.assignment_id}")
+                                logger.warning(
+                                    "Student assignment not found for AI update",
+                                    extra={
+                                        "submission_id": submission_id,
+                                        "user_id": submission.user_id,
+                                        "assignment_id": submission.assignment_id,
+                                    },
+                                )
                         
                         grading_results.append({
                             "submission_id": submission_id,
                             "user_id": submission.user_id,
                             "student_name": student_name,
                             "score": result.get("score", 0),
-                            "percentage": percentage,
+                            "percentage": extracted_score,
                             "grade_letter": result.get("grade_letter", ""),
-                            "feedback": feedback,
-                            "overall_feedback": result.get("overall_feedback", ""),
+                            "feedback": extracted_feedback,
+                            "overall_feedback": result.get("overall_feedback") or extracted_feedback,
                             "strengths": result.get("strengths", []),
                             "improvements": result.get("improvements", []),
                             "recommendations": result.get("recommendations", []),
                             "graded_by": result.get("graded_by", "Gemini AI"),
+                            "raw": result,  # Include raw data instead of normalized
                             "success": True
                         })
                     
                 except Exception as grade_error:
-                    print(f"❌ Error saving Gemini grade for {student_name}: {grade_error}")
+                    logger.exception(
+                        "Failed persisting AI grade",
+                        extra={"submission_id": submission_id, "user_id": submission.user_id},
+                    )
                     grading_results.append({
                         "student_name": student_name,
                         "error": str(grade_error),
@@ -881,10 +1167,20 @@ async def grade_course_submissions(
         try:
             db.commit()
             successful_grades = len([r for r in grading_results if r.get("success")])
-            print(f"✅ Successfully updated {successful_grades} submissions with Gemini AI grades")
+            logger.info(
+                "Successfully persisted AI grades",
+                extra={
+                    "course_id": course_id,
+                    "successful_grades": successful_grades,
+                    "failed_grades": len(grading_results) - successful_grades,
+                },
+            )
         except Exception as commit_error:
             db.rollback()
-            print(f"❌ Error committing Gemini grades: {commit_error}")
+            logger.exception(
+                "Failed committing AI grades",
+                extra={"course_id": course_id},
+            )
             raise HTTPException(status_code=500, detail=f"Failed to save Gemini grades: {str(commit_error)}")
         
         # Return comprehensive response with Gemini grading results
@@ -924,9 +1220,20 @@ async def grade_course_submissions(
             "processed_at": datetime.utcnow().isoformat()
         }
         
+    except HTTPException:
+        raise
     except Exception as gemini_error:
-        print(f"❌ Gemini AI grading error: {gemini_error}")
-        raise HTTPException(status_code=500, detail=f"Gemini AI grading service error: {str(gemini_error)}")
+        if gemini_service.config.is_quota_error(gemini_error) if hasattr(gemini_service, "config") else False:
+            logger.warning(
+                "Gemini quota or rate limit encountered during bulk grading",
+                extra={"course_id": course_id},
+            )
+        else:
+            logger.exception(
+                "Unexpected Gemini AI grading error",
+                extra={"course_id": course_id},
+            )
+        raise HTTPException(status_code=500, detail="Gemini AI grading service error")
 
 @router.get("/submissions/pending-grade")
 async def get_pending_submissions_for_grading(
@@ -1031,7 +1338,10 @@ async def get_student_assignments(
         current_user_id = current_user["user_id"]
         if user_id != current_user_id:
             # Add role-based access control here if needed
-            print(f"⚠️  User {current_user_id} attempting to access assignments for user {user_id}")
+            logger.warning(
+                "User attempting to access another student's assignments",
+                extra={"requester_id": current_user_id, "target_user_id": user_id},
+            )
         
         query = db.query(StudentAssignment).options(
             joinedload(StudentAssignment.assignment)
@@ -1053,12 +1363,22 @@ async def get_student_assignments(
             )
         
         assignments = query.order_by(StudentAssignment.due_date.asc()).limit(limit).all()
-        
-        print(f"📋 Retrieved {len(assignments)} assignments for user {user_id}")
+
+        logger.info(
+            "Retrieved student assignments",
+            extra={
+                "user_id": user_id,
+                "assignment_count": len(assignments),
+                "filters": {"course_id": course_id, "status": status, "limit": limit},
+            },
+        )
         return assignments
-        
+
     except Exception as e:
-        print(f"❌ Error retrieving student assignments: {str(e)}")
+        logger.exception(
+            "Failed retrieving student assignments",
+            extra={"user_id": user_id},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve assignments: {str(e)}"
@@ -1132,16 +1452,29 @@ async def get_course_assignments_overview(
                 "average_grade": round(avg_grade, 2) if avg_grade is not None else None
             }
         
-        print(f"📊 Course {course_id} assignments: {len(assignments)} total")
-        if include_stats:
-            print(f"📈 Stats: {stats['submission_rate']:.1f}% submitted, {stats['grading_completion']:.1f}% graded")
+        logger.info(
+            "Course assignments overview",
+            extra={
+                "course_id": course_id,
+                "assignments_total": len(assignments),
+                "filters": {
+                    "assignment_id": assignment_id,
+                    "student_ids": student_ids,
+                    "include_stats": include_stats
+                },
+                "stats": stats if include_stats else None
+            }
+        )
         
         return assignments
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error retrieving course assignments: {str(e)}")
+        logger.exception(
+            "Failed retrieving course assignments overview",
+            extra={"course_id": course_id},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve course assignments: {str(e)}"
@@ -1167,17 +1500,338 @@ async def auto_grade_assignment_submission(
     Called automatically when students submit assignment work
     """
     user_id = current_user["user_id"]
-    
+
     try:
-        # Get the assignment details
         assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
         if not assignment:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Assignment not found"
             )
+
+        student_assignment = db.query(StudentAssignment).options(
+            joinedload(StudentAssignment.assignment)
+        ).filter(
+            and_(
+                StudentAssignment.assignment_id == assignment_id,
+                StudentAssignment.user_id == user_id
+            )
+        ).first()
+
+        if not student_assignment:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Student assignment record not found"
+            )
+
+        submission_content = submission_data.get("content") or ""
+        submission_file_path = submission_data.get("file_path")
+        file_bytes: Optional[bytes] = None
+        filename: Optional[str] = None
+        raw_path: Optional[Path] = None
+
+        current_time = datetime.utcnow()
+
+        # Enforce per-assignment attempt limits before processing a new submission
+        twenty_four_hours_ago = current_time - timedelta(hours=24)
+        recent_attempts_before = db.query(func.count(AISubmission.id)).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).scalar() or 0
+
+        existing_grade = float(student_assignment.grade) if student_assignment.grade is not None else 0.0
+        if recent_attempts_before >= 3 and existing_grade < 80.0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
+            )
+
+        if submission_file_path:
+            raw_path = Path(submission_file_path)
+            if not raw_path.is_absolute():
+                raw_path = Path(os.getcwd()) / raw_path
+            try:
+                file_bytes = raw_path.read_bytes()
+                filename = raw_path.name
+            except FileNotFoundError:
+                logger.warning(
+                    "Submission file not found for auto grading",
+                    extra={"assignment_id": assignment_id, "user_id": user_id, "file_path": str(raw_path)},
+                )
+            except Exception:
+                logger.exception(
+                    "Error reading submission file for auto grading",
+                    extra={"assignment_id": assignment_id, "user_id": user_id, "file_path": str(raw_path)},
+                )
+
+        # Attempt text fallback if no content yet and file is readable text
+        if not submission_content and file_bytes is None and submission_file_path:
+            try:
+                with open(raw_path, "r", encoding="utf-8") as f:
+                    submission_content = f.read()
+            except Exception:
+                submission_content = ""
+
+        max_points = assignment.points or 100
+        grade_result: dict
+
+        logger.info(
+            "Auto grading assignment submission",
+            extra={"assignment_id": assignment_id, "user_id": user_id, "has_file": file_bytes is not None},
+        )
+
+        if file_bytes is not None:
+            grade_result = await gemini_service.grade_submission_from_file(
+                file_bytes=file_bytes,
+                filename=filename or f"assignment_{assignment_id}.pdf",
+                assignment_title=assignment.title,
+                assignment_description=assignment.description or "",
+                rubric=assignment.rubric or assignment.description or "",
+                max_points=max_points,
+                submission_type=assignment.assignment_type,
+            )
+        else:
+            if not submission_content:
+                raise HTTPException(status_code=400, detail="No submission content provided")
+
+            grade_result = await gemini_service.grade_submission(
+                submission_content=submission_content,
+                assignment_title=assignment.title,
+                assignment_description=assignment.description or "",
+                rubric=assignment.rubric or assignment.description or "",
+                max_points=max_points,
+                submission_type=assignment.assignment_type,
+            )
+
+        # Extract score and feedback from raw data (best effort, handle malformed keys)
+        extracted_score = None
+        extracted_feedback = None
         
-        # Get the student assignment record
+        if isinstance(grade_result, dict):
+            # Extract score
+            score_val = grade_result.get('score') or grade_result.get('"score"') or grade_result.get('percentage') or grade_result.get('"percentage"')
+            if isinstance(score_val, (int, float)):
+                extracted_score = float(score_val)
+            elif isinstance(score_val, str):
+                cleaned = score_val.rstrip(',').strip()
+                try:
+                    extracted_score = float(cleaned)
+                except:
+                    pass
+            
+            # Extract feedback
+            feedback_val = grade_result.get('overall_feedback') or grade_result.get('"overall_feedback"') or grade_result.get('detailed_feedback') or grade_result.get('"detailed_feedback"')
+            if isinstance(feedback_val, str):
+                extracted_feedback = feedback_val.strip('"').strip(',').strip()
+
+        # If no score extracted and we have file, try strict grading
+        if file_bytes is not None and extracted_score is None:
+            strict = await gemini_service.grade_submission_from_file_strict(
+                file_bytes=file_bytes,
+                filename=filename or f"assignment_{assignment_id}.pdf",
+                assignment_title=assignment.title,
+                assignment_description=assignment.description or "",
+                max_points=max_points,
+                submission_type=assignment.assignment_type,
+            )
+            # Extract from strict result
+            if isinstance(strict, dict):
+                strict_score_val = strict.get('score') or strict.get('"score"') or strict.get('percentage') or strict.get('"percentage"')
+                if isinstance(strict_score_val, (int, float)):
+                    extracted_score = float(strict_score_val)
+                elif isinstance(strict_score_val, str):
+                    cleaned = strict_score_val.rstrip(',').strip()
+                    try:
+                        extracted_score = float(cleaned)
+                    except:
+                        pass
+                
+                # Use strict feedback if main feedback is missing
+                if not extracted_feedback:
+                    strict_feedback_val = strict.get('overall_feedback') or strict.get('"overall_feedback"') or strict.get('detailed_feedback') or strict.get('"detailed_feedback"')
+                    if isinstance(strict_feedback_val, str):
+                        extracted_feedback = strict_feedback_val.strip('"').strip(',').strip()
+
+        ai_score = extracted_score
+        ai_feedback = extracted_feedback
+
+        submission_id = submission_data.get("submission_id")
+
+        ai_submission_query = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id
+            )
+        )
+
+        ai_submission = None
+        if submission_id:
+            ai_submission = ai_submission_query.filter(AISubmission.id == submission_id).first()
+            if ai_submission is None:
+                logger.warning(
+                    "Submission ID provided but not found for auto-grading",
+                    extra={"assignment_id": assignment_id, "submission_id": submission_id, "user_id": user_id}
+                )
+
+        if not ai_submission:
+            file_type_value = None
+            if filename:
+                suffix = Path(filename).suffix
+                if suffix:
+                    file_type_value = suffix.lstrip('.')
+            saved_file_path = str(raw_path) if raw_path else submission_file_path
+            if not file_type_value and saved_file_path:
+                alt_suffix = Path(saved_file_path).suffix
+                if alt_suffix:
+                    file_type_value = alt_suffix.lstrip('.')
+            ai_submission = AISubmission(
+                user_id=user_id,
+                course_id=student_assignment.course_id,
+                assignment_id=assignment_id,
+                block_id=getattr(assignment, "block_id", None),
+                submission_type=assignment.assignment_type or "assessment",
+                original_filename=filename,
+                file_path=saved_file_path,
+                file_type=file_type_value,
+                submitted_at=current_time,
+            )
+            db.add(ai_submission)
+            db.flush()
+        else:
+            ai_submission.course_id = student_assignment.course_id
+            ai_submission.assignment_id = assignment_id
+            ai_submission.submitted_at = current_time
+            if submission_file_path:
+                ai_submission.file_path = str(raw_path) if raw_path else submission_file_path
+            if filename:
+                ai_submission.original_filename = filename
+                suffix = Path(filename).suffix
+                if suffix:
+                    ai_submission.file_type = suffix.lstrip('.')
+            if ai_submission.submission_type in (None, "") and assignment.assignment_type:
+                ai_submission.submission_type = assignment.assignment_type
+
+        attempts_today = recent_attempts_before + 1
+
+        student_assignment.ai_grade = ai_score
+        student_assignment.grade = ai_score
+        student_assignment.feedback = ai_feedback
+        student_assignment.submitted_at = current_time
+        student_assignment.submission_content = (submission_content or "")[:1000]
+        if submission_file_path:
+            student_assignment.submission_file_path = submission_file_path
+        student_assignment.updated_at = current_time
+
+        passing_grade = (ai_score or 0) >= 80.0
+
+        if passing_grade:
+            student_assignment.status = "passed"
+            status_message = (
+                f"Congratulations! You passed with {ai_score:.1f}%" if ai_score is not None else "Submission passed"
+            )
+        else:
+            if attempts_today >= 3:
+                student_assignment.status = "failed"
+                status_message = (
+                    f"Assignment failed with {ai_score or 0:.1f}%. Maximum attempts (3) reached in 24 hours."
+                )
+            else:
+                student_assignment.status = "needs_retry"
+                remaining_attempts = 3 - attempts_today
+                if ai_score is not None:
+                    status_message = (
+                        f"Score: {ai_score:.1f}% - Try again! You need 80% to pass. "
+                        f"{remaining_attempts} attempts remaining today."
+                    )
+                else:
+                    status_message = (
+                        "AI couldn't determine a score. Please review your submission and try again. "
+                        f"{remaining_attempts} attempts remaining today."
+                    )
+
+        ai_submission.ai_processed = True
+        ai_submission.ai_score = ai_score
+        ai_submission.ai_feedback = ai_feedback
+        ai_submission.ai_strengths = None  # Not using normalized fields
+        ai_submission.ai_improvements = None  # Not using normalized fields
+        ai_submission.ai_corrections = None  # Not using normalized fields
+        ai_submission.processed_at = datetime.utcnow()
+
+        db.commit()
+
+        logger.info(
+            "Auto grading complete",
+            extra={"assignment_id": assignment_id, "user_id": user_id, "ai_score": ai_score},
+        )
+
+        return {
+            "status": "success",
+            "message": status_message,
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "type": assignment.assignment_type
+            },
+            "grade_result": {
+                "score": grade_result.get("score"),
+                "percentage": ai_score,
+                "grade_letter": grade_result.get("grade_letter"),
+                "overall_feedback": grade_result.get("overall_feedback"),
+                "detailed_feedback": ai_feedback,
+                "strengths": grade_result.get("strengths", []),
+                "improvements": grade_result.get("improvements", []),
+                "recommendations": grade_result.get("recommendations", []),
+                "raw": grade_result,  # Return raw data instead of normalized
+                "passing_grade": passing_grade,
+                "required_percentage": 80.0
+            },
+            "student_assignment": {
+                "id": student_assignment.id,
+                "status": student_assignment.status,
+                "grade": student_assignment.grade,
+                "submitted_at": student_assignment.submitted_at.isoformat(),
+                "graded_by": "Gemini AI",
+                "submission_id": ai_submission.id,
+                "attempts_used": attempts_today,
+                "can_retry": not passing_grade and attempts_today < 3,
+                "attempts_remaining": max(0, 3 - attempts_today) if not passing_grade else 0
+            },
+            "processed_at": datetime.utcnow().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(
+            "Unexpected error during auto grading",
+            extra={"assignment_id": assignment_id, "user_id": current_user["user_id"]},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Auto-grading failed: {str(e)}"
+        )
+
+@router.post("/assignments/{assignment_id}/retry")
+async def retry_assignment_attempt(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    submission_data: dict = Body(default_factory=dict)
+):
+    """
+    Handle assignment retry attempts with proper validation
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+
+        # Check eligibility before allowing retry
         student_assignment = db.query(StudentAssignment).filter(
             and_(
                 StudentAssignment.assignment_id == assignment_id,
@@ -1186,112 +1840,240 @@ async def auto_grade_assignment_submission(
         ).first()
         
         if not student_assignment:
+            raise HTTPException(status_code=404, detail="Student assignment not found")
+        
+        # Check if already passed
+        current_grade = student_assignment.grade or 0
+        if current_grade >= 80.0:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Student assignment record not found"
+                status_code=400,
+                detail=f"Assignment already passed with {current_grade:.1f}%"
             )
         
-        # Extract submission content
-        submission_content = submission_data.get("content", "")
-        submission_file_path = submission_data.get("file_path", "")
+        # Count attempts in last 24 hours
+        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+        recent_attempts = db.query(func.count(AISubmission.id)).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).scalar() or 0
         
-        # If it's a file submission, extract content
-        if submission_file_path and not submission_content:
-            try:
-                if os.path.exists(submission_file_path):
-                    # For PDF files, create placeholder content (integrate PDF extraction library in production)
-                    if submission_file_path.lower().endswith('.pdf'):
-                        submission_content = f"PDF submission for assignment: {assignment.title}\n"
-                        submission_content += f"File: {os.path.basename(submission_file_path)}\n"
-                        submission_content += "[PDF content would be extracted here using PyPDF2 or similar library]"
-                    else:
-                        # For text files
-                        with open(submission_file_path, 'r', encoding='utf-8') as f:
-                            submission_content = f.read()
-                else:
-                    submission_content = "File not found for processing"
-            except Exception as file_error:
-                print(f"❌ Error reading submission file: {file_error}")
-                submission_content = f"Error reading file: {str(file_error)}"
-        
-        print(f"🤖 Auto-grading assignment '{assignment.title}' for user {user_id}")
-        
-        # Grade using Gemini AI
-        grade_result = await gemini_service.grade_submission(
-            submission_content=submission_content,
-            assignment_title=assignment.title,
-            assignment_description=assignment.description,
-            rubric=assignment.rubric or assignment.description,
-            max_points=assignment.points,
-            submission_type=assignment.assignment_type
+        logger.info(
+            "Retry attempt check",
+            extra={
+                "assignment_id": assignment_id,
+                "user_id": user_id,
+                "recent_attempts": recent_attempts,
+                "current_grade": current_grade
+            }
         )
         
-        # Update student assignment with AI grade
-        student_assignment.ai_grade = grade_result["percentage"]
-        student_assignment.grade = grade_result["percentage"]  # AI grade is final grade
-        student_assignment.feedback = grade_result["detailed_feedback"]
-        student_assignment.submitted_at = datetime.utcnow()
-        student_assignment.status = "graded"
-        student_assignment.submission_content = submission_content[:1000]  # Store truncated content
-        if submission_file_path:
-            student_assignment.submission_file_path = submission_file_path
-        student_assignment.updated_at = datetime.utcnow()
+        # IMPORTANT: Don't block the retry button click itself
+        # Only block if they try to submit NEW work after 3 attempts
+        # The frontend just needs confirmation that retry is available
         
-        # Update any associated AI submission record
-        ai_submission = db.query(AISubmission).filter(
+        payload = submission_data or {}
+        has_submission_payload = any(
+            payload.get(key)
+            for key in ("submission_content", "content", "submission_file_path", "file_path")
+        )
+
+        latest_submission = db.query(AISubmission).filter(
             and_(
                 AISubmission.user_id == user_id,
                 AISubmission.assignment_id == assignment_id
             )
-        ).first()
+        ).order_by(desc(AISubmission.submitted_at)).first()
+
+        attempts_remaining = max(0, 3 - recent_attempts)
+
+        if not has_submission_payload:
+            # User clicked retry but hasn't submitted new work yet
+            # Just return status showing they can retry
+            message = (
+                f"Ready to retry. You have {attempts_remaining} attempt(s) remaining today."
+                if attempts_remaining > 0
+                else "No attempts remaining today. Try again tomorrow."
+            )
+
+            return {
+                "status": "ready",
+                "message": message,
+                "assignment": {
+                    "id": assignment.id,
+                    "title": assignment.title,
+                    "type": assignment.assignment_type
+                },
+                "grade_result": None,
+                "student_assignment": {
+                    "id": student_assignment.id,
+                    "status": student_assignment.status,
+                    "grade": student_assignment.grade,
+                    "submitted_at": student_assignment.submitted_at.isoformat() if student_assignment.submitted_at else None,
+                    "graded_by": "Gemini AI" if student_assignment.ai_grade is not None else None,
+                    "submission_id": latest_submission.id if latest_submission else None,
+                    "attempts_used": recent_attempts,
+                    "can_retry": attempts_remaining > 0,
+                    "attempts_remaining": attempts_remaining
+                },
+                "retry_info": {
+                    "is_retry_attempt": True,
+                    "attempts_used": recent_attempts,
+                    "attempts_remaining": attempts_remaining
+                },
+                "processed_at": datetime.utcnow().isoformat()
+            }
+
+        # User is submitting new work - NOW check if they've exceeded attempts
+        if recent_attempts >= 3:
+            raise HTTPException(
+                status_code=400,
+                detail="Maximum attempts (3) reached in 24 hours. Try again tomorrow."
+            )
+
+        # Proceed with auto-grading
+        grade_response = await auto_grade_assignment_submission(
+            assignment_id, submission_data, db, current_user
+        )
         
-        if ai_submission:
-            ai_submission.ai_processed = True
-            ai_submission.ai_score = grade_result["percentage"]
-            ai_submission.ai_feedback = grade_result["detailed_feedback"]
-            ai_submission.ai_strengths = "\n".join(grade_result.get("strengths", []))
-            ai_submission.ai_improvements = "\n".join(grade_result.get("improvements", []))
-            ai_submission.processed_at = datetime.utcnow()
-        
-        db.commit()
-        
-        print(f"✅ Auto-grading complete: {grade_result['percentage']}% for user {user_id}")
-        
-        return {
-            "status": "success",
-            "message": "Assignment automatically graded by Gemini AI",
-            "assignment": {
-                "id": assignment.id,
-                "title": assignment.title,
-                "type": assignment.assignment_type
-            },
-            "grade_result": {
-                "score": grade_result.get("score", 0),
-                "percentage": grade_result["percentage"],
-                "grade_letter": grade_result.get("grade_letter", ""),
-                "overall_feedback": grade_result["overall_feedback"],
-                "detailed_feedback": grade_result["detailed_feedback"],
-                "strengths": grade_result.get("strengths", []),
-                "improvements": grade_result.get("improvements", []),
-                "recommendations": grade_result.get("recommendations", [])
-            },
-            "student_assignment": {
-                "id": student_assignment.id,
-                "status": student_assignment.status,
-                "grade": student_assignment.grade,
-                "submitted_at": student_assignment.submitted_at.isoformat(),
-                "graded_by": "Gemini AI"
-            },
-            "processed_at": datetime.utcnow().isoformat()
+        student_assignment_payload = grade_response.get("student_assignment", {})
+        attempts_used = student_assignment_payload.get("attempts_used", recent_attempts + 1)
+        attempts_remaining = student_assignment_payload.get("attempts_remaining", max(0, 3 - attempts_used))
+
+        grade_response["retry_info"] = {
+            "is_retry_attempt": True,
+            "attempts_used": attempts_used,
+            "attempts_remaining": attempts_remaining
         }
+        
+        return grade_response
         
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error in auto-grading: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Auto-grading failed: {str(e)}"
+            status_code=500,
+            detail=f"Retry attempt failed: {str(e)}"
+        )
+
+@router.get("/assignments/{assignment_id}/status")
+async def get_assignment_status_with_grade(
+    assignment_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Get assignment status with grade display and retry information
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Get the assignment details
+        assignment = db.query(CourseAssignment).filter(CourseAssignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        # Get or create the student assignment record
+        student_assignment = db.query(StudentAssignment).filter(
+            and_(
+                StudentAssignment.assignment_id == assignment_id,
+                StudentAssignment.user_id == user_id
+            )
+        ).first()
+
+        if not student_assignment:
+            due_days = getattr(assignment, "due_days_after_assignment", None) or 7
+            student_assignment = StudentAssignment(
+                user_id=user_id,
+                assignment_id=assignment.id,
+                course_id=assignment.course_id,
+                due_date=datetime.utcnow() + timedelta(days=due_days),
+                status="assigned",
+            )
+            try:
+                db.add(student_assignment)
+                db.commit()
+                db.refresh(student_assignment)
+            except Exception:
+                db.rollback()
+                student_assignment = db.query(StudentAssignment).filter(
+                    and_(
+                        StudentAssignment.assignment_id == assignment_id,
+                        StudentAssignment.user_id == user_id
+                    )
+                ).first()
+                if not student_assignment:
+                    raise HTTPException(status_code=500, detail="Failed to create student assignment record")
+
+        required_pct = 80.0
+        current_grade = float(student_assignment.grade) if student_assignment.grade is not None else 0.0
+        passing_grade = current_grade >= required_pct
+        
+        latest_submission = db.query(AISubmission).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id
+            )
+        ).order_by(desc(AISubmission.submitted_at)).first()
+
+        twenty_four_hours_ago = datetime.utcnow() - timedelta(hours=24)
+        recent_attempts = db.query(func.count(AISubmission.id)).filter(
+            and_(
+                AISubmission.user_id == user_id,
+                AISubmission.assignment_id == assignment_id,
+                AISubmission.submitted_at >= twenty_four_hours_ago
+            )
+        ).scalar() or 0
+
+        attempts_remaining = max(0, 3 - recent_attempts)
+        if passing_grade:
+            attempts_remaining = 0
+        can_retry = not passing_grade and attempts_remaining > 0
+
+        # Determine message based on status
+        if student_assignment.submitted_at is None:
+            message = "Assignment not yet started. Submit your first attempt to get graded."
+        elif passing_grade:
+            message = f"✅ Passed with {current_grade:.1f}%! Great job!"
+        elif student_assignment.status == "failed" or attempts_remaining == 0:
+            message = f"❌ Failed with {current_grade:.1f}%. No more attempts available today."
+        elif student_assignment.status == "needs_retry":
+            message = f"📝 Score: {current_grade:.1f}% (Need {required_pct:.0f}% to pass). {attempts_remaining} attempts remaining today."
+        else:
+            message = f"Score: {current_grade:.1f}%"
+        
+        return {
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "description": assignment.description,
+                "points": assignment.points,
+                "required_percentage": required_pct
+            },
+            "student_assignment": {
+                "id": student_assignment.id,
+                "status": student_assignment.status,
+                "grade": current_grade,
+                "submitted_at": student_assignment.submitted_at.isoformat() if student_assignment.submitted_at else None,
+                "feedback": student_assignment.feedback,
+                "submission_id": latest_submission.id if latest_submission else None
+            },
+            "attempts_info": {
+                "attempts_used": recent_attempts,
+                "attempts_remaining": attempts_remaining,
+                "can_retry": can_retry,
+                "latest_submission_at": latest_submission.submitted_at.isoformat() if latest_submission and latest_submission.submitted_at else None
+            },
+            "message": message,
+            "passing_grade": passing_grade
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting assignment status: {str(e)}"
         )
 
 @router.post("/submissions/{submission_id}/process-with-ai")
@@ -1313,57 +2095,66 @@ async def process_submission_with_gemini_ai(
     """
     
     try:
-        # Get the AI submission
         submission = db.query(AISubmission).options(
             joinedload(AISubmission.course),
             joinedload(AISubmission.lesson),
             joinedload(AISubmission.block)
         ).filter(AISubmission.id == submission_id).first()
-        
+
         if not submission:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="AI submission not found"
             )
-        
-        # Check if already processed
+
         if submission.ai_processed:
             return {
                 "status": "already_processed",
                 "message": "Submission already graded",
                 "existing_score": submission.ai_score
             }
-        
-        # Extract content from file
+
+        file_bytes: Optional[bytes] = None
+        filename: Optional[str] = None
         submission_content = ""
+
         if submission.file_path:
+            file_path = Path(submission.file_path)
+            if not file_path.is_absolute():
+                file_path = Path(os.getcwd()) / file_path
             try:
-                if os.path.exists(submission.file_path):
-                    if submission.file_path.lower().endswith('.pdf'):
-                        # PDF content placeholder
-                        submission_content = f"PDF submission: {submission.original_filename}\n"
-                        submission_content += "[PDF content extraction needed]"
-                    else:
-                        with open(submission.file_path, 'r', encoding='utf-8') as f:
-                            submission_content = f.read()
-                else:
-                    submission_content = "Submission file not found"
-            except Exception as e:
-                submission_content = f"Error reading submission: {str(e)}"
-        
-        # Determine grading context
+                file_bytes = file_path.read_bytes()
+                filename = file_path.name
+            except FileNotFoundError:
+                logger.warning(
+                    "Submission file missing for processing",
+                    extra={"submission_id": submission_id, "file_path": str(file_path)},
+                )
+            except Exception:
+                logger.exception(
+                    "Error reading submission file",
+                    extra={"submission_id": submission_id, "file_path": str(file_path)},
+                )
+
+            if file_bytes is None:
+                try:
+                    submission_content = file_path.read_text(encoding="utf-8")
+                except Exception:
+                    submission_content = ""
+
         assignment_title = ""
         assignment_description = ""
         rubric = ""
         max_points = 100
-        
+
         if submission.assignment_id:
             assignment = db.query(CourseAssignment).filter(CourseAssignment.id == submission.assignment_id).first()
             if assignment:
                 assignment_title = assignment.title
-                assignment_description = assignment.description
-                rubric = assignment.rubric or assignment.description
-                max_points = assignment.points
+                assignment_description = assignment.description or ""
+                rubric = assignment.rubric or assignment.description or ""
+                if assignment.points:
+                    max_points = assignment.points
         elif submission.lesson:
             assignment_title = f"Lesson: {submission.lesson.title}"
             assignment_description = submission.lesson.learning_objectives or ""
@@ -1376,37 +2167,102 @@ async def process_submission_with_gemini_ai(
             assignment_title = f"Course Work: {submission.course.title}"
             assignment_description = submission.course.description or ""
             rubric = submission.course.description or "General course assessment"
-        
-        print(f"🤖 Processing submission {submission_id} with Gemini AI: {assignment_title}")
-        
-        # Grade with Gemini AI
-        grade_result = await gemini_service.grade_submission(
-            submission_content=submission_content,
-            assignment_title=assignment_title,
-            assignment_description=assignment_description,
-            rubric=rubric,
-            max_points=max_points,
-            submission_type=submission.submission_type
+
+        logger.info(
+            "Processing submission with Gemini AI",
+            extra={"submission_id": submission_id, "has_file": file_bytes is not None},
         )
+
+        if file_bytes is not None:
+            grade_result = await gemini_service.grade_submission_from_file(
+                file_bytes=file_bytes,
+                filename=filename or f"submission_{submission_id}.pdf",
+                assignment_title=assignment_title,
+                assignment_description=assignment_description,
+                rubric=rubric,
+                max_points=max_points,
+                submission_type=submission.submission_type
+            )
+        else:
+            if not submission_content:
+                raise HTTPException(status_code=400, detail="Submission content unavailable")
+            grade_result = await gemini_service.grade_submission(
+                submission_content=submission_content,
+                assignment_title=assignment_title,
+                assignment_description=assignment_description,
+                rubric=rubric,
+                max_points=max_points,
+                submission_type=submission.submission_type
+            )
+
+        # Extract score and feedback from raw data (best effort, handle malformed keys)
+        extracted_score = None
+        extracted_feedback = None
         
-        # Update AI submission
+        if isinstance(grade_result, dict):
+            # Extract score
+            score_val = grade_result.get('score') or grade_result.get('"score"') or grade_result.get('percentage') or grade_result.get('"percentage"')
+            if isinstance(score_val, (int, float)):
+                extracted_score = float(score_val)
+            elif isinstance(score_val, str):
+                cleaned = score_val.rstrip(',').strip()
+                try:
+                    extracted_score = float(cleaned)
+                except:
+                    pass
+            
+            # Extract feedback
+            feedback_val = grade_result.get('overall_feedback') or grade_result.get('"overall_feedback"') or grade_result.get('detailed_feedback') or grade_result.get('"detailed_feedback"')
+            if isinstance(feedback_val, str):
+                extracted_feedback = feedback_val.strip('"').strip(',').strip()
+
+        # If no score extracted and we have file, try strict grading
+        if file_bytes is not None and extracted_score is None:
+            strict = await gemini_service.grade_submission_from_file_strict(
+                file_bytes=file_bytes,
+                filename=filename or f"submission_{submission_id}.pdf",
+                assignment_title=assignment_title,
+                assignment_description=assignment_description,
+                max_points=max_points,
+                submission_type=submission.submission_type,
+            )
+            # Extract from strict result
+            if isinstance(strict, dict):
+                strict_score_val = strict.get('score') or strict.get('"score"') or strict.get('percentage') or strict.get('"percentage"')
+                if isinstance(strict_score_val, (int, float)):
+                    extracted_score = float(strict_score_val)
+                elif isinstance(strict_score_val, str):
+                    cleaned = strict_score_val.rstrip(',').strip()
+                    try:
+                        extracted_score = float(cleaned)
+                    except:
+                        pass
+                
+                # Use strict feedback if main feedback is missing
+                if not extracted_feedback:
+                    strict_feedback_val = strict.get('overall_feedback') or strict.get('"overall_feedback"') or strict.get('detailed_feedback') or strict.get('"detailed_feedback"')
+                    if isinstance(strict_feedback_val, str):
+                        extracted_feedback = strict_feedback_val.strip('"').strip(',').strip()
+
+        ai_score = extracted_score
+        ai_feedback = extracted_feedback
+
         submission.ai_processed = True
-        submission.ai_score = grade_result["percentage"]
-        submission.ai_feedback = grade_result["detailed_feedback"]
-        submission.ai_strengths = "\n".join(grade_result.get("strengths", []))
-        submission.ai_improvements = "\n".join(grade_result.get("improvements", []))
+        submission.ai_score = ai_score
+        submission.ai_feedback = ai_feedback
+        submission.ai_strengths = None  # Not using normalized fields
+        submission.ai_improvements = None  # Not using normalized fields
+        submission.ai_corrections = None  # Not using normalized fields
         submission.processed_at = datetime.utcnow()
-        
-        # Update study session if exists
+
         if submission.session_id:
             session = db.query(StudySession).filter(StudySession.id == submission.session_id).first()
             if session:
-                session.ai_score = grade_result["percentage"]
-                session.ai_feedback = grade_result["detailed_feedback"]
-                session.ai_recommendations = "\n".join(grade_result.get("recommendations", []))
+                session.ai_score = ai_score
+                session.ai_feedback = ai_feedback
+                session.ai_recommendations = None  # Not using normalized fields
                 session.updated_at = datetime.utcnow()
-        
-        # Update student assignment if exists
+
         if submission.assignment_id:
             student_assignment = db.query(StudentAssignment).filter(
                 and_(
@@ -1414,23 +2270,31 @@ async def process_submission_with_gemini_ai(
                     StudentAssignment.assignment_id == submission.assignment_id
                 )
             ).first()
-            
+
             if student_assignment:
-                student_assignment.ai_grade = grade_result["percentage"]
-                student_assignment.grade = grade_result["percentage"]
-                student_assignment.feedback = grade_result["detailed_feedback"]
+                student_assignment.ai_grade = ai_score
+                student_assignment.grade = ai_score
+                student_assignment.feedback = ai_feedback
                 student_assignment.status = "graded"
                 student_assignment.updated_at = datetime.utcnow()
-        
+
         db.commit()
-        
-        print(f"✅ Gemini AI processing complete: {grade_result['percentage']}% for submission {submission_id}")
-        
+
+        logger.info(
+            "Submission processed with Gemini AI",
+            extra={"submission_id": submission_id, "ai_score": ai_score},
+        )
+
         return {
             "status": "success",
             "message": "Submission processed successfully with Gemini AI",
             "submission_id": submission_id,
-            "grade_result": grade_result,
+            "grade_result": {
+                **grade_result,
+                "raw": grade_result,  # Return raw data instead of normalized
+                "percentage": ai_score,
+                "detailed_feedback": ai_feedback,
+            },
             "processing_details": {
                 "assignment_title": assignment_title,
                 "rubric_used": rubric[:100] + "..." if len(rubric) > 100 else rubric,
@@ -1439,11 +2303,14 @@ async def process_submission_with_gemini_ai(
             },
             "processed_at": datetime.utcnow().isoformat()
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error processing submission with Gemini AI: {str(e)}")
+        logger.exception(
+            "Failed processing submission with Gemini AI",
+            extra={"submission_id": submission_id},
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to process submission: {str(e)}"

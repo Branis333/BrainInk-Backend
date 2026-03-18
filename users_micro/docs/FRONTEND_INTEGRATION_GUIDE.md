@@ -1,734 +1,568 @@
-# Frontend Integration Guide for BrainInk Backend
+# 📱 Frontend Integration Guide - Reading Assistant
 
-## 🎯 Quick Setup Checklist
+## 🎯 Complete API Reference for Mobile App Integration
 
-### 1. Server Setup
-- **Server URL:** `http://localhost:8000`
-- **Start Server:** Run `uvicorn main:app --reload` or use `start.bat`
-- **API Docs:** Visit `http://localhost:8000/docs` for interactive testing
-
-### 2. Frontend Configuration
+### 🔑 **Authentication Required**
+All endpoints require JWT token in Authorization header:
 ```javascript
-// config.js
-export const API_BASE_URL = 'http://localhost:8000';
-export const ENDPOINTS = {
-  auth: {
-    register: '/register',
-    login: '/login',
-    me: '/users/me'
-  },
-  studyArea: {
-    userStatus: '/study-area/user/status',
-    schoolRequest: '/study-area/school-requests/create',
-    generateCode: '/study-area/access-codes/generate',
-    joinStudent: '/study-area/join-school/student',
-    joinTeacher: '/study-area/join-school/teacher',
-    mySchool: '/study-area/schools/my-school',
-    subjects: '/study-area/subjects/my-school'
-  },
-  grades: {
-    createAssignment: '/grades/assignments/create',
-    myAssignments: '/grades/assignments/my-assignments',
-    myGrades: '/grades/grades/my-grades',
-    createGrade: '/grades/grades/create'
-  }
-};
+headers: {
+  'Authorization': 'Bearer YOUR_JWT_TOKEN',
+  'Content-Type': 'application/json'
+}
 ```
 
-## 🔐 Authentication Service
+---
 
+## 📚 **1. READING CONTENT MANAGEMENT**
+
+### Get Reading Content for Student
 ```javascript
-// authService.js
-class AuthService {
-  constructor() {
-    this.token = localStorage.getItem('token');
-    this.user = JSON.parse(localStorage.getItem('user') || 'null');
-  }
-
-  async register(userData) {
-    const response = await fetch(`${API_BASE_URL}/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(userData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async login(username, password) {
-    const response = await fetch(`${API_BASE_URL}/login`, {
-      method: 'POST', 
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password })
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-
-    const data = await response.json();
-    this.token = data.access_token;
-    this.user = data.user_info;
-    
-    localStorage.setItem('token', this.token);
-    localStorage.setItem('user', JSON.stringify(this.user));
-    
-    return data;
-  }
-
-  logout() {
-    this.token = null;
-    this.user = null;
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-  }
-
-  getAuthHeaders() {
-    return {
-      'Authorization': `Bearer ${this.token}`,
+// Get age-appropriate reading content
+const getReadingContent = async (studentId, gradeLevel = 'K') => {
+  const response = await fetch(`/reading-assistant/content?grade_level=${gradeLevel}&limit=10`, {
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
       'Content-Type': 'application/json'
-    };
-  }
-
-  isAuthenticated() {
-    return !!this.token;
-  }
-}
-
-export const authService = new AuthService();
-```
-
-## 🏫 Study Area Service
-
-```javascript
-// studyAreaService.js
-class StudyAreaService {
-  async getUserStatus() {
-    const response = await fetch(`${API_BASE_URL}/study-area/user/status`, {
-      headers: authService.getAuthHeaders()
-    });
-    
-    if (!response.ok) throw new Error('Failed to get user status');
-    return await response.json();
-  }
-
-  async createSchoolRequest(schoolData) {
-    const response = await fetch(`${API_BASE_URL}/study-area/school-requests/create`, {
-      method: 'POST',
-      headers: authService.getAuthHeaders(),
-      body: JSON.stringify(schoolData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
     }
-    
-    return await response.json();
+  });
+  
+  const data = await response.json();
+  /*
+  Returns:
+  {
+    "success": true,
+    "content": [
+      {
+        "id": 1,
+        "title": "The Big Cat",
+        "content": "The big cat runs fast. The cat is black.",
+        "difficulty_level": "beginner",
+        "reading_level": "K",
+        "word_count": 9,
+        "estimated_duration": 30
+      }
+    ]
   }
-
-  async generateAccessCode(codeData) {
-    const response = await fetch(`${API_BASE_URL}/study-area/access-codes/generate`, {
-      method: 'POST',
-      headers: authService.getAuthHeaders(),
-      body: JSON.stringify(codeData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async joinSchoolAsStudent(joinData) {
-    const response = await fetch(`${API_BASE_URL}/study-area/join-school/student`, {
-      method: 'POST',
-      headers: authService.getAuthHeaders(),
-      body: JSON.stringify(joinData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async getMySchool() {
-    const response = await fetch(`${API_BASE_URL}/study-area/schools/my-school`, {
-      headers: authService.getAuthHeaders()
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async getSchoolSubjects() {
-    const response = await fetch(`${API_BASE_URL}/study-area/subjects/my-school`, {
-      headers: authService.getAuthHeaders()
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-}
-
-export const studyAreaService = new StudyAreaService();
-```
-
-## 📝 Grades Service
-
-```javascript
-// gradesService.js
-class GradesService {
-  async createAssignment(assignmentData) {
-    const response = await fetch(`${API_BASE_URL}/grades/assignments/create`, {
-      method: 'POST',
-      headers: authService.getAuthHeaders(),
-      body: JSON.stringify(assignmentData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async getMyAssignments() {
-    const response = await fetch(`${API_BASE_URL}/grades/assignments/my-assignments`, {
-      headers: authService.getAuthHeaders()
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async getMyGrades() {
-    const response = await fetch(`${API_BASE_URL}/grades/grades/my-grades`, {
-      headers: authService.getAuthHeaders()
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async createGrade(gradeData) {
-    const response = await fetch(`${API_BASE_URL}/grades/grades/create`, {
-      method: 'POST',
-      headers: authService.getAuthHeaders(),
-      body: JSON.stringify(gradeData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-
-  async bulkCreateGrades(bulkGradeData) {
-    const response = await fetch(`${API_BASE_URL}/grades/grades/bulk-create`, {
-      method: 'POST',
-      headers: authService.getAuthHeaders(),
-      body: JSON.stringify(bulkGradeData)
-    });
-    
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.detail);
-    }
-    
-    return await response.json();
-  }
-}
-
-export const gradesService = new GradesService();
-```
-
-## 🎨 React Component Examples
-
-### 1. Login Component
-```jsx
-// LoginForm.jsx
-import React, { useState } from 'react';
-import { authService } from '../services/authService';
-
-const LoginForm = ({ onLogin }) => {
-  const [formData, setFormData] = useState({ username: '', password: '' });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
-    try {
-      const result = await authService.login(formData.username, formData.password);
-      onLogin(result);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="login-form">
-      <h2>Login to BrainInk</h2>
-      
-      {error && <div className="error">{error}</div>}
-      
-      <input
-        type="text"
-        placeholder="Username"
-        value={formData.username}
-        onChange={(e) => setFormData({...formData, username: e.target.value})}
-        required
-      />
-      
-      <input
-        type="password" 
-        placeholder="Password"
-        value={formData.password}
-        onChange={(e) => setFormData({...formData, password: e.target.value})}
-        required
-      />
-      
-      <button type="submit" disabled={loading}>
-        {loading ? 'Logging in...' : 'Login'}
-      </button>
-    </form>
-  );
+  */
+  return data.content;
 };
-
-export default LoginForm;
 ```
 
-### 2. User Dashboard Routing
-```jsx
-// Dashboard.jsx
+### Create Custom Reading Content (Teachers)
+```javascript
+const createReadingContent = async (contentData) => {
+  const response = await fetch('/reading-assistant/content', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      title: "My Custom Story",
+      content: "The sun is bright. Birds sing songs.",
+      difficulty_level: "beginner",
+      reading_level: "K",
+      subject: "reading"
+    })
+  });
+  
+  return await response.json();
+};
+```
+
+---
+
+## 🎤 **2. READING SESSION & AUDIO ANALYSIS**
+
+### Start Reading Session
+```javascript
+const startReadingSession = async (studentId, contentId) => {
+  const response = await fetch('/reading-assistant/session/start', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      student_id: studentId,
+      content_id: contentId
+    })
+  });
+  
+  const session = await response.json();
+  /*
+  Returns:
+  {
+    "success": true,
+    "session": {
+      "id": 123,
+      "student_id": 456,
+      "content_id": 1,
+      "status": "active",
+      "started_at": "2025-09-24T10:00:00Z"
+    }
+  }
+  */
+  return session;
+};
+```
+
+### Upload Audio for Analysis ⭐ **MAIN FEATURE**
+```javascript
+const analyzeReading = async (sessionId, audioBlob, expectedText) => {
+  const formData = new FormData();
+  formData.append('audio_file', audioBlob, 'reading.wav');
+  formData.append('session_id', sessionId);
+  formData.append('expected_text', expectedText);
+  
+  const response = await fetch('/reading-assistant/analyze-audio', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`
+      // Don't set Content-Type for FormData - browser handles it
+    },
+    body: formData
+  });
+  
+  const analysis = await response.json();
+  /*
+  Returns:
+  {
+    "success": true,
+    "transcribed_text": "The big ket runs fest",
+    "analysis": {
+      "overall_score": 7.5,
+      "reading_pace": "appropriate",
+      "word_analysis": [
+        {
+          "word": "The",
+          "expected": "The",
+          "status": "correct",
+          "confidence": 0.95
+        },
+        {
+          "word": "ket", 
+          "expected": "cat",
+          "status": "incorrect",
+          "confidence": 0.80,
+          "pronunciation_url": "/pronunciation-audio/cat_123.mp3"
+        },
+        {
+          "word": "fest",
+          "expected": "fast", 
+          "status": "incorrect",
+          "confidence": 0.75,
+          "pronunciation_url": "/pronunciation-audio/fast_124.mp3"
+        }
+      ]
+    },
+    "feedback": {
+      "encouragement": "Great job reading! Let's practice a couple words together.",
+      "suggestions": ["Practice the 'cat' sound", "Try saying 'fast' slower"]
+    }
+  }
+  */
+  return analysis;
+};
+```
+
+---
+
+## 🔊 **3. PRONUNCIATION FEATURES** ⭐ **NEW TTS SYSTEM**
+
+### Get Word Pronunciation
+```javascript
+const getWordPronunciation = async (word) => {
+  const response = await fetch('/reading-assistant/pronunciation/word', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      word: word,
+      speed: "slow", // "slow", "normal", "fast"
+      voice_type: "child_friendly"
+    })
+  });
+  
+  const result = await response.json();
+  /*
+  Returns:
+  {
+    "success": true,
+    "word": "cat",
+    "audio_url": "/pronunciation-audio/cat_123.mp3",
+    "phonetic": "kæt",
+    "syllables": ["cat"],
+    "tips": "Make the 'k' sound, then 'a' as in 'apple', then 't'"
+  }
+  */
+  
+  // Play the audio
+  if (result.success && result.audio_url) {
+    const audio = new Audio(result.audio_url);
+    audio.play();
+  }
+  
+  return result;
+};
+```
+
+### Get Sentence Pronunciation
+```javascript
+const getSentencePronunciation = async (sentence) => {
+  const response = await fetch('/reading-assistant/pronunciation/sentence', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      sentence: sentence,
+      speed: "slow",
+      pause_between_words: true
+    })
+  });
+  
+  const result = await response.json();
+  /*
+  Returns:
+  {
+    "success": true,
+    "sentence": "The big cat runs fast",
+    "audio_url": "/pronunciation-audio/sentence_456.mp3",
+    "word_breakdown": [
+      {
+        "word": "The",
+        "phonetic": "ðə",
+        "audio_url": "/pronunciation-audio/the_789.mp3"
+      }
+    ]
+  }
+  */
+  
+  return result;
+};
+```
+
+---
+
+## 📊 **4. PROGRESS TRACKING**
+
+### Get Student Progress
+```javascript
+const getStudentProgress = async (studentId) => {
+  const response = await fetch(`/reading-assistant/progress/${studentId}`, {
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
+      'Content-Type': 'application/json'
+    }
+  });
+  
+  const progress = await response.json();
+  /*
+  Returns:
+  {
+    "success": true,
+    "progress": {
+      "current_level": "K",
+      "sessions_completed": 15,
+      "average_score": 8.2,
+      "words_mastered": 45,
+      "recent_sessions": [...],
+      "achievements": ["First Reading!", "10 Words Mastered"]
+    }
+  }
+  */
+  return progress;
+};
+```
+
+### Update Reading Progress
+```javascript
+const updateProgress = async (sessionId, score, wordsCorrect, totalWords) => {
+  const response = await fetch('/reading-assistant/progress/update', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${jwtToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      session_id: sessionId,
+      score: score,
+      words_correct: wordsCorrect,
+      total_words: totalWords,
+      completed: true
+    })
+  });
+  
+  return await response.json();
+};
+```
+
+---
+
+## 📱 **5. COMPLETE MOBILE APP FLOW**
+
+### React Native Implementation Example
+```javascript
 import React, { useState, useEffect } from 'react';
-import { studyAreaService } from '../services/studyAreaService';
-import PrincipalDashboard from './PrincipalDashboard';
-import TeacherDashboard from './TeacherDashboard';
-import StudentDashboard from './StudentDashboard';
-import OnboardingFlow from './OnboardingFlow';
+import { View, Text, TouchableOpacity, Alert } from 'react-native';
+import { Audio } from 'expo-av';
 
-const Dashboard = () => {
-  const [userStatus, setUserStatus] = useState(null);
-  const [loading, setLoading] = useState(true);
+const ReadingAssistant = ({ studentId, jwtToken }) => {
+  const [reading, setReading] = useState(null);
+  const [session, setSession] = useState(null);
+  const [recording, setRecording] = useState(null);
+  const [analysis, setAnalysis] = useState(null);
 
+  // 1. Load reading content
   useEffect(() => {
-    loadUserStatus();
+    loadReadingContent();
   }, []);
 
-  const loadUserStatus = async () => {
+  const loadReadingContent = async () => {
     try {
-      const status = await studyAreaService.getUserStatus();
-      setUserStatus(status);
+      const response = await fetch('/reading-assistant/content?grade_level=K&limit=1', {
+        headers: {
+          'Authorization': `Bearer ${jwtToken}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      const data = await response.json();
+      if (data.success && data.content.length > 0) {
+        setReading(data.content[0]);
+      }
     } catch (error) {
-      console.error('Failed to load user status:', error);
-    } finally {
-      setLoading(false);
+      Alert.alert('Error', 'Failed to load reading content');
     }
   };
 
-  if (loading) return <div>Loading...</div>;
-
-  const roles = userStatus?.user_info?.roles || [];
-
-  // Route to appropriate dashboard based on roles
-  if (roles.includes('principal')) {
-    return <PrincipalDashboard userStatus={userStatus} />;
-  } else if (roles.includes('teacher')) {
-    return <TeacherDashboard userStatus={userStatus} />;
-  } else if (roles.includes('student')) {
-    return <StudentDashboard userStatus={userStatus} />;
-  } else {
-    return <OnboardingFlow userStatus={userStatus} onUpdate={loadUserStatus} />;
-  }
-};
-
-export default Dashboard;
-```
-
-### 3. Access Code Generator (Principal)
-```jsx
-// AccessCodeGenerator.jsx
-import React, { useState } from 'react';
-import { studyAreaService } from '../services/studyAreaService';
-
-const AccessCodeGenerator = ({ schoolId }) => {
-  const [formData, setFormData] = useState({
-    email: '',
-    code_type: 'student'
-  });
-  const [generatedCode, setGeneratedCode] = useState(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
+  // 2. Start reading session
+  const startSession = async () => {
     try {
-      const codeData = {
-        school_id: schoolId,
-        email: formData.email,
-        code_type: formData.code_type
-      };
-
-      const result = await studyAreaService.generateAccessCode(codeData);
-      setGeneratedCode(result);
-      setFormData({ email: '', code_type: 'student' }); // Reset form
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+      const response = await fetch('/reading-assistant/session/start', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${jwtToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          student_id: studentId,
+          content_id: reading.id
+        })
+      });
+      const sessionData = await response.json();
+      if (sessionData.success) {
+        setSession(sessionData.session);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to start session');
     }
   };
 
-  return (
-    <div className="access-code-generator">
-      <h3>Generate Access Code</h3>
-      
-      <form onSubmit={handleSubmit}>
-        <input
-          type="email"
-          placeholder="Student/Teacher Email"
-          value={formData.email}
-          onChange={(e) => setFormData({...formData, email: e.target.value})}
-          required
-        />
-        
-        <select
-          value={formData.code_type}
-          onChange={(e) => setFormData({...formData, code_type: e.target.value})}
-        >
-          <option value="student">Student</option>
-          <option value="teacher">Teacher</option>
-        </select>
-        
-        <button type="submit" disabled={loading}>
-          {loading ? 'Generating...' : 'Generate Code'}
-        </button>
-      </form>
-
-      {error && <div className="error">{error}</div>}
-      
-      {generatedCode && (
-        <div className="generated-code">
-          <h4>Code Generated Successfully!</h4>
-          <p><strong>Code:</strong> {generatedCode.code}</p>
-          <p><strong>For:</strong> {generatedCode.email}</p>
-          <p><strong>Type:</strong> {generatedCode.code_type}</p>
-          <p>Share this code with the user to join your school.</p>
-        </div>
-      )}
-    </div>
-  );
-};
-
-export default AccessCodeGenerator;
-```
-
-### 4. Join School Form
-```jsx
-// JoinSchoolForm.jsx
-import React, { useState } from 'react';
-import { studyAreaService } from '../services/studyAreaService';
-
-const JoinSchoolForm = ({ userEmail, onSuccess }) => {
-  const [formData, setFormData] = useState({
-    school_name: '',
-    access_code: '',
-    user_type: 'student'
-  });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
+  // 3. Record and analyze audio
+  const startRecording = async () => {
     try {
-      const joinData = {
-        school_name: formData.school_name,
-        email: userEmail,
-        access_code: formData.access_code
-      };
-
-      let result;
-      if (formData.user_type === 'student') {
-        result = await studyAreaService.joinSchoolAsStudent(joinData);
-      } else {
-        result = await studyAreaService.joinSchoolAsTeacher(joinData);
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission needed', 'Microphone access required');
+        return;
       }
 
-      onSuccess(result);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <div className="join-school-form">
-      <h3>Join a School</h3>
-      
-      <form onSubmit={handleSubmit}>
-        <input
-          type="text"
-          placeholder="School Name"
-          value={formData.school_name}
-          onChange={(e) => setFormData({...formData, school_name: e.target.value})}
-          required
-        />
-        
-        <input
-          type="text"
-          placeholder="Access Code"
-          value={formData.access_code}
-          onChange={(e) => setFormData({...formData, access_code: e.target.value.toUpperCase()})}
-          required
-        />
-        
-        <select
-          value={formData.user_type}
-          onChange={(e) => setFormData({...formData, user_type: e.target.value})}
-        >
-          <option value="student">Join as Student</option>
-          <option value="teacher">Join as Teacher</option>
-        </select>
-        
-        <button type="submit" disabled={loading}>
-          {loading ? 'Joining...' : 'Join School'}
-        </button>
-      </form>
-
-      {error && <div className="error">{error}</div>}
-    </div>
-  );
-};
-
-export default JoinSchoolForm;
-```
-
-### 5. Assignment Creator (Teacher)
-```jsx
-// AssignmentCreator.jsx
-import React, { useState, useEffect } from 'react';
-import { gradesService } from '../services/gradesService';
-import { studyAreaService } from '../services/studyAreaService';
-
-const AssignmentCreator = ({ onSuccess }) => {
-  const [subjects, setSubjects] = useState([]);
-  const [formData, setFormData] = useState({
-    title: '',
-    description: '',
-    subtopic: '',
-    max_points: 100,
-    due_date: '',
-    subject_id: ''
-  });
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    loadSubjects();
-  }, []);
-
-  const loadSubjects = async () => {
-    try {
-      // For teachers, this gets subjects they're assigned to
-      const subjectsData = await studyAreaService.getTeacherSubjects();
-      setSubjects(subjectsData);
-    } catch (err) {
-      console.error('Failed to load subjects:', err);
-    }
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
-    setError('');
-
-    try {
-      const assignmentData = {
-        ...formData,
-        subject_id: parseInt(formData.subject_id),
-        max_points: parseInt(formData.max_points),
-        due_date: formData.due_date ? new Date(formData.due_date).toISOString() : null
+      const recordingOptions = {
+        android: {
+          extension: '.wav',
+          outputFormat: Audio.RECORDING_OPTION_ANDROID_OUTPUT_FORMAT_MPEG_4,
+          audioEncoder: Audio.RECORDING_OPTION_ANDROID_AUDIO_ENCODER_AAC,
+          sampleRate: 16000,
+          numberOfChannels: 1,
+          bitRate: 128000,
+        },
+        ios: {
+          extension: '.wav',
+          outputFormat: Audio.RECORDING_OPTION_IOS_OUTPUT_FORMAT_LINEARPCM,
+          audioQuality: Audio.RECORDING_OPTION_IOS_AUDIO_QUALITY_HIGH,
+          sampleRate: 16000,
+          numberOfChannels: 1,
+          bitRate: 128000,
+          linearPCMBitDepth: 16,
+          linearPCMIsBigEndian: false,
+          linearPCMIsFloat: false,
+        },
       };
 
-      const result = await gradesService.createAssignment(assignmentData);
-      onSuccess(result);
+      const { recording } = await Audio.Recording.createAsync(recordingOptions);
+      setRecording(recording);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to start recording');
+    }
+  };
+
+  const stopRecording = async () => {
+    try {
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
       
-      // Reset form
-      setFormData({
-        title: '',
-        description: '',
-        subtopic: '',
-        max_points: 100,
-        due_date: '',
-        subject_id: ''
+      // Upload and analyze
+      await analyzeAudio(uri);
+    } catch (error) {
+      Alert.alert('Error', 'Failed to stop recording');
+    }
+  };
+
+  const analyzeAudio = async (audioUri) => {
+    try {
+      const formData = new FormData();
+      formData.append('audio_file', {
+        uri: audioUri,
+        type: 'audio/wav',
+        name: 'reading.wav',
       });
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
+      formData.append('session_id', session.id);
+      formData.append('expected_text', reading.content);
+
+      const response = await fetch('/reading-assistant/analyze-audio', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${jwtToken}`,
+        },
+        body: formData,
+      });
+
+      const analysisData = await response.json();
+      if (analysisData.success) {
+        setAnalysis(analysisData);
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to analyze audio');
+    }
+  };
+
+  // 4. Handle pronunciation help
+  const playPronunciation = async (word) => {
+    try {
+      const response = await fetch('/reading-assistant/pronunciation/word', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${jwtToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          word: word,
+          speed: "slow"
+        })
+      });
+
+      const result = await response.json();
+      if (result.success && result.audio_url) {
+        const { sound } = await Audio.Sound.createAsync({ uri: result.audio_url });
+        await sound.playAsync();
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to play pronunciation');
     }
   };
 
   return (
-    <div className="assignment-creator">
-      <h3>Create New Assignment</h3>
-      
-      <form onSubmit={handleSubmit}>
-        <input
-          type="text"
-          placeholder="Assignment Title"
-          value={formData.title}
-          onChange={(e) => setFormData({...formData, title: e.target.value})}
-          required
-        />
-        
-        <textarea
-          placeholder="Description"
-          value={formData.description}
-          onChange={(e) => setFormData({...formData, description: e.target.value})}
-          rows="3"
-        />
-        
-        <input
-          type="text"
-          placeholder="Subtopic (optional)"
-          value={formData.subtopic}
-          onChange={(e) => setFormData({...formData, subtopic: e.target.value})}
-        />
-        
-        <input
-          type="number"
-          placeholder="Max Points"
-          value={formData.max_points}
-          onChange={(e) => setFormData({...formData, max_points: e.target.value})}
-          min="1"
-          max="1000"
-          required
-        />
-        
-        <input
-          type="datetime-local"
-          placeholder="Due Date"
-          value={formData.due_date}
-          onChange={(e) => setFormData({...formData, due_date: e.target.value})}
-        />
-        
-        <select
-          value={formData.subject_id}
-          onChange={(e) => setFormData({...formData, subject_id: e.target.value})}
-          required
-        >
-          <option value="">Select Subject</option>
-          {subjects.map(subject => (
-            <option key={subject.id} value={subject.id}>
-              {subject.name}
-            </option>
-          ))}
-        </select>
-        
-        <button type="submit" disabled={loading}>
-          {loading ? 'Creating...' : 'Create Assignment'}
-        </button>
-      </form>
+    <View>
+      {reading && (
+        <View>
+          <Text style={{ fontSize: 24, marginBottom: 20 }}>
+            {reading.title}
+          </Text>
+          
+          <Text style={{ fontSize: 18, marginBottom: 20 }}>
+            {reading.content}
+          </Text>
 
-      {error && <div className="error">{error}</div>}
-    </div>
+          {!session && (
+            <TouchableOpacity onPress={startSession}>
+              <Text>Start Reading</Text>
+            </TouchableOpacity>
+          )}
+
+          {session && !recording && (
+            <TouchableOpacity onPress={startRecording}>
+              <Text>🎤 Start Recording</Text>
+            </TouchableOpacity>
+          )}
+
+          {recording && (
+            <TouchableOpacity onPress={stopRecording}>
+              <Text>⏹️ Stop Recording</Text>
+            </TouchableOpacity>
+          )}
+
+          {analysis && (
+            <View>
+              <Text>Score: {analysis.analysis.overall_score}/10</Text>
+              <Text>{analysis.feedback.encouragement}</Text>
+              
+              {analysis.analysis.word_analysis.map((word, index) => (
+                <View key={index} style={{ 
+                  flexDirection: 'row',
+                  backgroundColor: word.status === 'correct' ? '#90EE90' : '#FFB6C1',
+                  margin: 5,
+                  padding: 10,
+                  borderRadius: 5
+                }}>
+                  <Text>{word.word}</Text>
+                  {word.status === 'incorrect' && (
+                    <TouchableOpacity onPress={() => playPronunciation(word.expected)}>
+                      <Text>🔊</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              ))}
+            </View>
+          )}
+        </View>
+      )}
+    </View>
   );
 };
 
-export default AssignmentCreator;
+export default ReadingAssistant;
 ```
 
-## 🔄 Error Handling Pattern
+---
 
-```javascript
-// errorHandler.js
-export const handleApiError = (error) => {
-  console.error('API Error:', error);
-  
-  if (error.message.includes('credentials')) {
-    // Token expired or invalid
-    authService.logout();
-    window.location.href = '/login';
-  } else if (error.message.includes('Forbidden')) {
-    // User doesn't have required role
-    return 'You do not have permission to perform this action.';
-  } else if (error.message.includes('Not Found')) {
-    // Resource not found
-    return 'The requested resource was not found.';
-  } else {
-    // Generic error
-    return error.message || 'An unexpected error occurred.';
-  }
-};
-```
+## 🎯 **6. KEY API ENDPOINTS SUMMARY**
 
-## 🎯 Frontend Workflow Summary
+| Endpoint | Method | Purpose |
+|----------|---------|---------|
+| `/reading-assistant/content` | GET | Get reading materials |
+| `/reading-assistant/content` | POST | Create custom content |
+| `/reading-assistant/session/start` | POST | Start reading session |
+| `/reading-assistant/analyze-audio` | POST | **Main feature - analyze reading** |
+| `/reading-assistant/pronunciation/word` | POST | **Get word pronunciation** |
+| `/reading-assistant/pronunciation/sentence` | POST | Get sentence pronunciation |
+| `/reading-assistant/progress/{student_id}` | GET | Get reading progress |
+| `/reading-assistant/sessions/{student_id}` | GET | Get session history |
 
-### 1. User Registration/Login Flow
-```
-Register → Login → Get User Status → Route to Dashboard
-```
+---
 
-### 2. Principal Workflow
-```
-Login → Check School Status → Create School (if needed) → 
-Generate Access Codes → Manage Subjects → Assign Teachers
-```
+## 💡 **Usage Tips:**
 
-### 3. Teacher Workflow  
-```
-Login → Join School (if needed) → View Subjects → 
-Create Assignments → Grade Students
+1. **Authentication**: Always include JWT token
+2. **Audio Format**: Use WAV format, 16kHz sample rate for best results
+3. **Error Handling**: Check `success` field in responses
+4. **Pronunciation URLs**: Cache audio files for offline replay
+5. **Progress Tracking**: Update progress after each session
+6. **Mobile Optimization**: Use device TTS as fallback for offline mode
+
+---
+
+## 🔧 **Testing Endpoints:**
+
+```bash
+# Test with curl
+curl -X POST "http://your-api/reading-assistant/pronunciation/word" \
+  -H "Authorization: Bearer YOUR_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"word": "cat", "speed": "slow"}'
 ```
 
-### 4. Student Workflow
-```
-Login → Join School (if needed) → View Subjects → 
-View Assignments → Check Grades
-```
-
-This setup provides a complete foundation for integrating your frontend with the BrainInk backend. Each service handles API communication, authentication, and error handling, while the React components provide reusable UI patterns for common operations.
+This guide provides everything you need to integrate the reading assistant into your mobile app! 🚀📱

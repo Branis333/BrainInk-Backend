@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from Endpoints import achivements as auth
-from Endpoints import tournaments
-from Endpoints import questions  # Add this
+# from Endpoints import tournaments
+from Endpoints import questions
+from Endpoints import chainlink  # Add this
+from Endpoints import question_converter  # Add this
 from db.connection import engine
 from db.database import test_connection
 import models.models as models  # This now includes QuestionBank
@@ -47,8 +49,10 @@ async def startup_event():
 
 # Include routers
 app.include_router(auth.router)
-app.include_router(tournaments.router)
+# app.include_router(tournaments.router)
 app.include_router(questions.router)
+app.include_router(chainlink.router)
+app.include_router(question_converter.router)
 
 @app.get("/")
 def root():

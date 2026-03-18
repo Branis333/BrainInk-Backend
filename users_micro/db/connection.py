@@ -5,6 +5,13 @@ from .database import get_engine, get_session_local
 from typing import Annotated
 from models.users_models import Base
 
+# Import all models to ensure they are registered with Base.metadata
+# This MUST be done before Base.metadata.create_all()
+import models.afterschool_models
+import models.study_area_models
+import models.reading_assistant_models
+import models.ai_tutor_models
+
 # Initialize engine and SessionLocal lazily
 engine = None
 SessionLocal = None

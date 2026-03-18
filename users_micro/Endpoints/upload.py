@@ -9,14 +9,13 @@ import os
 import shutil
 import uuid
 import asyncio
+import tempfile
 import aiofiles
 import hashlib
-from PIL import Image
+from PIL import Image, ImageOps
 import io
 import httpx
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import letter, A4
-from reportlab.lib.utils import ImageReader
+import img2pdf
 
 from db.connection import db_dependency
 from models.study_area_models import (
@@ -41,7 +40,13 @@ user_dependency = Annotated[dict, Depends(get_current_user)]
 # Configuration
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-KANA_BASE_URL = os.getenv("KANA_BASE_URL", "https://kana-backend-app.onrender.com")
+TARGET_PDF_SIZE_BYTES = 500 * 1024  # 500KB target for fast DB storage and download
+MIN_ACCEPTABLE_JPEG_QUALITY = 24
+# Ultra preset tuned for speed and very small DB payloads.
+ULTRA_PRIMARY_MAX_DIMENSION = 1000
+ULTRA_PRIMARY_JPEG_QUALITY = 34
+ULTRA_FALLBACK_MAX_DIMENSION = 800
+ULTRA_FALLBACK_JPEG_QUALITY = 28
 
 # Legacy file path for backward compatibility (deprecated - using database storage now)
 STUDENT_PDFS_DIR = Path("uploads/student_pdfs")
@@ -219,89 +224,109 @@ def validate_bulk_image_file(file: UploadFile) -> bool:
     return file_extension in ALLOWED_EXTENSIONS
 
 
-def resize_image_for_pdf(image: Image.Image, max_width: float, max_height: float) -> tuple:
-    """
-    Resize image to fit within PDF page dimensions while maintaining aspect ratio
-    Returns (width, height) for the resized image
-    """
-    img_width, img_height = image.size
-    
-    # Calculate scaling factor to fit within page
-    width_ratio = max_width / img_width
-    height_ratio = max_height / img_height
-    scale_factor = min(width_ratio, height_ratio)
-    
-    # Calculate new dimensions
-    new_width = img_width * scale_factor
-    new_height = img_height * scale_factor
-    
-    return new_width, new_height
+def _compress_image_for_pdf(image_data: bytes, max_dimension: int, quality: int) -> bytes:
+    """Convert incoming image bytes to optimized JPEG bytes for fast PDF generation."""
+    if not image_data:
+        raise ValueError("Empty image data")
+
+    with Image.open(io.BytesIO(image_data)) as image:
+        image = ImageOps.exif_transpose(image)
+
+        # Flatten transparency to white because JPEG does not support alpha.
+        if image.mode in ("RGBA", "LA", "P"):
+            rgba = image.convert("RGBA")
+            background = Image.new("RGB", rgba.size, (255, 255, 255))
+            background.paste(rgba, mask=rgba.split()[-1])
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+
+        if max(image.size) > max_dimension:
+            image.thumbnail((max_dimension, max_dimension), Image.Resampling.LANCZOS)
+
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=max(MIN_ACCEPTABLE_JPEG_QUALITY, quality),
+            optimize=True,
+            progressive=True,
+            subsampling="4:2:0"
+        )
+        return buffer.getvalue()
 
 
-async def create_pdf_from_images(images: List[UploadFile], filename: str) -> tuple[bytes, str]:
+async def create_pdf_from_images(images: List[UploadFile], filename: str) -> tuple[bytes, str, bool]:
     """
-    Create a PDF file from a list of image files
-    Returns tuple of (pdf_bytes, content_hash)
+    Create an optimized PDF file from image uploads.
+    Returns tuple of (pdf_bytes, content_hash, target_size_achieved).
     """
-    # Create PDF in memory
-    pdf_buffer = io.BytesIO()
-    c = canvas.Canvas(pdf_buffer, pagesize=A4)
-    page_width, page_height = A4
-   
-    # Add margins (50 points = ~0.7 inches)
-    margin = 50
-    usable_width = page_width - (2 * margin)
-    usable_height = page_height - (2 * margin)
-    
+    original_images_data: List[bytes] = []
+
     for image_file in images:
         try:
-            # Read image data
             image_data = await image_file.read()
-            
-            # Open image with PIL
-            image = Image.open(io.BytesIO(image_data))
-            
-            # Convert to RGB if necessary (for PDF compatibility)
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Calculate dimensions to fit the page
-            img_width, img_height = resize_image_for_pdf(image, usable_width, usable_height)
-            
-            # Center the image on the page
-            x_offset = (page_width - img_width) / 2
-            y_offset = (page_height - img_height) / 2
-            
-            # Create ImageReader object for reportlab
-            img_buffer = io.BytesIO()
-            image.save(img_buffer, format='JPEG', quality=85)
-            img_buffer.seek(0)
-            img_reader = ImageReader(img_buffer)
-            
-            # Draw image on PDF
-            c.drawImage(img_reader, x_offset, y_offset, width=img_width, height=img_height)
-            
-            # Add new page for next image (if not the last image)
-            if image_file != images[-1]:
-                c.showPage()
-                
+            if not image_data:
+                print(f"Skipping empty image payload for {image_file.filename}")
+                continue
+            original_images_data.append(image_data)
         except Exception as e:
-            # If there's an error with this image, skip it and continue
             print(f"Error processing image {image_file.filename}: {str(e)}")
             continue
-    
-    # Save the PDF to buffer
-    c.save()
-    
-    # Get PDF bytes
-    pdf_buffer.seek(0)
-    pdf_bytes = pdf_buffer.read()
-    
-    # Generate content hash for deduplication
-    content_hash = hashlib.md5(pdf_bytes).hexdigest()
-    
-    print(f"📄 PDF created in memory: {len(pdf_bytes)} bytes, hash: {content_hash}")
-    return pdf_bytes, content_hash
+
+    if not original_images_data:
+        raise ValueError("No processable images were provided")
+
+    async def _build_pdf_variant(max_dimension: int, quality: int) -> bytes:
+        # Run compression in threads so multiple images can be processed concurrently.
+        optimized_images = await asyncio.gather(*[
+            asyncio.to_thread(
+                _compress_image_for_pdf,
+                image_data,
+                max_dimension,
+                quality
+            )
+            for image_data in original_images_data
+        ])
+        return await asyncio.to_thread(img2pdf.convert, optimized_images)
+
+    primary_pdf_bytes = await _build_pdf_variant(
+        max_dimension=ULTRA_PRIMARY_MAX_DIMENSION,
+        quality=ULTRA_PRIMARY_JPEG_QUALITY
+    )
+    primary_size = len(primary_pdf_bytes)
+
+    if primary_size <= TARGET_PDF_SIZE_BYTES:
+        best_pdf_bytes = primary_pdf_bytes
+        best_pdf_size = primary_size
+        target_size_achieved = True
+    else:
+        # Only one extra ultra-pass to keep latency low while forcing smaller output.
+        fallback_pdf_bytes = await _build_pdf_variant(
+            max_dimension=ULTRA_FALLBACK_MAX_DIMENSION,
+            quality=ULTRA_FALLBACK_JPEG_QUALITY
+        )
+        fallback_size = len(fallback_pdf_bytes)
+
+        if fallback_size <= primary_size:
+            best_pdf_bytes = fallback_pdf_bytes
+            best_pdf_size = fallback_size
+        else:
+            best_pdf_bytes = primary_pdf_bytes
+            best_pdf_size = primary_size
+
+        target_size_achieved = best_pdf_size <= TARGET_PDF_SIZE_BYTES
+
+    if not best_pdf_bytes:
+        raise ValueError("PDF generation failed")
+
+    content_hash = hashlib.md5(best_pdf_bytes).hexdigest()
+
+    print(
+        f"PDF created in memory: {best_pdf_size} bytes, "
+        f"target_500kb={target_size_achieved}, hash: {content_hash}"
+    )
+    return best_pdf_bytes, content_hash, target_size_achieved
 
 # === ASSIGNMENT IMAGE UPLOAD ENDPOINTS ===
 
@@ -782,10 +807,24 @@ async def auto_grade_assignment(
         try:
             # Get student info
             student = db.query(Student).options(joinedload(Student.user)).filter(Student.id == pdf.student_id).first()
+
+            temp_pdf_path = None
+            pdf_path_for_grading = None
+
+            if pdf.pdf_data:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+                    temp_pdf.write(bytes(pdf.pdf_data))
+                    temp_pdf.flush()
+                    temp_pdf_path = temp_pdf.name
+                pdf_path_for_grading = temp_pdf_path
+            elif pdf.pdf_path:
+                pdf_path_for_grading = pdf.pdf_path
+            else:
+                raise Exception("No PDF binary data or file path available for grading")
             
             # Call KANA AI grading service
             grading_result = await KanaService.grade_assignment_pdf(
-                pdf_path=pdf.pdf_path,
+                pdf_path=pdf_path_for_grading,
                 assignment_title=session.assignment.title,
                 assignment_description=session.assignment.description,
                 rubric=session.assignment.rubric,
@@ -793,6 +832,12 @@ async def auto_grade_assignment(
                 feedback_type=grade_request.feedback_type,
                 student_name=f"{student.user.fname} {student.user.lname}"
             )
+
+            if temp_pdf_path:
+                try:
+                    os.unlink(temp_pdf_path)
+                except Exception:
+                    pass
             
             if grading_result.get("success", False):
                 # Create grade record
@@ -841,6 +886,11 @@ async def auto_grade_assignment(
                 })
                     
         except Exception as e:
+            if 'temp_pdf_path' in locals() and temp_pdf_path:
+                try:
+                    os.unlink(temp_pdf_path)
+                except Exception:
+                    pass
             failed_gradings += 1
             errors.append({
                 "student_id": pdf.student_id,
@@ -943,16 +993,25 @@ async def get_pdf_file(
     # Check access
     if pdf.assignment.teacher_id != teacher.id:
         raise HTTPException(status_code=403, detail="Access denied to this PDF")
-    
-    # Check if file exists
-    if not Path(pdf.pdf_path).exists():
-        raise HTTPException(status_code=404, detail="PDF file not found on disk")
-    
-    return FileResponse(
-        path=pdf.pdf_path,
-        filename=pdf.pdf_filename,
-        media_type="application/pdf"
-    )
+
+    if pdf.pdf_data:
+        return Response(
+            content=bytes(pdf.pdf_data),
+            media_type=pdf.mime_type or "application/pdf",
+            headers={
+                "Content-Disposition": f"attachment; filename={pdf.pdf_filename}",
+                "Content-Length": str(len(pdf.pdf_data))
+            }
+        )
+
+    if pdf.pdf_path and Path(pdf.pdf_path).exists():
+        return FileResponse(
+            path=pdf.pdf_path,
+            filename=pdf.pdf_filename,
+            media_type="application/pdf"
+        )
+
+    raise HTTPException(status_code=404, detail="PDF content not found in database or on disk")
 
 @router.get("/grading-sessions/{session_id}", response_model=GradingSessionResponse)
 async def get_grading_session(
@@ -1133,7 +1192,7 @@ async def bulk_upload_images_to_pdf_assignment(
         
         # Create PDF from images (returns bytes and hash)
         try:
-            pdf_bytes, content_hash = await create_pdf_from_images(valid_files, pdf_filename)
+            pdf_bytes, content_hash, target_achieved = await create_pdf_from_images(valid_files, pdf_filename)
         except Exception as gen_err:
             raise HTTPException(status_code=500, detail=f"Failed to generate PDF from images: {gen_err}")
         pdf_size = len(pdf_bytes)
@@ -1149,6 +1208,7 @@ async def bulk_upload_images_to_pdf_assignment(
                     "X-Debug-Skip-DB": "true",
                     "X-Generated-Only": "true",
                     "X-Content-Hash": content_hash,
+                    "X-Target-500KB-Achieved": str(target_achieved).lower(),
                     "Content-Disposition": f"attachment; filename={pdf_filename}"
                 }
             )
@@ -1212,7 +1272,8 @@ async def bulk_upload_images_to_pdf_assignment(
                 "X-Student-Name": f"{student.user.fname} {student.user.lname}",
                 "X-Assignment-Title": assignment.title,
                 "X-PDF-ID": str(student_pdf.id),
-                "X-Content-Hash": content_hash
+                "X-Content-Hash": content_hash,
+                "X-Target-500KB-Achieved": str(target_achieved).lower()
             }
         )
         

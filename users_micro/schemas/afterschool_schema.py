@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 # ===============================
@@ -81,6 +81,7 @@ class CourseUpdate(BaseModel):
     age_max: Optional[int] = Field(None, ge=3, le=16)
     difficulty_level: Optional[str] = None
     is_active: Optional[bool] = None
+    image: Optional[str] = Field(None, description="Base64 encoded compressed image")
     
     @validator('difficulty_level')
     def validate_difficulty(cls, v):
@@ -100,6 +101,9 @@ class CourseOut(BaseModel):
     difficulty_level: str
     created_by: int
     is_active: bool
+    
+    # Course image - base64 encoded compressed image
+    image: Optional[str] = Field(default=None, description="Base64 encoded compressed image")
     
     # Enhanced fields with default values for backward compatibility
     total_weeks: int = Field(default=8, description="Total duration in weeks")
@@ -259,6 +263,28 @@ class ComprehensiveCourseOut(CourseOut):
     estimated_total_duration: int = 0  # in minutes
 
 # ===============================
+# BLOCKS PROGRESS SCHEMAS
+# ===============================
+
+class BlockProgressOut(BaseModel):
+    block_id: int
+    week: int
+    block_number: int
+    title: str
+    description: Optional[str]
+    duration_minutes: int
+    is_completed: bool
+    is_available: bool
+    completed_at: Optional[datetime]
+
+class CourseBlocksProgressOut(BaseModel):
+    course_id: int
+    total_blocks: int
+    completed_blocks: int
+    completion_percentage: float
+    blocks: List[BlockProgressOut]
+
+# ===============================
 # STUDY SESSION SCHEMAS
 # ===============================
 
@@ -285,6 +311,21 @@ class StudySessionEnd(BaseModel):
         allowed_statuses = ['completed', 'abandoned']
         if v not in allowed_statuses:
             raise ValueError(f'Status must be one of: {allowed_statuses}')
+        return v
+
+class StudySessionMarkDone(BaseModel):
+    """Simple schema for marking a block/lesson as completed"""
+    course_id: int = Field(..., description="Course ID")
+    block_id: Optional[int] = Field(None, description="Block ID (for AI-generated courses)")
+    lesson_id: Optional[int] = Field(None, description="Lesson ID (for legacy courses)")
+    
+    @validator('lesson_id')
+    def validate_lesson_or_block(cls, v, values):
+        block_id = values.get('block_id')
+        if not v and not block_id:
+            raise ValueError('Either lesson_id or block_id must be provided')
+        if v and block_id:
+            raise ValueError('Cannot specify both lesson_id and block_id')
         return v
 
 class StudySessionOut(BaseModel):
@@ -315,7 +356,8 @@ class AISubmissionCreate(BaseModel):
     course_id: int = Field(..., description="Course ID")
     lesson_id: Optional[int] = Field(default=None, description="Lesson ID (for legacy courses)")
     block_id: Optional[int] = Field(default=None, description="Course Block ID (for AI-generated courses)")
-    session_id: int = Field(..., description="Study session ID")
+    # Session is optional in mark-done model; keep for legacy compatibility
+    session_id: Optional[int] = Field(default=None, description="Study session ID (optional)")
     assignment_id: Optional[int] = Field(default=None, description="Assignment ID (if submission is for assignment)")
     submission_type: str = Field(..., description="Type of submission")
     
@@ -353,7 +395,7 @@ class AISubmissionOut(BaseModel):
     course_id: int
     lesson_id: Optional[int] = Field(default=None)  # Made optional for block-based sessions
     block_id: Optional[int] = Field(default=None)  # New field for AI-generated course blocks
-    session_id: int
+    session_id: Optional[int]
     assignment_id: Optional[int] = Field(default=None)  # New field for assignment submissions
     submission_type: str
     original_filename: Optional[str]
@@ -397,12 +439,36 @@ class StudentProgressOut(BaseModel):
     lessons_completed: int
     total_lessons: int
     completion_percentage: float
+    # Include blocks progress for AI-generated courses
+    blocks_completed: int
+    total_blocks: int
     average_score: Optional[float]
     total_study_time: int
     sessions_count: int
     started_at: datetime
     last_activity: datetime
     completed_at: Optional[datetime]
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ===============================
+# PROGRESS DIGEST SCHEMAS
+# ===============================
+
+class ProgressDigestOut(BaseModel):
+    id: int
+    user_id: int
+    scope: str  # "weekly" | "course"
+    period_start: datetime
+    period_end: datetime
+    summary: str
+    assignments_count: int
+    avg_grade: Optional[float]
+    course_id: Optional[int]
     created_at: datetime
     updated_at: datetime
 
@@ -444,3 +510,281 @@ class StudentDashboard(BaseModel):
     progress_summary: List[StudentProgressOut]
     total_study_time: int
     average_score: Optional[float]
+
+
+# ===============================
+# STUDENT NOTES SCHEMAS
+# ===============================
+
+class StudentNoteCreate(BaseModel):
+    """Schema for creating a new student note"""
+    title: str = Field(..., min_length=1, max_length=255, description="Note title")
+    description: Optional[str] = Field(None, max_length=1000, description="Optional description")
+    subject: Optional[str] = Field(None, max_length=100, description="Subject/topic of notes")
+    course_id: Optional[int] = Field(None, description="Link to course (optional)")
+    tags: Optional[List[str]] = Field(None, description="Tags for organization")
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteUpdate(BaseModel):
+    """Schema for updating a student note"""
+    title: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = Field(None, max_length=1000)
+    subject: Optional[str] = Field(None, max_length=100)
+    tags: Optional[List[str]] = Field(None)
+    is_starred: Optional[bool] = Field(None)
+    is_public: Optional[bool] = Field(None)
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteAnalysisResult(BaseModel):
+    """Schema for AI analysis results of notes"""
+    summary: Optional[str] = Field(None, description="AI-generated summary")
+    key_points: Optional[List[str]] = Field(None, description="Extracted key points")
+    objectives: Optional[List[Dict]] = Field(None, description="Learning objectives with summaries and related videos")
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteOut(BaseModel):
+    """Schema for outputting student note details"""
+    id: int
+    user_id: int
+    course_id: Optional[int]
+    title: str
+    description: Optional[str]
+    subject: Optional[str]
+    tags: Optional[List[str]]
+    
+    # File information
+    original_filename: str
+    file_type: str
+    file_size: Optional[int]
+    
+    # AI Analysis
+    ai_processed: bool
+    processing_status: str
+    processed_at: Optional[datetime]
+    
+    # Analysis results
+    summary: Optional[str]
+    key_points: Optional[List[str]]
+    objectives: Optional[List[Dict]]
+    objective_flashcards: Optional[List[List[Dict]]]
+    overall_flashcards: Optional[List[Dict]]
+    objective_progress: Optional[List[Dict]]
+    
+    # Metadata
+    is_public: bool
+    is_starred: bool
+    
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class StudentNoteListResponse(BaseModel):
+    """Schema for list of student notes"""
+    total: int
+    notes: List[StudentNoteOut]
+
+
+class NoteAnalysisLogOut(BaseModel):
+    """Schema for note analysis log entry"""
+    id: int
+    note_id: int
+    user_id: int
+    processing_type: str
+    status: str
+    processing_duration_seconds: Optional[float]
+    error_message: Optional[str]
+    attempt_number: int
+    max_attempts: int
+    created_at: datetime
+    updated_at: datetime
+    
+    class Config:
+        from_attributes = True
+
+
+class NoteUploadResponse(BaseModel):
+    """Schema for note upload response"""
+    success: bool
+    message: str
+    note_id: int
+    title: str
+    original_filename: str
+    processing_status: str
+    uploaded_at: datetime
+
+
+class NoteAnalysisResponse(BaseModel):
+    """Schema for note analysis response"""
+    success: bool
+    message: str
+    note_id: int
+    title: str
+    ai_processed: bool
+    processing_status: str
+    
+    # Analysis results
+    summary: Optional[str]
+    key_points: Optional[List[str]]
+    objectives: Optional[List[Dict]]
+    
+    processed_at: Optional[datetime]
+    processing_duration_seconds: Optional[float]
+
+class Flashcard(BaseModel):
+    front: str
+    back: str
+
+class QuizQuestion(BaseModel):
+    question: str
+    options: List[str]
+    answer_index: int
+
+class ObjectiveQuizResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    objective: str
+    num_questions: int
+    questions: List[QuizQuestion]
+    generated_at: datetime
+
+# ===============================
+# WRITTEN QUIZ (OBJECTIVE-BASED)
+# ===============================
+
+class WrittenQuizQuestion(BaseModel):
+    prompt: str
+    expected_answer: Optional[str] = Field(None, description="Concise model answer for grading context")
+    rubric: Optional[str] = Field(None, description="Optional rubric or key points to check")
+
+
+class WrittenQuizResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    objective: str
+    questions: List[WrittenQuizQuestion]
+    generated_at: datetime
+
+
+class WrittenQuizGradeItem(BaseModel):
+    prompt: str
+    score: float
+    max_score: float
+    feedback: Optional[str] = None
+
+
+class WrittenQuizGradeResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    total_score: float
+    max_score: float
+    percentage: float
+    items: List[WrittenQuizGradeItem]
+
+class FlashcardsResponse(BaseModel):
+    note_id: int
+    scope: str  # "objective" or "overall"
+    objective_index: Optional[int]
+    count: int
+    flashcards: List[Flashcard]
+    generated_at: datetime
+
+class QuizGradeRequest(BaseModel):
+    grade_percentage: float = Field(..., ge=0, le=100)
+    performance_summary: Optional[str] = None
+
+class QuizSubmitRequest(BaseModel):
+    objective_index: int
+    questions: List[QuizQuestion]
+    user_answers: List[int]
+
+class QuizSubmitResponse(BaseModel):
+    note_id: int
+    objective_index: int
+    total_questions: int
+    correct_count: int
+    grade_percentage: float
+    performance_summary: Optional[str]
+    submitted_at: datetime
+# ===============================
+# PRACTICE QUIZ SCHEMAS
+# ===============================
+
+class PracticeQuizQuestion(BaseModel):
+    id: int
+    question: str
+    options: List[str]
+    correct_index: int
+    explanation: Optional[str] = None
+
+
+class PracticeQuizOut(BaseModel):
+    title: str
+    topic: Optional[str] = None
+    questions: List[PracticeQuizQuestion]
+
+
+# ===============================
+# KANA AGENT SCHEMAS
+# ===============================
+
+class KanaMessage(BaseModel):
+    role: Literal["user", "assistant", "system"]
+    content: str
+    route: Optional[str] = None
+    screen_context: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+class KanaChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=1200, description="User input to Kana")
+    session_id: Optional[str] = Field(None, description="Existing session id to continue the conversation")
+    route: Optional[str] = Field(None, description="Current route or screen identifier")
+    screen_context: Optional[str] = Field(None, description="Optional UI context shown to the user")
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Additional context to inject into the prompt")
+    history: Optional[List[KanaMessage]] = Field(None, description="Optional client-side history when resuming after reconnect")
+    screen_capture: Optional[str] = Field(
+        None,
+        description="Base64-encoded screenshot (without data URI) to give Kana visual context",
+    )
+    screen_capture_mime: Optional[str] = Field(
+        None,
+        description="MIME type for the provided screenshot (e.g., image/jpeg)",
+    )
+
+
+class KanaChatResponse(BaseModel):
+    session_id: str
+    reply: str
+    model: Optional[str] = None
+    route: Optional[str] = None
+    screen_context: Optional[str] = None
+    history: List[KanaMessage]
+
+
+class KanaTTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=1200, description="Text Kana should read aloud")
+    voice: Optional[str] = Field(
+        None,
+        description="Optional voice alias. Accepts Azure voice names or the legacy Kokoro ids for backwards compatibility.",
+    )
+    speed: Optional[float] = Field(1.0, ge=0.5, le=1.5, description="Playback speed multiplier")
+
+
+class KanaTTSResponse(BaseModel):
+    audio_base64: str = Field(..., description="Base64-encoded WAV payload")
+    mime_type: str = Field("audio/wav", description="MIME type for the encoded audio")
+    sample_rate: int = Field(24000, description="Sample rate of the generated clip")
+    voice: str = Field(..., description="Resolved Azure voice name")
+    duration_seconds: Optional[float] = Field(None, description="Approximate clip duration")

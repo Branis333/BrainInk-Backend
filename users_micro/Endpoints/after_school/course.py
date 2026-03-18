@@ -13,7 +13,7 @@ from db.connection import db_dependency
 from Endpoints.auth import get_current_user
 from models.afterschool_models import (
     Course, CourseLesson, CourseBlock, CourseAssignment, 
-    StudySession, StudentProgress, StudentAssignment
+    StudySession, StudentProgress, StudentAssignment, AISubmission
 )
 from models.study_area_models import StudentPDF
 from schemas.afterschool_schema import (
@@ -21,9 +21,11 @@ from schemas.afterschool_schema import (
     CourseWithBlocks, ComprehensiveCourseOut, CourseBlockOut, CourseAssignmentOut,
     LessonCreate, LessonUpdate, LessonOut,
     CourseListResponse, LessonListResponse, MessageResponse,
-    StudentDashboard, StudentProgressOut
+    StudentDashboard, StudentProgressOut, StudentAssignmentOut,
+    CourseBlocksProgressOut, BlockProgressOut
 )
 from services.gemini_service import gemini_service
+from services.image_service import image_service
 
 router = APIRouter(prefix="/after-school/courses", tags=["After-School Courses"])
 
@@ -33,6 +35,288 @@ user_dependency = Depends(get_current_user)
 # ===============================
 # COURSE MANAGEMENT ENDPOINTS
 # ===============================
+
+@router.get("/{course_id}/progress", response_model=StudentProgressOut)
+async def get_course_progress(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Compute and return the student's progress for a course based on mark-done sessions and submissions.
+
+    - Uses StudySession records with status='completed' to count completed blocks/lessons
+    - Calculates totals from CourseBlock and CourseLesson
+    - Derives completion percentage prioritizing block-based structure; falls back to lessons
+    - Aggregates average AI score across processed AISubmissions for the course
+    - Upserts StudentProgress for idempotency and returns the fresh record
+    """
+    user_id = current_user["user_id"]
+
+    # Validate course
+    course = db.query(Course).filter(Course.id == course_id, Course.is_active == True).first()
+    if not course:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Course not found")
+
+    try:
+        # Totals from structure
+        total_blocks = db.query(CourseBlock).filter(CourseBlock.course_id == course_id, CourseBlock.is_active == True).count()
+        total_lessons = db.query(CourseLesson).filter(CourseLesson.course_id == course_id, CourseLesson.is_active == True).count()
+
+        # Completed via mark-done sessions
+        completed_sessions_q = db.query(StudySession).filter(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id,
+            StudySession.status == "completed"
+        )
+        blocks_completed = completed_sessions_q.filter(StudySession.block_id.isnot(None)).count()
+        lessons_completed = completed_sessions_q.filter(StudySession.lesson_id.isnot(None)).count()
+
+        # Average score from processed submissions
+        processed = db.query(AISubmission.ai_score).filter(
+            AISubmission.user_id == user_id,
+            AISubmission.course_id == course_id,
+            AISubmission.ai_score.isnot(None)
+        ).all()
+        avg_score = None
+        if processed:
+            scores = [row[0] for row in processed if row[0] is not None]
+            if scores:
+                avg_score = sum(scores) / len(scores)
+
+        # Sessions count and total study time (legacy minutes if present)
+        all_sessions = db.query(StudySession).filter(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id
+        ).all()
+        sessions_count = len(all_sessions)
+        total_study_time = sum([s.duration_minutes or 0 for s in all_sessions])
+
+        # Assignment completion: passed (>=80%) only
+        total_assignments = db.query(CourseAssignment).filter(
+            CourseAssignment.course_id == course_id,
+            CourseAssignment.is_active == True
+        ).count()
+
+        passed_assignments = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == course_id,
+            StudentAssignment.status == "passed"
+        ).count()
+
+        assignments_pct = (passed_assignments / total_assignments * 100.0) if total_assignments > 0 else None
+
+        # Completion percentage combines blocks and assignments when both exist
+        completion_percentage = 0.0
+        parts = []
+        if total_blocks > 0:
+            parts.append((blocks_completed / total_blocks) * 100.0)
+        elif total_lessons > 0:
+            parts.append((lessons_completed / total_lessons) * 100.0)
+        if assignments_pct is not None:
+            parts.append(assignments_pct)
+        if parts:
+            completion_percentage = sum(parts) / len(parts)
+
+        # Clamp and round
+        completion_percentage = round(max(0.0, min(100.0, completion_percentage)), 2)
+
+        # Upsert StudentProgress
+        progress = db.query(StudentProgress).filter(
+            StudentProgress.user_id == user_id,
+            StudentProgress.course_id == course_id
+        ).first()
+
+        now = datetime.utcnow()
+        if not progress:
+            progress = StudentProgress(
+                user_id=user_id,
+                course_id=course_id,
+                lessons_completed=lessons_completed,
+                total_lessons=total_lessons,
+                blocks_completed=blocks_completed,
+                total_blocks=total_blocks,
+                completion_percentage=completion_percentage,
+                average_score=avg_score,
+                total_study_time=total_study_time,
+                sessions_count=sessions_count,
+                started_at=now,
+                last_activity=now,
+                completed_at=now if completion_percentage >= 100.0 else None,
+            )
+            db.add(progress)
+        else:
+            progress.lessons_completed = lessons_completed
+            progress.total_lessons = total_lessons
+            progress.blocks_completed = blocks_completed
+            progress.total_blocks = total_blocks
+            progress.completion_percentage = completion_percentage
+            progress.average_score = avg_score
+            progress.total_study_time = total_study_time
+            progress.sessions_count = sessions_count
+            progress.last_activity = now
+            progress.completed_at = progress.completed_at or (now if completion_percentage >= 100.0 else None)
+
+        db.commit()
+        db.refresh(progress)
+
+        # Trigger completion notification if newly completed (100%)
+        if completion_percentage >= 100.0 and not progress.completed_at:
+            # Course is now fully complete, send congratulations notification
+            try:
+                from Endpoints.after_school.notification_scheduler import NotificationScheduler
+                course = db.query(Course).filter(Course.id == course_id).first()
+                if course:
+                    NotificationScheduler.trigger_completion_notification(
+                        user_id=user_id,
+                        course_id=course_id,
+                        course_title=course.title,
+                        completion_type="course"
+                    )
+                    print(f"🎉 Triggered completion notification for user {user_id}, course {course_id}")
+            except Exception as e:
+                print(f"⚠️ Error triggering completion notification: {str(e)}")
+
+        # Build response
+        return StudentProgressOut(
+            id=progress.id,
+            user_id=progress.user_id,
+            course_id=progress.course_id,
+            lessons_completed=progress.lessons_completed,
+            total_lessons=progress.total_lessons,
+            completion_percentage=progress.completion_percentage,
+            blocks_completed=progress.blocks_completed,
+            total_blocks=progress.total_blocks,
+            average_score=progress.average_score,
+            total_study_time=progress.total_study_time,
+            sessions_count=progress.sessions_count,
+            started_at=progress.started_at,
+            last_activity=progress.last_activity,
+            completed_at=progress.completed_at,
+            created_at=progress.created_at,
+            updated_at=progress.updated_at,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute course progress: {e}")
+
+
+@router.get("/assignments/my-assignments", response_model=List[StudentAssignmentOut])
+async def get_my_course_assignments(
+    db: db_dependency,
+    current_user: dict = user_dependency,
+    course_id: Optional[int] = Query(None, description="Filter assignments by course"),
+    status: Optional[str] = Query(None, description="Filter by status: assigned, submitted, graded, passed, needs_retry, failed"),
+    limit: int = Query(100, ge=1, le=200, description="Limit results"),
+    include_overdue: bool = Query(True, description="Include assignments that are overdue")
+):
+    """Convenience endpoint for mobile clients to fetch the current user's assignments.
+
+    Mirrors the existing student assignment listing while living under the
+    `/after-school/courses` prefix expected by React Native clients.
+    """
+    user_id = current_user["user_id"]
+
+    query = db.query(StudentAssignment).options(
+        joinedload(StudentAssignment.assignment)
+    ).filter(StudentAssignment.user_id == user_id)
+
+    if course_id:
+        query = query.filter(StudentAssignment.course_id == course_id)
+
+    if status:
+        query = query.filter(StudentAssignment.status == status)
+
+    if not include_overdue:
+        query = query.filter(StudentAssignment.due_date >= datetime.utcnow())
+
+    assignments = query.order_by(StudentAssignment.due_date.asc()).limit(limit).all()
+
+    return assignments
+
+@router.get("/{course_id}/blocks-progress", response_model=CourseBlocksProgressOut)
+async def get_course_blocks_progress(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Return the user's progress across all blocks for a course, including
+    per-block completion status and availability. Mirrors the frontend
+    CourseBlocksProgressResponse shape for seamless integration.
+    """
+    user_id = current_user["user_id"]
+
+    # Validate course
+    course = db.query(Course).filter(Course.id == course_id, Course.is_active == True).first()
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    # Fetch blocks in curriculum order
+    blocks = db.query(CourseBlock).filter(
+        and_(
+            CourseBlock.course_id == course_id,
+            CourseBlock.is_active == True
+        )
+    ).order_by(CourseBlock.week, CourseBlock.block_number).all()
+
+    if not blocks:
+        return {
+            "course_id": course_id,
+            "total_blocks": 0,
+            "completed_blocks": 0,
+            "completion_percentage": 0.0,
+            "blocks": []
+        }
+
+    # Completed sessions for user/course
+    completed_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.course_id == course_id,
+            StudySession.status == "completed"
+        )
+    ).all()
+    completed_block_ids = {s.block_id for s in completed_sessions if s.block_id}
+
+    blocks_progress: list[dict] = []
+    for i, block in enumerate(blocks):
+        is_completed = block.id in completed_block_ids
+        # Availability: first block or after completed previous block, or if already completed
+        if i == 0:
+            is_available = True
+        elif is_completed:
+            is_available = True
+        else:
+            prev_block = blocks[i - 1]
+            is_available = prev_block.id in completed_block_ids
+
+        blocks_progress.append({
+            "block_id": block.id,
+            "week": block.week,
+            "block_number": block.block_number,
+            "title": block.title,
+            "description": block.description,
+            "duration_minutes": block.duration_minutes,
+            "is_completed": is_completed,
+            "is_available": is_available,
+            "completed_at": next(
+                (s.marked_done_at or s.ended_at for s in completed_sessions if s.block_id == block.id), None
+            )
+        })
+
+    total_blocks = len(blocks)
+    completed_count = len(completed_block_ids)
+    completion_percentage = (completed_count / total_blocks * 100.0) if total_blocks > 0 else 0.0
+
+    return {
+        "course_id": course_id,
+        "total_blocks": total_blocks,
+        "completed_blocks": completed_count,
+        "completion_percentage": completion_percentage,
+        "blocks": blocks_progress
+    }
 
 @router.post("/from-textbook", response_model=ComprehensiveCourseOut)
 async def create_course_from_textbook(
@@ -95,13 +379,13 @@ async def create_course_from_textbook(
     
     🔒 **Security Features:**
     - File type validation (documents and images)
-    - File size limits (max 20MB for native processing)
+    - File size limits (max 50MB for native processing)
     - Secure temporary file handling
     - Native Gemini processing eliminates security risks of manual extraction
     
     **Request Format:** multipart/form-data
     **File Types Supported:** .pdf, .txt, .doc, .docx, .png, .jpg, .jpeg, .gif, .webp
-    **Max File Size:** 20MB
+    **Max File Size:** 50MB
     
     Returns a complete course structure ready for student enrollment
     """
@@ -147,15 +431,15 @@ async def create_course_from_textbook(
             file_content, textbook_file.filename
         )
         
-        # Validate content (skip for Gemini file URIs as they'll be processed natively)
-        if not textbook_content.startswith("GEMINI_FILE_URI:") and len(textbook_content.strip()) < 100:
+        # Validate content (skip for inline files as they'll be processed natively by Gemini)
+        if not textbook_content.startswith("INLINE_FILE:") and len(textbook_content.strip()) < 100:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Extracted text content is too short. Please provide a file with more substantial content (at least 100 characters)."
             )
         
-        if textbook_content.startswith("GEMINI_FILE_URI:"):
-            print(f"🤖 File uploaded to Gemini for native multimodal processing")
+        if textbook_content.startswith("INLINE_FILE:"):
+            print(f"🤖 File prepared as inline attachment for Gemini processing")
         else:
             print(f"📝 Extracted {len(textbook_content)} characters from uploaded file")
         
@@ -179,7 +463,7 @@ async def create_course_from_textbook(
         except Exception:
             # Connection is stale, create a fresh one
             db.close()
-            from db.database import SessionLocal
+            from db.connection import SessionLocal
             db = SessionLocal()
             print("🔄 Refreshed database connection after AI processing")
         
@@ -211,7 +495,7 @@ async def create_course_from_textbook(
                 total_weeks=generated_course.total_weeks,
                 blocks_per_week=generated_course.blocks_per_week,
                 textbook_source=textbook_source or f"Uploaded file: {textbook_file.filename}",
-                textbook_content=textbook_content[:10000] if not textbook_content.startswith("GEMINI_FILE_URI:") else f"Gemini processed file: {textbook_file.filename}",
+                textbook_content=textbook_content[:10000] if not textbook_content.startswith("INLINE_FILE:") else f"Inline attachment: {textbook_file.filename}",
                 generated_by_ai=True
             )
             
@@ -239,6 +523,9 @@ async def create_course_from_textbook(
                 db.add(course_block)
                 created_blocks.append(course_block)
         
+            # Ensure block IDs are generated before creating assignments that reference them
+            db.flush()
+
             # Create course assignments
             created_assignments = []
             
@@ -255,6 +542,7 @@ async def create_course_from_textbook(
                         points=assignment_data["points"],
                         rubric=assignment_data["rubric"],
                         week_assigned=block_data.week,
+                        block_id=created_blocks[i].id,
                         due_days_after_assignment=assignment_data["due_days_after_block"],
                         submission_format=assignment_data.get("submission_format", "PDF"),
                         learning_outcomes=assignment_data.get("learning_outcomes", []),
@@ -347,6 +635,254 @@ async def create_course_from_textbook(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create AI-generated course: {str(e)}"
         )
+
+@router.post("/with-image", response_model=CourseOut)
+async def create_course_with_image(
+    db: db_dependency,
+    current_user: dict = Depends(get_current_user),
+    title: str = Form(..., min_length=1, max_length=200, description="Course title"),
+    subject: str = Form(..., min_length=1, max_length=100, description="Subject"),
+    description: Optional[str] = Form(None, description="Course description"),
+    age_min: int = Form(3, ge=3, le=16, description="Minimum age"),
+    age_max: int = Form(16, ge=3, le=16, description="Maximum age"),
+    difficulty_level: str = Form("beginner", description="Difficulty level: beginner, intermediate, advanced"),
+    image_file: Optional[UploadFile] = File(None, description="Course image (optional) - PNG, JPG, WEBP")
+):
+    """
+    Create a course with an optional image
+    
+    Supports uploading a course image that will be:
+    - Automatically compressed to reduce size by ~50%
+    - Stored in database as bytes to avoid path issues
+    - Returned as base64 in API responses
+    
+    **Image Features:**
+    - Formats: PNG, JPG, JPEG, WEBP
+    - Max size: 5MB
+    - Compression: JPEG quality 75, max dimensions 800x600
+    - Storage: Bytes in database (no external file paths)
+    
+    **Request Format:** multipart/form-data
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Validate age range
+        if age_max < age_min:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Maximum age must be greater than or equal to minimum age"
+            )
+        
+        if age_min < 3 or age_max > 16:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Age range must be between 3-16 years"
+            )
+        
+        # Validate difficulty level
+        if difficulty_level not in ['beginner', 'intermediate', 'advanced']:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Difficulty level must be: beginner, intermediate, or advanced"
+            )
+        
+        # Check for duplicate course
+        existing_course = db.query(Course).filter(
+            and_(
+                Course.title.ilike(title.strip()),
+                Course.subject.ilike(subject.strip()),
+                Course.is_active == True
+            )
+        ).first()
+        
+        if existing_course:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"A course titled '{title}' already exists for subject '{subject}'"
+            )
+        
+        # Process image if provided
+        compressed_image_bytes = None
+        if image_file:
+            try:
+                image_data = await image_file.read()
+                print(f"📸 Processing image: {image_file.filename} ({len(image_data):,} bytes)")
+                
+                # Compress and get bytes
+                compressed_image_bytes, _ = image_service.process_and_compress_image(
+                    image_data,
+                    image_file.filename
+                )
+                print(f"✅ Image compressed and ready for storage")
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Image validation failed: {str(e)}"
+                )
+            except Exception as e:
+                print(f"❌ Error processing image: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to process image: {str(e)}"
+                )
+        
+        # Create course
+        new_course = Course(
+            title=title.strip(),
+            subject=subject.strip(),
+            description=description.strip() if description else f"Comprehensive {subject} course for ages {age_min}-{age_max}",
+            age_min=age_min,
+            age_max=age_max,
+            difficulty_level=difficulty_level,
+            created_by=user_id,
+            image=compressed_image_bytes  # Store compressed bytes directly
+        )
+        
+        db.add(new_course)
+        db.commit()
+        db.refresh(new_course)
+        
+        # Encode image to base64 for response
+        image_base64 = image_service.encode_image_to_base64(new_course.image) if new_course.image else None
+        
+        # Return response with image
+        response = CourseOut(
+            id=new_course.id,
+            title=new_course.title,
+            subject=new_course.subject,
+            description=new_course.description,
+            age_min=new_course.age_min,
+            age_max=new_course.age_max,
+            difficulty_level=new_course.difficulty_level,
+            created_by=new_course.created_by,
+            is_active=new_course.is_active,
+            image=image_base64,
+            total_weeks=new_course.total_weeks,
+            blocks_per_week=new_course.blocks_per_week,
+            textbook_source=new_course.textbook_source,
+            generated_by_ai=new_course.generated_by_ai,
+            created_at=new_course.created_at,
+            updated_at=new_course.updated_at
+        )
+        
+        print(f"✅ Course created with image: ID {new_course.id} - '{new_course.title}'")
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error creating course with image: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create course: {str(e)}"
+        )
+
+
+@router.put("/{course_id}/image", response_model=CourseOut)
+async def update_course_image(
+    course_id: int,
+    db: db_dependency,
+    current_user: dict = Depends(get_current_user),
+    image_file: UploadFile = File(..., description="Course image - PNG, JPG, WEBP")
+):
+    """
+    Update course image (add or replace existing image)
+    
+    Replaces the course image with a new one that will be:
+    - Automatically compressed to reduce size by ~50%
+    - Stored in database as bytes
+    - Returned as base64 in subsequent API calls
+    
+    **Image Features:**
+    - Formats: PNG, JPG, JPEG, WEBP
+    - Max size: 5MB
+    - Compression: JPEG quality 75, max dimensions 800x600
+    - Storage: Bytes in database
+    
+    **Request Format:** multipart/form-data
+    """
+    user_id = current_user["user_id"]
+    
+    try:
+        # Fetch course
+        course = db.query(Course).filter(Course.id == course_id).first()
+        if not course:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Course not found: ID {course_id}"
+            )
+        
+        # Verify user has permission to update (optional - adjust based on your auth)
+        # For now, allow anyone to update course images
+        
+        # Process image
+        try:
+            image_data = await image_file.read()
+            print(f"📸 Processing new image for course {course_id}: {image_file.filename} ({len(image_data):,} bytes)")
+            
+            # Compress and get bytes
+            compressed_image_bytes, _ = image_service.process_and_compress_image(
+                image_data,
+                image_file.filename
+            )
+            
+            # Update course image
+            course.image = compressed_image_bytes
+            course.updated_at = datetime.utcnow()
+            
+            db.commit()
+            db.refresh(course)
+            
+            # Encode image to base64 for response
+            image_base64 = image_service.encode_image_to_base64(course.image) if course.image else None
+            
+            # Return updated course
+            response = CourseOut(
+                id=course.id,
+                title=course.title,
+                subject=course.subject,
+                description=course.description,
+                age_min=course.age_min,
+                age_max=course.age_max,
+                difficulty_level=course.difficulty_level,
+                created_by=course.created_by,
+                is_active=course.is_active,
+                image=image_base64,
+                total_weeks=course.total_weeks,
+                blocks_per_week=course.blocks_per_week,
+                textbook_source=course.textbook_source,
+                generated_by_ai=course.generated_by_ai,
+                created_at=course.created_at,
+                updated_at=course.updated_at
+            )
+            
+            print(f"✅ Course image updated: ID {course.id}")
+            return response
+            
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Image validation failed: {str(e)}"
+            )
+        except Exception as e:
+            print(f"❌ Error processing image: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to process image: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error updating course image: {str(e)}")
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update course image: {str(e)}"
+        )
+
 
 @router.post("/", response_model=CourseOut)
 async def create_course(
@@ -633,6 +1169,9 @@ async def list_courses(
                 StudySession.course_id == course.id
             ).distinct().count()
             
+            # Encode image to base64 if present
+            image_base64 = image_service.encode_image_to_base64(course.image) if course.image else None
+            
             # Add metadata to course
             course_dict = {
                 "id": course.id,
@@ -644,6 +1183,11 @@ async def list_courses(
                 "difficulty_level": course.difficulty_level,
                 "created_by": course.created_by,
                 "is_active": course.is_active,
+                "image": image_base64,
+                "total_weeks": course.total_weeks,
+                "blocks_per_week": course.blocks_per_week,
+                "textbook_source": course.textbook_source,
+                "generated_by_ai": course.generated_by_ai,
                 "created_at": course.created_at,
                 "updated_at": course.updated_at,
                 "_stats": {
@@ -881,32 +1425,20 @@ async def enroll_in_course(
 @router.get("/dashboard", response_model=StudentDashboard)
 async def get_student_dashboard(
     db: db_dependency,
-    current_user: dict = user_dependency
+    current_user: dict = user_dependency,
+    limit: int = Query(50, ge=1, le=100, description="Max number of courses to return for discovery dashboard")
 ):
     """
-    Get student dashboard with courses and progress
+    Discovery dashboard: return active courses for everyone, plus the user's recent sessions and progress.
+
+    - Intended for the home page to introduce courses to all users (even brand new).
+    - Returns the latest active courses (not just enrolled ones).
+    - Still provides user's sessions/progress for personalization where available.
     """
     user_id = current_user["user_id"]
 
-    # ------------------------------
-    # Multi-source course aggregation
-    # ------------------------------
-    # Collect course IDs from: study sessions, student assignments, student progress
-    session_course_ids = [cid for (cid,) in db.query(StudySession.course_id).filter(StudySession.user_id == user_id).distinct().all()]
-    assignment_course_ids = [cid for (cid,) in db.query(StudentAssignment.course_id).filter(StudentAssignment.user_id == user_id).distinct().all()]
-    progress_course_ids = [cid for (cid,) in db.query(StudentProgress.course_id).filter(StudentProgress.user_id == user_id).distinct().all()]
-
-    aggregated_ids_set = set(session_course_ids) | set(assignment_course_ids) | set(progress_course_ids)
-
-    # Fetch active courses for all collected IDs
-    active_courses = []
-    if aggregated_ids_set:
-        active_courses = db.query(Course).filter(
-            and_(
-                Course.id.in_(aggregated_ids_set),
-                Course.is_active == True  # noqa: E712
-            )
-        ).order_by(desc(Course.created_at)).all()
+    # All active courses (discovery)
+    active_courses = db.query(Course).filter(Course.is_active == True).order_by(desc(Course.created_at)).limit(limit).all()  # noqa: E712
 
     # Recent study sessions (limit 10) - still strictly from StudySession
     recent_sessions = db.query(StudySession).filter(
@@ -931,13 +1463,84 @@ async def get_student_dashboard(
 
     # Debug logging to verify aggregation sources
     print(
-        "📊 Dashboard aggregation:",
+        "📊 Dashboard discovery:",
         {
             "user_id": user_id,
-            "sessions_courses": session_course_ids,
-            "assignments_courses": assignment_course_ids,
-            "progress_courses": progress_course_ids,
-            "aggregated_unique_ids": list(aggregated_ids_set),
+            "active_courses_returned": [c.id for c in active_courses],
+        }
+    )
+
+    # Encode images to base64 for all active courses
+    for course in active_courses:
+        if course.image:
+            course.image = image_service.encode_image_to_base64(course.image)
+
+    return StudentDashboard(
+        user_id=user_id,
+        active_courses=active_courses,
+        recent_sessions=recent_sessions,
+        progress_summary=progress_summary,
+        total_study_time=total_study_time,
+        average_score=average_score
+    )
+
+@router.get("/my-courses", response_model=StudentDashboard)
+async def get_my_courses(
+    db: db_dependency,
+    current_user: dict = user_dependency
+):
+    """
+    Return only the user's enrolled courses (true enrollments via StudentAssignment),
+    along with progress and recent sessions scoped to those courses.
+    """
+    user_id = current_user["user_id"]
+
+    # Enrolled course IDs via student assignments
+    enrolled_course_ids = [cid for (cid,) in db.query(StudentAssignment.course_id).filter(StudentAssignment.user_id == user_id).distinct().all()]
+
+    active_courses = []
+    if enrolled_course_ids:
+        active_courses = db.query(Course).filter(
+            and_(
+                Course.id.in_(enrolled_course_ids),
+                Course.is_active == True  # noqa: E712
+            )
+        ).order_by(desc(Course.created_at)).all()
+
+    # Encode images
+    for course in active_courses:
+        if course.image:
+            course.image = image_service.encode_image_to_base64(course.image)
+
+    # Sessions and progress limited to enrolled courses
+    recent_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.course_id.in_(enrolled_course_ids) if enrolled_course_ids else True
+        )
+    ).order_by(StudySession.started_at.desc()).limit(10).all()
+
+    progress_query = db.query(StudentProgress).filter(StudentProgress.user_id == user_id)
+    if enrolled_course_ids:
+        progress_query = progress_query.filter(StudentProgress.course_id.in_(enrolled_course_ids))
+    progress_summary = progress_query.all()
+
+    # Totals/averages from sessions
+    all_sessions = db.query(StudySession).filter(
+        and_(
+            StudySession.user_id == user_id,
+            StudySession.duration_minutes.isnot(None)
+        )
+    ).all()
+    total_study_time = sum((s.duration_minutes or 0) for s in all_sessions)
+    scored_sessions = [s for s in all_sessions if s.ai_score is not None]
+    average_score = (sum(s.ai_score for s in scored_sessions) / len(scored_sessions)) if scored_sessions else None
+
+    print(
+        "📚 My Courses:",
+        {
+            "user_id": user_id,
+            "enrolled_course_ids": enrolled_course_ids,
             "active_courses_returned": [c.id for c in active_courses]
         }
     )
@@ -1003,6 +1606,17 @@ async def get_my_assignments(
         # Format response with comprehensive information
         assignments_data = []
         for sa in student_assignments:
+            # Provide minimal nested assignment details to help clients anchor sessions
+            nested_assignment = None
+            if sa.assignment:
+                nested_assignment = {
+                    "id": sa.assignment.id,
+                    "course_id": sa.assignment.course_id,
+                    "title": sa.assignment.title,
+                    "assignment_type": sa.assignment.assignment_type,
+                    "block_id": getattr(sa.assignment, 'block_id', None)
+                }
+
             assignment_info = {
                 "student_assignment_id": sa.id,
                 "assignment_id": sa.assignment_id,
@@ -1021,6 +1635,10 @@ async def get_my_assignments(
                 "ai_grade": sa.ai_grade,
                 "manual_grade": sa.manual_grade,
                 "feedback": sa.feedback,
+                # surface block_id for anchor resolution even if frontend doesn't parse nested assignment
+                "block_id": getattr(sa.assignment, 'block_id', None),
+                # also include a minimal nested assignment object
+                "assignment": nested_assignment,
                 "days_until_due": (sa.due_date - current_time).days if sa.due_date > current_time else 0,
                 "is_overdue": sa.due_date < current_time and sa.status in ["assigned", "overdue"]
             }
@@ -1172,6 +1790,9 @@ async def get_course_comprehensive_details(
             CourseAssignment.course_id == course_id
         ).all()
         
+        # Encode image to base64 if present
+        image_base64 = image_service.encode_image_to_base64(course.image) if course.image else None
+        
         # Enhanced course response with comprehensive data
         course_data = {
             "id": course.id,
@@ -1183,6 +1804,7 @@ async def get_course_comprehensive_details(
             "difficulty_level": course.difficulty_level,
             "created_by": course.created_by,
             "is_active": course.is_active,
+            "image": image_base64,
             "total_weeks": course.total_weeks,
             "blocks_per_week": course.blocks_per_week,
             "textbook_source": course.textbook_source,
@@ -1459,6 +2081,18 @@ async def submit_assignment_and_auto_grade(
         course = db.query(Course).filter(Course.id == course_id).first()
         if not course:
             raise HTTPException(status_code=404, detail="Course not found")
+        
+        # CRITICAL: Verify user is enrolled in the course before allowing submission
+        user_enrollment = db.query(StudentAssignment).filter(
+            StudentAssignment.user_id == user_id,
+            StudentAssignment.course_id == course_id
+        ).first()
+        
+        if not user_enrollment:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not enrolled in this course. Please enroll before submitting assignments."
+            )
             
         assignment = db.query(CourseAssignment).filter(
             and_(

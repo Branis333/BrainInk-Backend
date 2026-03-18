@@ -7,6 +7,7 @@ pydantic[email]==2.5.0
 python-multipart==0.0.6
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
 
 # Database
 sqlalchemy==2.0.23
@@ -27,7 +28,15 @@ google-auth==2.25.2
 
 # AI Integration
 google-generativeai>=0.3.0
+google-cloud-texttospeech==2.14.1
+azure-cognitiveservices-speech>=1.37.0
 
 # Image & PDF Processing
 pillow==10.1.0
+img2pdf==0.5.1
 reportlab==4.0.7
+pypdf==3.17.4
+apscheduler 
+
+# Explicit dependency to fix deployment error (google.api_core requires it)
+packaging>=23.1

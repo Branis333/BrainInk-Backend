@@ -1,50 +1,37 @@
-from fastapi import APIRouter, Depends, HTTPException, File, UploadFile, Query, BackgroundTasks
-from sqlalchemy.orm import Session
-from sqlalchemy.exc import OperationalError, DisconnectionError
-from typing import List, Optional
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
+from typing import Optional, List
 import sys
 import os
-import tempfile  # Add this import
-import time      # Add this import
+import time
+import base64
+import json
+import uuid
+from datetime import datetime
+from collections import defaultdict
+import asyncio
 
 # Add the speech_micro directory to Python path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
-from db.connection import db_dependency
 from services.speech_services import SpeechService 
-from schemas.speech_schemas import *  
-from schemas.speech_schemas import process_audio_buffer
-from sqlalchemy import text
-from datetime import datetime
-import asyncio
-
-# Add these imports for quick transcription
+from schemas.speech_schemas import *
+from schemas.speech_schemas import AnalyzeSessionRequest
 from utils.speech_flags import WHISPER_AVAILABLE, SPEECH_RECOGNITION_AVAILABLE
+from services.ai_analysis_service import AIAnalysisService, MeetingType, Speaker, DebateAnalysis
 
-from fastapi import WebSocket, WebSocketDisconnect
-import base64
-import json
-import threading
-from collections import defaultdict
-import uuid
+router = APIRouter(prefix="/speech", tags=["Live Speech-to-Text"])
 
-# Add after your existing imports
-try:
-    import pyaudio
-    PYAUDIO_AVAILABLE = True
-except ImportError:
-    PYAUDIO_AVAILABLE = False
-    print("PyAudio not available. Real-time recording won't work.")
-
-router = APIRouter(prefix="/speech", tags=["Speech-to-Text"])
-
-# Add this class for managing live sessions
+# Live transcription manager for handling real-time sessions
 class LiveTranscriptionManager:
     def __init__(self):
         self.active_sessions = {}
         self.session_buffers = defaultdict(list)
+        self.audio_accumulators = defaultdict(bytearray)  # Accumulate audio data
+        self.session_segments = defaultdict(list)  # Store completed segments
+        self.segment_duration = 120  # 2 minutes per segment for better content analysis
+        self.min_segment_duration = 30  # Minimum 30 seconds before allowing new segment
     
     def create_session(self) -> str:
         session_id = str(uuid.uuid4())
@@ -53,7 +40,13 @@ class LiveTranscriptionManager:
             "created_at": datetime.utcnow(),
             "last_activity": datetime.utcnow(),
             "chunks_processed": 0,
-            "duration": 0.0
+            "total_text": "",  # Current segment text
+            "session_full_text": "",  # Full session text across all segments
+            "language": None,
+            "current_segment": 1,
+            "segment_start_time": datetime.utcnow(),
+            "current_speaker": None,  # Track current active speaker
+            "all_transcriptions": []  # Store all transcriptions for analysis
         }
         return session_id
     
@@ -62,344 +55,205 @@ class LiveTranscriptionManager:
             self.active_sessions[session_id].update(kwargs)
             self.active_sessions[session_id]["last_activity"] = datetime.utcnow()
     
-    def close_session(self, session_id: str):
+    def add_audio_chunk(self, session_id: str, audio_data: bytes, chunk_id: int):
+        """Add audio chunk to session accumulator"""
+        if session_id not in self.active_sessions:
+            return False
+            
+        # Always accumulate all audio data to maintain valid WebM stream
+        self.audio_accumulators[session_id].extend(audio_data)
+        
+        return True
+    
+    def _save_current_segment(self, session_id: str):
+        """Save current segment data"""
         if session_id in self.active_sessions:
+            session_data = self.active_sessions[session_id]
+            segment_data = {
+                "segment_number": session_data["current_segment"],
+                "start_time": session_data["segment_start_time"],
+                "end_time": datetime.utcnow(),
+                "text": session_data.get("total_text", ""),
+                "language": session_data.get("language"),
+                "transcriptions": session_data.get("all_transcriptions", []).copy()
+            }
+            self.session_segments[session_id].append(segment_data)
+    
+    def _start_new_segment(self, session_id: str):
+        """Start a new segment while preserving audio stream continuity"""
+        if session_id in self.active_sessions:
+            self.active_sessions[session_id].update({
+                "current_segment": self.active_sessions[session_id]["current_segment"] + 1,
+                "segment_start_time": datetime.utcnow(),
+                "total_text": "",  # Reset segment text for new segment
+                "all_transcriptions": []  # Reset for new segment
+            })
+            # Note: session_full_text is NOT reset - it accumulates across segments
+            # Note: audio_accumulators is NOT reset - preserves WebM stream continuity
+            # Segmentation is now handled through transcription timestamps and text processing
+            print(f"Started new segment {self.active_sessions[session_id]['current_segment']} for session {session_id} (audio stream preserved)")
+    
+    def should_start_new_segment(self, session_id: str) -> bool:
+        """Check if we should start a new segment based on content length and time"""
+        if session_id not in self.active_sessions:
+            return False
+        
+        session_data = self.active_sessions[session_id]
+        time_elapsed = (datetime.utcnow() - session_data["segment_start_time"]).total_seconds()
+        
+        # Only create new segments if:
+        # 1. We've reached the maximum segment duration (2 minutes), OR
+        # 2. We have substantial content AND minimum time has passed AND there's a topic shift
+        current_text = session_data.get("total_text", "")
+        word_count = len(current_text.split()) if current_text else 0
+        
+        # Force new segment after max duration
+        if time_elapsed >= self.segment_duration:
+            return True
+            
+        # Allow new segment if we have enough content and minimum time has passed
+        if (time_elapsed >= self.min_segment_duration and 
+            word_count >= 50 and  # At least 50 words
+            self._detect_topic_shift(current_text)):
+            return True
+            
+        return False
+    
+    def check_speaker_change(self, session_id: str, speaker_info: dict) -> bool:
+        """Check if the speaker has changed from the current speaker"""
+        if session_id not in self.active_sessions or not speaker_info:
+            return False
+        
+        current_speaker = self.active_sessions[session_id].get("current_speaker")
+        new_speaker_id = speaker_info.get("speaker_id") if speaker_info else None
+        
+        # If this is the first speaker or speaker has changed
+        if current_speaker is None:
+            # First speaker - no change yet
+            self.active_sessions[session_id]["current_speaker"] = new_speaker_id
+            return False
+        elif current_speaker != new_speaker_id:
+            # Speaker changed
+            print(f"Speaker change detected in session {session_id}: {current_speaker} -> {new_speaker_id}")
+            return True
+        
+        return False
+    
+    def update_current_speaker(self, session_id: str, speaker_info: dict):
+        """Update the current speaker for the session"""
+        if session_id in self.active_sessions and speaker_info:
+            new_speaker_id = speaker_info.get("speaker_id")
+            self.active_sessions[session_id]["current_speaker"] = new_speaker_id
+            print(f"Updated current speaker for session {session_id} to: {new_speaker_id}")
+    
+    def _detect_topic_shift(self, text: str) -> bool:
+        """Simple topic shift detection based on discourse markers"""
+        if not text:
+            return False
+            
+        text_lower = text.lower()
+        topic_shift_markers = [
+            "now let's talk about", "moving on to", "on the other hand",
+            "however", "but", "in contrast", "meanwhile", "next",
+            "now", "additionally", "furthermore", "moreover",
+            "let me address", "switching topics", "another point"
+        ]
+        
+        # Check if any topic shift markers appear in the last 100 characters
+        recent_text = text_lower[-100:] if len(text_lower) > 100 else text_lower
+        return any(marker in recent_text for marker in topic_shift_markers)
+    
+    def get_accumulated_audio_for_transcription(self, session_id: str) -> bytes:
+        """Get the complete accumulated audio for transcription"""
+        if session_id not in self.active_sessions:
+            return b''
+        
+        total_audio = bytes(self.audio_accumulators.get(session_id, bytearray()))
+        
+        # Always return the complete accumulated audio to maintain WebM stream integrity
+        # Segmentation will be handled at the text level, not audio level
+        if len(total_audio) > 1000:  # Minimum viable audio size
+            return total_audio
+        else:
+            return b''
+    
+
+    
+    def get_all_segments(self, session_id: str) -> list:
+        """Get all completed segments for a session"""
+        return self.session_segments.get(session_id, [])
+    
+    def add_transcription(self, session_id: str, transcription_data: dict):
+        """Add transcription to current session"""
+        if session_id in self.active_sessions:
+            self.active_sessions[session_id]["all_transcriptions"].append(transcription_data)
+    
+    def close_session(self, session_id: str):
+        # Save final segment before closing
+        if session_id in self.active_sessions:
+            self._save_current_segment(session_id)
             del self.active_sessions[session_id]
         if session_id in self.session_buffers:
             del self.session_buffers[session_id]
+        if session_id in self.audio_accumulators:
+            del self.audio_accumulators[session_id]
 
 # Create global manager instance
 live_manager = LiveTranscriptionManager()
+ai_analysis_service = AIAnalysisService()
 
-
-@router.post("/quick-transcribe", response_model=QuickTranscriptionResponse)
-async def quick_transcribe(
-    file: UploadFile = File(...),
-    language: Optional[str] = Query(None),
-    engine: TranscriptionEngine = Query(TranscriptionEngine.WHISPER)
-):
-    """Quick transcription without saving to database"""
-    start_time = time.time()
-    temp_file_path = None
-    converted_file_path = None
-    
+# Process streaming audio chunks
+async def process_streaming_audio(audio_data, session_id, chunk_id, language, engine, previous_text="", audio_format="audio/webm", **kwargs):
+    """Process accumulated audio for real-time transcription"""
     try:
-        # Validate file type
-        allowed_types = ['audio/mpeg', 'audio/wav', 'audio/mp4', 'audio/m4a', 'audio/flac', 'audio/ogg', 'audio/opus', 'audio/webm']
-        if file.content_type not in allowed_types:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Unsupported file type: {file.content_type}. Allowed types: {', '.join(allowed_types)}"
-            )
-        
-        # Check file size (10MB limit for quick transcription)
-        file_content = await file.read()
-        file_size = len(file_content)
-        
-        if file_size > 10 * 1024 * 1024:  # 10MB limit
-            raise HTTPException(
-                status_code=400,
-                detail="File too large for quick transcription. Maximum size: 10MB"
-            )
-        
-        # Get original file extension
-        original_extension = os.path.splitext(file.filename)[1].lower() if file.filename else '.mp3'
-        print(f"Original file extension: {original_extension}")
-        
-        # Create temporary file with original extension
-        temp_fd, temp_file_path = tempfile.mkstemp(suffix=original_extension)
-        try:
-            with os.fdopen(temp_fd, 'wb') as temp_file:
-                temp_file.write(file_content)
-        except:
-            os.close(temp_fd)
-            raise
-        
-        print(f"Created temp file: {temp_file_path}")
-        print(f"Temp file size: {os.path.getsize(temp_file_path)} bytes")
-        
-        # Verify file exists and has content
-        if not os.path.exists(temp_file_path):
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to create temporary file"
-            )
-        
-        if os.path.getsize(temp_file_path) == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="Empty audio file received"
-            )
-        
-        # Check if FFmpeg is available
-        ffmpeg_available = False
-        try:
-            import subprocess
-            result = subprocess.run(['ffmpeg', '-version'], 
-                                  capture_output=True, text=True, timeout=5)
-            ffmpeg_available = result.returncode == 0
-            print(f"FFmpeg available: {ffmpeg_available}")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            print("FFmpeg not found in PATH")
-            ffmpeg_available = False
-        
-        # Set working file path
-        working_file_path = temp_file_path
-        
-        # Handle format conversion for problematic formats
-        if original_extension in ['.opus', '.webm', '.ogg'] and ffmpeg_available:
-            print(f"Converting {original_extension} to WAV for better compatibility...")
-            try:
-                if SPEECH_RECOGNITION_AVAILABLE:
-                    from pydub import AudioSegment
-                    
-                    # Create converted file
-                    converted_fd, converted_file_path = tempfile.mkstemp(suffix='.wav')
-                    os.close(converted_fd)  # Close the file descriptor
-                    
-                    # Load and convert audio
-                    audio = AudioSegment.from_file(temp_file_path)
-                    audio = audio.set_frame_rate(16000).set_channels(1)  # Optimize for speech
-                    audio.export(converted_file_path, format="wav")
-                    
-                    working_file_path = converted_file_path
-                    print(f"Successfully converted to WAV: {working_file_path}")
-                    print(f"Converted file size: {os.path.getsize(working_file_path)} bytes")
-                else:
-                    print("pydub not available, using original file")
-            except Exception as e:
-                print(f"Audio conversion failed: {e}")
-                print("Continuing with original file...")
-                working_file_path = temp_file_path
-        elif original_extension in ['.opus', '.webm', '.ogg'] and not ffmpeg_available:
-            print(f"FFmpeg not available - cannot convert {original_extension}. Install FFmpeg for better format support.")
-            # For OPUS without FFmpeg, we'll let Whisper try to handle it directly
-            working_file_path = temp_file_path
-        
-        # Get audio duration (optional, don't fail if it doesn't work)
-        audio_duration = None
-        try:
-            if SPEECH_RECOGNITION_AVAILABLE and ffmpeg_available:
-                from pydub import AudioSegment
-                audio = AudioSegment.from_file(working_file_path)
-                audio_duration = len(audio) / 1000.0  # Convert to seconds
-                print(f"Audio duration: {audio_duration} seconds")
-        except Exception as e:
-            print(f"Could not get audio duration (continuing anyway): {e}")
-            # Set a reasonable default duration
-            audio_duration = 60.0  # Assume 1 minute if we can't detect
-        
-        # Check duration limit (5 minutes for quick transcription)
-        if audio_duration and audio_duration > 300:  # 5 minutes
-            raise HTTPException(
-                status_code=400,
-                detail="Audio too long for quick transcription. Maximum duration: 5 minutes"
-            )
-        
-        # Perform transcription based on engine
-        transcription_text = ""
-        confidence_score = None
-        language_detected = language
-        segments = []
-        
-        if engine == TranscriptionEngine.WHISPER and WHISPER_AVAILABLE:
-            # Use Whisper
-            try:
-                print(f"Starting Whisper transcription for file: {working_file_path}")
-                print(f"File exists: {os.path.exists(working_file_path)}")
-                print(f"File size: {os.path.getsize(working_file_path) if os.path.exists(working_file_path) else 'N/A'} bytes")
+        if engine == "whisper" and WHISPER_AVAILABLE:
+            # Check if this is raw PCM data
+            if audio_format == "audio/pcm":
+                # Extract PCM parameters
+                sample_rate = kwargs.get('sample_rate', 16000)
+                channels = kwargs.get('channels', 1)
+                bits_per_sample = kwargs.get('bits_per_sample', 16)
                 
-                # Verify working file exists and has content
-                if not os.path.exists(working_file_path):
-                    raise Exception(f"Working file not found: {working_file_path}")
-                
-                if os.path.getsize(working_file_path) == 0:
-                    raise Exception(f"Working file is empty: {working_file_path}")
-                
-                # Load Whisper model
-                print("Loading Whisper model...")
-                model = whisper.load_model("base")
-                print("Whisper model loaded successfully")
-                
-                # Set language parameter correctly
-                whisper_language = None
-                if language and language.lower() not in ['english', 'en']:
-                    # Convert common language names to codes
-                    lang_map = {
-                        'spanish': 'es',
-                        'french': 'fr',
-                        'german': 'de',
-                        'italian': 'it',
-                        'portuguese': 'pt',
-                        'russian': 'ru',
-                        'chinese': 'zh',
-                        'japanese': 'ja',
-                        'korean': 'ko'
-                    }
-                    whisper_language = lang_map.get(language.lower(), language.lower()[:2])
-                
-                print(f"Starting transcription with language: {whisper_language or 'auto-detect'}")
-                
-                # Transcribe using the working file with more options
-                result = model.transcribe(
-                    working_file_path,
-                    language=whisper_language,
-                    verbose=False,
-                    fp16=False,  # Disable FP16 to avoid CPU warnings
-                    condition_on_previous_text=False,  # Better for short clips
-                    temperature=0.0  # More deterministic output
+                # Run PCM Whisper processing in thread pool
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, 
+                    SpeechService.process_pcm_audio_with_whisper,
+                    audio_data, language, session_id, chunk_id, previous_text,
+                    sample_rate, channels, bits_per_sample
                 )
-                
-                transcription_text = result["text"].strip()
-                language_detected = result.get("language", language or "en")
-                
-                print(f"Whisper transcription completed successfully!")
-                print(f"Detected language: {language_detected}")
-                print(f"Transcription: {transcription_text[:100]}...")
-                
-                # Extract segments if available
-                if "segments" in result and result["segments"]:
-                    segments = []
-                    total_confidence = 0
-                    confidence_count = 0
-                    
-                    for seg in result["segments"]:
-                        segment_confidence = None
-                        if "avg_logprob" in seg and seg["avg_logprob"] is not None:
-                            # Convert log probability to confidence (approximate)
-                            segment_confidence = max(0.0, min(1.0, (seg["avg_logprob"] + 1.0) / 2.0))
-                            total_confidence += segment_confidence
-                            confidence_count += 1
-                        
-                        segments.append(TranscriptionSegment(
-                            start_time=seg["start"],
-                            end_time=seg["end"],
-                            text=seg["text"].strip(),
-                            confidence=segment_confidence
-                        ))
-                    
-                    # Calculate average confidence
-                    if confidence_count > 0:
-                        confidence_score = total_confidence / confidence_count
-            
-            except Exception as e:
-                print(f"Whisper transcription failed: {e}")
-                import traceback
-                traceback.print_exc()
-                
-                # Provide more helpful error messages
-                error_msg = str(e)
-                if "ffmpeg" in error_msg.lower() or "ffprobe" in error_msg.lower():
-                    error_msg = "FFmpeg not found. Please install FFmpeg to process this audio format."
-                elif "No such file or directory" in error_msg or "cannot find the file" in error_msg.lower():
-                    error_msg = "Audio file processing failed. This may be due to unsupported format or missing dependencies."
-                
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Whisper transcription failed: {error_msg}"
-                )
-        
-        else:
-            # Engine not available or other engine selected
-            if not WHISPER_AVAILABLE and engine == TranscriptionEngine.WHISPER:
-                raise HTTPException(
-                    status_code=503,
-                    detail="Whisper engine not available. Please install openai-whisper: pip install openai-whisper"
-                )
+                return result
             else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unsupported transcription engine: {engine}"
+                # Run accumulated Whisper processing in thread pool
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None, 
+                    SpeechService.process_streaming_audio_with_whisper,
+                    audio_data, language, session_id, chunk_id, previous_text, audio_format
                 )
-        
-        # Calculate processing time
-        processing_time = time.time() - start_time
-        
-        # Return response
-        return QuickTranscriptionResponse(
-            text=transcription_text,
-            language_detected=language_detected,
-            confidence_score=confidence_score,
-            processing_time_seconds=round(processing_time, 2),
-            audio_duration_seconds=round(audio_duration, 2) if audio_duration else None,
-            engine_used=engine.value,
-            segments=segments if segments else None
-        )
-    
-    except HTTPException:
-        raise
+                return result
+        elif engine == "google" and SPEECH_RECOGNITION_AVAILABLE:
+            # Run Google processing in thread pool
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                SpeechService.process_webm_audio_with_google,
+                audio_data, language, session_id, chunk_id
+            )
+            return result
+        else:
+            return None
     except Exception as e:
-        print(f"Unexpected error in quick_transcribe: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=500, 
-            detail=f"An unexpected error occurred: {str(e)}"
-        )
-    
-    finally:
-        # Clean up temporary files
-        try:
-            if temp_file_path and os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-                print(f"Cleaned up original temp file: {temp_file_path}")
-        except Exception as e:
-            print(f"Failed to clean up temp file: {e}")
-        
-        try:
-            if converted_file_path and os.path.exists(converted_file_path):
-                os.unlink(converted_file_path)
-                print(f"Cleaned up converted file: {converted_file_path}")
-        except Exception as e:
-            print(f"Failed to clean up converted file: {e}")
+        print(f"Error in process_streaming_audio: {e}")
+        return None
 
 
-@router.get("/health/detailed")
-async def detailed_health_check(db: Session = Depends(db_dependency)):  # Fixed: Use Session directly
-    """Detailed health check"""
-    try:
-        # Test database connection
-        result = db.execute(text("SELECT 1 as test"))
-        db_test = result.fetchone()
-        
-        # Check if required directories exist
-        upload_dir_exists = os.path.exists("uploads/audio")
-        
-        # Check if Whisper is available
-        whisper_available = False
-        try:
-            import whisper
-            whisper_available = True
-        except (ImportError, ModuleNotFoundError):
-            pass
-        
-        return {
-            "status": "healthy",
-            "service": "speech-to-text",
-            "database": "connected",
-            "database_test": "passed",
-            "upload_directory": "exists" if upload_dir_exists else "missing",
-            "whisper_available": whisper_available,
-            "speech_recognition_available": True,  # Always available if installed
-            "timestamp": datetime.utcnow().isoformat()
-        }
-        
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "service": "speech-to-text",
-            "database": "disconnected",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
-
-
-# Add the WebSocket endpoint after your existing endpoints
+# Real-time WebSocket endpoint for live transcription
 @router.websocket("/live-transcribe")
 async def live_transcribe_websocket(
     websocket: WebSocket,
     language: Optional[str] = Query(None),
-    engine: TranscriptionEngine = Query(TranscriptionEngine.WHISPER)
+    engine: str = Query("whisper")
 ):
     """Real-time microphone transcription via WebSocket"""
     
@@ -413,99 +267,232 @@ async def live_transcribe_websocket(
         await websocket.send_json({
             "type": "session_started",
             "session_id": session_id,
-            "message": "Live transcription session started. Send audio data to begin."
+            "message": "Live transcription ready. Start speaking!",
+            "supported_languages": ["en", "es", "fr", "de", "it", "pt", "ru", "zh", "ja", "ko", "ar", "sw", "af"]
         })
         
         chunk_id = 0
-        webm_header = None  # Store the first chunk as header
         processing_lock = asyncio.Lock()
         
         while True:
             try:
-                # Receive audio data from client
+                # Receive data from client
                 data = await websocket.receive_text()
                 message = json.loads(data)
                 
                 if message["type"] == "audio_chunk":
                     chunk_id += 1
                     try:
+                        # Decode audio data
                         audio_data = base64.b64decode(message["audio_data"])
-                        if len(audio_data) < 100:
+                        
+                        # Extract speaker information if provided
+                        speaker_info = message.get("speaker_info")
+                        
+                        # Extract audio format if provided
+                        audio_format = message.get("audio_format", "audio/webm")
+                        
+                        # Extract PCM parameters if provided
+                        pcm_params = {}
+                        if audio_format == "audio/pcm":
+                            pcm_params['sample_rate'] = message.get("sample_rate", 16000)
+                            pcm_params['channels'] = message.get("channels", 1)
+                            pcm_params['bits_per_sample'] = message.get("bits_per_sample", 16)
+                        
+                        # Skip very small chunks
+                        if len(audio_data) < 1000:
                             continue
 
-                        # Process each chunk independently
-                        if webm_header is None:
-                            # First chunk contains the header
-                            webm_header = audio_data
-                            chunk_to_process = audio_data
-                        else:
-                            # For subsequent chunks, try processing just the chunk
-                            # If that fails, fall back to header + chunk
-                            chunk_to_process = audio_data
+                        # Check for speaker change FIRST - this is the most important trigger for new segments
+                        speaker_changed = live_manager.check_speaker_change(session_id, speaker_info)
+                        
+                        if speaker_changed:
+                            # Save current segment and start new one due to speaker change
+                            current_segment = live_manager.active_sessions[session_id]["current_segment"]
+                            print(f"Speaker change detected! Completing segment {current_segment} and starting new segment")
+                            
+                            live_manager._save_current_segment(session_id)
+                            live_manager._start_new_segment(session_id)
+                            live_manager.update_current_speaker(session_id, speaker_info)
+                            
+                            new_segment = live_manager.active_sessions[session_id]["current_segment"]
+                            
+                            # Send segment completed notification
+                            await websocket.send_json({
+                                "type": "segment_completed",
+                                "session_id": session_id,
+                                "segment_number": current_segment,
+                                "message": f"Speaker changed! Segment {current_segment} completed. Starting segment {new_segment}.",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "reason": "speaker_change",
+                                "previous_speaker": live_manager.active_sessions[session_id]["current_speaker"],
+                                "new_speaker": speaker_info.get("speaker_id") if speaker_info else None
+                            })
+                        elif live_manager.should_start_new_segment(session_id):
+                            # Check if we need to start a new segment based on time/content
+                            current_segment = live_manager.active_sessions[session_id]["current_segment"]
+                            print(f"Time/content-based segment completion for segment {current_segment}")
+                            
+                            live_manager._save_current_segment(session_id)
+                            live_manager._start_new_segment(session_id)
+                            
+                            new_segment = live_manager.active_sessions[session_id]["current_segment"]
+                            
+                            # Send segment completed notification
+                            await websocket.send_json({
+                                "type": "segment_completed",
+                                "session_id": session_id,
+                                "segment_number": current_segment,
+                                "message": f"Segment {current_segment} completed. Starting segment {new_segment}.",
+                                "timestamp": datetime.utcnow().isoformat(),
+                                "reason": "time_content"
+                            })
 
-                        async with processing_lock:
-                            print(f"Processing audio chunk {chunk_id}: {len(audio_data)} bytes")
-                            try:
+                        # Add chunk to session accumulator
+                        live_manager.add_audio_chunk(session_id, audio_data, chunk_id)
+
+                        # Process accumulated audio every few chunks or after enough data
+                        if chunk_id % 3 == 0 or len(live_manager.audio_accumulators[session_id]) > 50000:
+                            async with processing_lock:
+                                print(f"Processing new audio for chunk {chunk_id}")
+                                
+                                # Get only the new audio data that hasn't been transcribed
+                                new_audio_data = live_manager.get_accumulated_audio_for_transcription(session_id)
+                                
+                                if not new_audio_data or len(new_audio_data) < 1000:
+                                    print("Not enough new audio data to transcribe, skipping")
+                                    continue
+                                
+                                # Get previous text for deduplication
+                                # Get current session-wide text for proper deduplication
+                                current_session_text = live_manager.active_sessions[session_id].get("session_full_text", "")
+                                
+                                # Process only the new audio
                                 transcription = await process_streaming_audio(
-                                    chunk_to_process,
+                                    new_audio_data,
                                     session_id,
                                     chunk_id,
                                     language,
-                                    engine
+                                    engine,
+                                    current_session_text,  # Pass session-wide text for deduplication
+                                    audio_format,  # Pass the audio format
+                                    **pcm_params  # Pass PCM parameters if present
                                 )
                                 
-                                # If processing the chunk alone failed and it's not the first chunk,
-                                # try with header prepended as fallback
-                                if (not transcription or not transcription["text"].strip()) and webm_header and chunk_id > 1:
-                                    print(f"Chunk alone failed, trying with header prepended...")
-                                    chunk_to_process = webm_header + audio_data
-                                    transcription = await process_streaming_audio(
-                                        chunk_to_process,
+                                if transcription and transcription.get("text", "").strip():
+                                    text = transcription["text"].strip()
+                                    
+                                    # Store transcription data
+                                    transcription_data = {
+                                        "chunk_id": chunk_id,
+                                        "text": text,
+                                        "timestamp": datetime.utcnow(),
+                                        "language": transcription.get("language"),
+                                        "confidence": transcription.get("confidence"),
+                                        "speaker_info": speaker_info  # Include speaker information
+                                    }
+                                    live_manager.add_transcription(session_id, transcription_data)
+                                    
+                                    # Update session with new text
+                                    # Always add to session-wide text accumulator
+                                    current_session_text = live_manager.active_sessions[session_id].get("session_full_text", "")
+                                    new_session_text = current_session_text + " " + text if current_session_text else text
+                                    
+                                    # For segment text - just add to current segment
+                                    current_total = live_manager.active_sessions[session_id].get("total_text", "")
+                                    new_total = current_total + " " + text if current_total else text
+                                    
+                                    print(f"Session {session_id}: new_text='{text[:50]}...', segment_total='{new_total[:50]}...', session_total='{new_session_text[:100]}...'")
+                                    
+                                    live_manager.update_session(
                                         session_id,
-                                        chunk_id,
-                                        language,
-                                        engine
+                                        chunks_processed=chunk_id,
+                                        total_text=new_total,
+                                        session_full_text=new_session_text,  # Update session-wide text
+                                        language=transcription.get("language", language)
                                     )
-                                
-                                if transcription and transcription["text"].strip():
+                                    
+                                    # Send transcription result
                                     await websocket.send_json({
                                         "type": "transcription",
                                         "session_id": session_id,
                                         "chunk_id": chunk_id,
-                                        "text": transcription["text"],
-                                        "confidence": transcription.get("confidence"),
+                                        "text": text,
                                         "language_detected": transcription.get("language"),
+                                        "confidence": transcription.get("confidence"),
                                         "is_partial": True,
+                                        "segment_number": live_manager.active_sessions[session_id]["current_segment"],
+                                        "timestamp": datetime.utcnow().isoformat(),
+                                        "speaker_info": speaker_info  # Include speaker information in response
+                                    })
+                                else:
+                                    # Send empty result for silence/noise
+                                    await websocket.send_json({
+                                        "type": "silence",
+                                        "session_id": session_id,
+                                        "chunk_id": chunk_id,
+                                        "segment_number": live_manager.active_sessions[session_id]["current_segment"],
                                         "timestamp": datetime.utcnow().isoformat()
                                     })
-                            except Exception as e:
-                                print(f"Error in transcription processing: {e}")
+                        else:
+                            # Just acknowledge the chunk without processing
+                            await websocket.send_json({
+                                "type": "chunk_received",
+                                "session_id": session_id,
+                                "chunk_id": chunk_id,
+                                "accumulated_size": len(live_manager.audio_accumulators.get(session_id, bytearray())),
+                                "audio_size": len(live_manager.get_accumulated_audio_for_transcription(session_id)),
+                                "segment_number": live_manager.active_sessions[session_id]["current_segment"],
+                                "timestamp": datetime.utcnow().isoformat()
+                            })
+                                
                     except Exception as e:
                         print(f"Error processing audio chunk: {e}")
+                        await websocket.send_json({
+                            "type": "processing_error",
+                            "session_id": session_id,
+                            "error": str(e),
+                            "chunk_id": chunk_id
+                        })
                         continue
                 
                 elif message["type"] == "stop_recording":
-                    # Send session ended message
+                    # Get final session data
+                    session_data = live_manager.active_sessions.get(session_id, {})
+                    final_text = session_data.get("total_text", "").strip()
+                    
+                    # Send final results
                     await websocket.send_json({
                         "type": "session_ended",
                         "session_id": session_id,
-                        "message": "Live transcription session ended."
+                        "final_text": final_text,
+                        "total_chunks": chunk_id,
+                        "language_detected": session_data.get("language"),
+                        "duration_seconds": (datetime.utcnow() - session_data.get("created_at", datetime.utcnow())).total_seconds(),
+                        "message": "Live transcription session completed."
                     })
                     break
                 
                 elif message["type"] == "ping":
-                    await websocket.send_json({"type": "pong", "session_id": session_id})
+                    await websocket.send_json({
+                        "type": "pong", 
+                        "session_id": session_id,
+                        "timestamp": datetime.utcnow().isoformat()
+                    })
             
             except WebSocketDisconnect:
                 print(f"WebSocket disconnected for session: {session_id}")
                 break
             except Exception as e:
                 print(f"Error in live transcription: {e}")
-                await websocket.send_json({
-                    "type": "error",
-                    "session_id": session_id,
-                    "error": str(e)
-                })
+                try:
+                    await websocket.send_json({
+                        "type": "error",
+                        "session_id": session_id,
+                        "error": str(e)
+                    })
+                except:
+                    pass
                 break
     
     finally:
@@ -513,24 +500,26 @@ async def live_transcribe_websocket(
         print(f"Closed live transcription session: {session_id}")
 
 
-# Add endpoint to get session status
-@router.get("/live-sessions/{session_id}", response_model=LiveSessionStatus)
+# Get session status
+@router.get("/live-sessions/{session_id}")
 async def get_live_session_status(session_id: str):
     """Get status of a live transcription session"""
     if session_id not in live_manager.active_sessions:
         raise HTTPException(status_code=404, detail="Session not found")
     
     session_data = live_manager.active_sessions[session_id]
-    return LiveSessionStatus(
-        session_id=session_id,
-        status=session_data["status"],
-        duration_seconds=(datetime.utcnow() - session_data["created_at"]).total_seconds(),
-        chunks_processed=session_data["chunks_processed"],
-        created_at=session_data["created_at"],
-        last_activity=session_data["last_activity"]
-    )
+    return {
+        "session_id": session_id,
+        "status": session_data["status"],
+        "duration_seconds": (datetime.utcnow() - session_data["created_at"]).total_seconds(),
+        "chunks_processed": session_data["chunks_processed"],
+        "total_text": session_data.get("total_text", ""),
+        "language": session_data.get("language"),
+        "created_at": session_data["created_at"].isoformat(),
+        "last_activity": session_data["last_activity"].isoformat()
+    }
 
-# Add endpoint to list active sessions
+# List active sessions
 @router.get("/live-sessions")
 async def get_active_sessions():
     """Get all active live transcription sessions"""
@@ -540,7 +529,272 @@ async def get_active_sessions():
             "session_id": session_id,
             "status": data["status"],
             "created_at": data["created_at"].isoformat(),
-            "chunks_processed": data["chunks_processed"]
+            "chunks_processed": data["chunks_processed"],
+            "language": data.get("language")
         })
     
     return {"active_sessions": sessions, "total_count": len(sessions)}
+
+# Health check
+@router.get("/health")
+async def health_check():
+    """Simple health check for live transcription service"""
+    return {
+        "status": "healthy",
+        "service": "live-speech-to-text",
+        "whisper_available": WHISPER_AVAILABLE,
+        "speech_recognition_available": SPEECH_RECOGNITION_AVAILABLE,
+        "active_sessions": len(live_manager.active_sessions),
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+# AI Analysis endpoints for debates and meetings
+@router.post("/analyze-session/{session_id}")
+async def analyze_session(
+    session_id: str,
+    request: AnalyzeSessionRequest,
+    meeting_type: MeetingType = MeetingType.DISCUSSION
+):
+    """
+    Analyze a completed transcription session for debate/meeting insights
+    """
+    try:
+        # Get session segments
+        segments = live_manager.get_all_segments(session_id)
+        session_full_text = ""
+        
+        if not segments:
+            # Check if session is still active
+            if session_id in live_manager.active_sessions:
+                # Include current session data
+                current_session = live_manager.active_sessions[session_id]
+                session_full_text = current_session.get("session_full_text", "")
+                segments = [{
+                    "segment_number": current_session.get("current_segment", 1),
+                    "text": current_session.get("total_text", ""),
+                    "transcriptions": current_session.get("all_transcriptions", []),
+                    "start_time": current_session.get("segment_start_time", datetime.utcnow()),
+                    "end_time": datetime.utcnow()
+                }]
+            else:
+                raise HTTPException(status_code=404, detail="Session not found or no data available")
+        else:
+            # Get session-wide text if available
+            if session_id in live_manager.active_sessions:
+                current_session = live_manager.active_sessions[session_id]
+                session_full_text = current_session.get("session_full_text", "")
+                
+                # Also add current segment if it has text
+                if current_session.get("total_text"):
+                    segments.append({
+                        "segment_number": current_session.get("current_segment", 1),
+                        "text": current_session.get("total_text", ""),
+                        "transcriptions": current_session.get("all_transcriptions", []),
+                        "start_time": current_session.get("segment_start_time", datetime.utcnow()),
+                        "end_time": datetime.utcnow()
+                    })
+        
+        print(f"Analysis: session_full_text='{session_full_text[:100]}...', segments={len(segments)}")
+        
+        # Convert speaker dicts to Speaker objects if provided
+        speaker_objects = []
+        if request.speakers:
+            for i, speaker_data in enumerate(request.speakers):
+                speaker_objects.append(Speaker(
+                    id=speaker_data.id,
+                    name=speaker_data.name,
+                    role=speaker_data.role
+                ))
+        else:
+            # Default single speaker
+            speaker_objects = [Speaker(id="speaker_1", name="Participant 1")]
+        
+        # Perform AI analysis
+        analysis = await ai_analysis_service.analyze_session(
+            session_id=session_id,
+            segments=segments,
+            meeting_type=meeting_type,
+            speakers=speaker_objects,
+            session_full_text=session_full_text  # Pass the session-wide text
+        )
+        
+        # Create AI user summary
+        ai_summary = await ai_analysis_service.create_ai_user_summary(analysis, meeting_type)
+        
+        return {
+            "session_id": session_id,
+            "meeting_type": meeting_type.value,
+            "analysis": {
+                "overall_summary": analysis.overall_summary,
+                "key_arguments": analysis.key_arguments,
+                "argument_strength": analysis.argument_strength,
+                "speaking_time_analysis": analysis.speaking_time_analysis,
+                "debate_flow": analysis.debate_flow,
+                "winner_analysis": analysis.winner_analysis,
+                "improvement_suggestions": analysis.improvement_suggestions
+            },
+            "ai_observer": ai_summary,
+            "segments_analyzed": len(segments),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error in session analysis: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
+
+@router.get("/session-segments/{session_id}")
+async def get_session_segments(session_id: str):
+    """Get all segments for a session"""
+    try:
+        segments = live_manager.get_all_segments(session_id)
+        
+        # Include current session if still active
+        current_session = None
+        if session_id in live_manager.active_sessions:
+            session_data = live_manager.active_sessions[session_id]
+            current_session = {
+                "segment_number": session_data.get("current_segment", 1),
+                "start_time": session_data.get("segment_start_time", datetime.utcnow()).isoformat(),
+                "current_text": session_data.get("total_text", ""),
+                "is_active": True,
+                "chunks_processed": session_data.get("chunks_processed", 0)
+            }
+        
+        return {
+            "session_id": session_id,
+            "completed_segments": [
+                {
+                    "segment_number": seg["segment_number"],
+                    "start_time": seg["start_time"].isoformat(),
+                    "end_time": seg["end_time"].isoformat(),
+                    "text": seg["text"],
+                    "language": seg.get("language"),
+                    "duration_seconds": (seg["end_time"] - seg["start_time"]).total_seconds(),
+                    "transcription_count": len(seg.get("transcriptions", []))
+                }
+                for seg in segments
+            ],
+            "current_segment": current_session,
+            "total_segments": len(segments) + (1 if current_session else 0)
+        }
+        
+    except Exception as e:
+        print(f"Error getting session segments: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get segments: {str(e)}")
+
+@router.get("/combine-transcription/{session_id}")
+async def combine_session_transcription(session_id: str):
+    """
+    Combine all transcription segments into a single overview
+    """
+    try:
+        # First, try to get the complete session text if available
+        combined_text = ""
+        
+        if session_id in live_manager.active_sessions:
+            current_session = live_manager.active_sessions[session_id]
+            session_full_text = current_session.get("session_full_text", "")
+            
+            if session_full_text:
+                # Use the session-wide accumulated text
+                combined_text = session_full_text
+                print(f"Using session_full_text: '{combined_text[:100]}...'")
+            else:
+                # Fallback to segment-based approach
+                print("No session_full_text available, using segment approach")
+        
+        # If no session-wide text available, fall back to combining segments
+        if not combined_text.strip():
+            segments = live_manager.get_all_segments(session_id)
+            
+            # Include current session if active
+            if session_id in live_manager.active_sessions:
+                current_session = live_manager.active_sessions[session_id]
+                if current_session.get("total_text"):
+                    segments.append({
+                        "segment_number": current_session.get("current_segment", 1),
+                        "text": current_session.get("total_text", ""),
+                        "start_time": current_session.get("segment_start_time", datetime.utcnow()),
+                        "end_time": datetime.utcnow(),
+                        "transcriptions": current_session.get("all_transcriptions", [])
+                    })
+            
+            if not segments:
+                raise HTTPException(status_code=404, detail="No transcription data found for session")
+            
+            # Combine all text from segments
+            for i, segment in enumerate(segments):
+                if segment.get("text"):
+                    # Add segment marker
+                    combined_text += f"\n[Segment {segment['segment_number']}] "
+                    combined_text += segment["text"] + " "
+        
+        if not combined_text.strip():
+            raise HTTPException(status_code=404, detail="No transcription data found for session")
+        
+        # Calculate stats
+        segments = live_manager.get_all_segments(session_id)
+        total_duration = 0
+        
+        # Include current segment duration if active
+        if session_id in live_manager.active_sessions:
+            current_session = live_manager.active_sessions[session_id]
+            segment_start = current_session.get("segment_start_time", datetime.utcnow())
+            current_duration = (datetime.utcnow() - segment_start).total_seconds()
+            total_duration += current_duration
+        
+        for segment in segments:
+            if segment.get("start_time") and segment.get("end_time"):
+                duration = (segment["end_time"] - segment["start_time"]).total_seconds()
+                total_duration += duration
+        
+        word_count = len(combined_text.split())
+        
+        # Create overview using AI
+        overview_prompt = f"""
+        Create a comprehensive overview of the following transcribed conversation:
+
+        FULL TRANSCRIPTION:
+        {combined_text.strip()}
+
+        Please provide:
+        1. A clear summary of the main topics discussed
+        2. Key points and highlights
+        3. Overall flow of the conversation
+        4. Any conclusions or decisions made
+
+        Keep the overview concise but comprehensive.
+        """
+        
+        try:
+            from services.gemini_service import GeminiService
+            gemini_service = GeminiService()
+            overview = gemini_service.generate_content(overview_prompt)
+        except Exception as e:
+            print(f"AI overview generation failed: {e}")
+            overview = "AI overview not available. Please review the combined transcription below."
+        
+        return {
+            "session_id": session_id,
+            "combined_transcription": combined_text.strip(),
+            "overview": overview,
+            "stats": {
+                "total_segments": len(segments) + (1 if session_id in live_manager.active_sessions else 0),
+                "total_duration_seconds": round(total_duration, 2),
+                "total_words": word_count,
+                "estimated_speaking_time_minutes": round(word_count / 150, 2)  # 150 words per minute average
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error combining transcription: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to combine transcription: {str(e)}")

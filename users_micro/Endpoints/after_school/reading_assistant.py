@@ -456,39 +456,42 @@ async def upload_reading_audio(
         ]
 
         # Generate pronunciation audio for incorrect words
+        # 🔇 TTS TEMPORARILY DISABLED - waiting for Google Cloud TTS API to be enabled
         pronunciation_urls = {}
-        if hasattr(analysis_result, 'word_accuracy'):
-            incorrect_words = [
-                {
-                    "word": wa.spoken_word or "unknown", 
-                    "target_word": wa.target_word,
-                    "phonetic_tip": wa.pronunciation_tip or f"Say '{wa.target_word}' clearly"
-                }
-                for wa in analysis_result.word_accuracy 
-                if not wa.is_correct and wa.target_word
-            ]
-            
-            if incorrect_words:
-                # Generate pronunciation for words that need correction
-                try:
-                    for word_data in incorrect_words[:5]:  # Limit to 5 words to avoid overload
-                        target_word = word_data["target_word"]
-                        phonetic_tip = word_data["phonetic_tip"]
-                        
-                        pronunciation_result = await tts_service.generate_word_pronunciation(
-                            word=target_word,
-                            phonetic_hint=phonetic_tip
-                        )
-                        
-                        if pronunciation_result["success"]:
-                            pronunciation_urls[target_word] = {
-                                "audio_url": pronunciation_result["audio_url"],
-                                "duration_seconds": pronunciation_result["duration_seconds"],
-                                "instructions": f"Tap to hear how to say '{target_word}' correctly"
-                            }
-                except Exception as e:
-                    print(f"⚠️ Pronunciation generation warning: {e}")
-                    # Don't fail the whole request if TTS fails        # Clean up temporary file
+        # if hasattr(analysis_result, 'word_accuracy'):
+        #     incorrect_words = [
+        #         {
+        #             "word": wa.spoken_word or "unknown", 
+        #             "target_word": wa.target_word,
+        #             "phonetic_tip": wa.pronunciation_tip or f"Say '{wa.target_word}' clearly"
+        #         }
+        #         for wa in analysis_result.word_accuracy 
+        #         if not wa.is_correct and wa.target_word
+        #     ]
+        #     
+        #     if incorrect_words:
+        #         # Generate pronunciation for words that need correction
+        #         try:
+        #             for word_data in incorrect_words[:5]:  # Limit to 5 words to avoid overload
+        #                 target_word = word_data["target_word"]
+        #                 phonetic_tip = word_data["phonetic_tip"]
+        #                 
+        #                 pronunciation_result = await tts_service.generate_word_pronunciation(
+        #                     word=target_word,
+        #                     phonetic_hint=phonetic_tip
+        #                 )
+        #                 
+        #                 if pronunciation_result["success"]:
+        #                     pronunciation_urls[target_word] = {
+        #                         "audio_url": pronunciation_result["audio_url"],
+        #                         "duration_seconds": pronunciation_result["duration_seconds"],
+        #                         "instructions": f"Tap to hear how to say '{target_word}' correctly"
+        #                     }
+        #         except Exception as e:
+        #             print(f"⚠️ Pronunciation generation warning: {e}")
+        #             # Don't fail the whole request if TTS fails        
+        
+        # Clean up temporary file
         try:
             os.unlink(audio_path)
             os.rmdir(temp_dir)
@@ -756,12 +759,60 @@ async def get_content_recommendations(
 # TEXT-TO-SPEECH PRONUNCIATION ENDPOINTS
 # ===============================
 
+@router.get("/pronunciation/word")
+async def get_word_pronunciation_get(
+    word: str = Query(..., description="Word to pronounce"),
+    speed: str = Query("normal", description="Speed: slow, normal, fast"),
+    phonetic_hint: str = Query(None, description="Optional phonetic hint"),
+    context: str = Query(None, description="Optional context"),
+    current_user: dict = user_dependency
+):
+    """Get pronunciation audio for a specific word (GET method for mobile compatibility)"""
+    
+    try:
+        word = word.strip()
+        if not word:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Word parameter is required"
+            )
+        
+        # Generate TTS audio using the TTS service
+        result = await tts_service.generate_pronunciation_audio(
+            text=word,
+            voice_type="child_friendly",
+            speed=0.8 if speed == "slow" else 1.0 if speed == "normal" else 1.2
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "word": word,
+                "audio_url": result["audio_url"],
+                "duration_seconds": result["duration_seconds"],
+                "pronunciation_instructions": f"Tap to hear how to say '{word}' correctly",
+                "phonetic_hint": phonetic_hint,
+                "context": context
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not generate pronunciation for '{word}'"
+            )
+        
+    except Exception as e:
+        print(f"❌ Error generating pronunciation for '{word}': {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error generating pronunciation: {str(e)}"
+        )
+
 @router.post("/pronunciation/word")
-async def get_word_pronunciation(
+async def get_word_pronunciation_post(
     request: dict,
     current_user: dict = user_dependency
 ):
-    """Get pronunciation audio for a specific word"""
+    """Get pronunciation audio for a specific word (POST method)"""
     
     try:
         word = request.get("word", "").strip()
@@ -840,26 +891,67 @@ async def serve_pronunciation_audio(filename: str):
     """Serve generated pronunciation audio files"""
     
     try:
+        print(f"🔊 Serving audio file: {filename}")
+        
         # Construct file path
         audio_dir = Path(tempfile.gettempdir()) / "reading_assistant_tts"
         file_path = audio_dir / filename
         
+        print(f"📁 Looking for file at: {file_path}")
+        print(f"📁 File exists: {file_path.exists()}")
+        
         if not file_path.exists():
+            print(f"❌ Audio file not found: {file_path}")
+            # List all files in directory for debugging
+            if audio_dir.exists():
+                files = list(audio_dir.glob("*"))
+                print(f"📂 Available files: {[f.name for f in files[:10]]}...")  # Show first 10
+            else:
+                print(f"📂 Audio directory doesn't exist: {audio_dir}")
+            
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail="Pronunciation audio not found"
+                detail=f"Pronunciation audio not found: {filename}"
             )
         
-        # Determine media type
-        media_type = "audio/mpeg" if filename.endswith(".mp3") else "audio/wav"
+        # Check file size
+        file_size = file_path.stat().st_size
+        print(f"📊 File size: {file_size} bytes")
+        
+        if file_size == 0:
+            print(f"⚠️ Empty audio file: {filename}")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Audio file is empty: {filename}"
+            )
+        
+        # Determine media type based on file extension
+        if filename.endswith('.mp3'):
+            media_type = "audio/mpeg"
+        elif filename.endswith('.wav'):
+            media_type = "audio/wav"
+        elif filename.endswith('.m4a'):
+            media_type = "audio/mp4"
+        elif filename.endswith('.txt'):
+            # Handle legacy .txt files as text/plain
+            media_type = "text/plain"
+            print(f"⚠️ Serving .txt file as text: {filename}")
+        else:
+            media_type = "audio/wav"  # Default
+        
+        print(f"🎵 Serving as: {media_type}")
         
         return FileResponse(
             path=str(file_path),
             media_type=media_type,
-            filename=filename
+            filename=filename,
+            headers={"Cache-Control": "max-age=3600"}  # Cache for 1 hour
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
+        print(f"❌ Error serving audio: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error serving pronunciation audio: {str(e)}"
@@ -969,4 +1061,154 @@ async def health_check():
             "progress_tracking",
             "personalized_recommendations"
         ]
+    }
+
+
+# ===============================
+# ADMIN - POPULATE READING CONTENT
+# ===============================
+
+@router.post("/admin/populate-reading-content")
+async def populate_reading_content_endpoint(
+    db: db_dependency,
+    clear_existing: bool = Query(False, description="Delete all existing content before populating")
+) -> Dict[str, Any]:
+    """
+    Admin endpoint to populate database with enhanced reading content (40+ passages)
+    
+    Query Parameters:
+    - clear_existing: If true, deletes all existing content first (default: false)
+    
+    This adds diverse reading passages for all grade levels (K-3)
+    """
+    
+    # Import the enhanced content inline to avoid import issues
+    from utils.populate_enhanced_reading_content import ENHANCED_CONTENT
+    
+    try:
+        if clear_existing:
+            deleted_count = db.query(ReadingContent).delete()
+            db.commit()
+            print(f"🗑️  Deleted {deleted_count} existing content items")
+        
+        content_count = 0
+        added_titles = []
+        skipped_titles = []
+        
+        for reading_level, difficulty_dict in ENHANCED_CONTENT.items():
+            for difficulty_level, content_list in difficulty_dict.items():
+                for content_data in content_list:
+                    
+                    # Check if this title already exists
+                    existing = db.query(ReadingContent).filter_by(
+                        title=content_data["title"]
+                    ).first()
+                    
+                    if existing and not clear_existing:
+                        print(f"⏭️  Skipping '{content_data['title']}' (already exists)")
+                        skipped_titles.append(content_data["title"])
+                        continue
+                    
+                    # Calculate metrics
+                    word_count = len(content_data["content"].split())
+                    estimated_time = word_count * 2  # 2 seconds per word
+                    
+                    # Calculate complexity score
+                    base_scores = {
+                        ReadingLevel.KINDERGARTEN: 20,
+                        ReadingLevel.GRADE_1: 40,
+                        ReadingLevel.GRADE_2: 60,
+                        ReadingLevel.GRADE_3: 80
+                    }
+                    difficulty_modifiers = {
+                        DifficultyLevel.ELEMENTARY: 0,
+                        DifficultyLevel.MIDDLE_SCHOOL: 10,
+                        DifficultyLevel.HIGH_SCHOOL: 20
+                    }
+                    complexity_score = min(
+                        base_scores[reading_level] + 
+                        difficulty_modifiers[difficulty_level] + 
+                        min(word_count / 10, 10),
+                        100
+                    )
+                    
+                    # Create content record
+                    new_content = ReadingContent(
+                        title=content_data["title"],
+                        content=content_data["content"],
+                        content_type=content_data["content_type"],
+                        reading_level=reading_level,
+                        difficulty_level=difficulty_level,
+                        vocabulary_words=content_data["vocabulary_words"],
+                        learning_objectives=content_data["learning_objectives"],
+                        phonics_focus=content_data["phonics_focus"],
+                        word_count=word_count,
+                        estimated_reading_time=estimated_time,
+                        complexity_score=complexity_score,
+                        created_by=1,  # System user
+                        is_active=True
+                    )
+                    
+                    db.add(new_content)
+                    content_count += 1
+                    added_titles.append(content_data["title"])
+        
+        db.commit()
+        
+        # Get summary by level
+        summary = {}
+        for reading_level in ReadingLevel:
+            count = db.query(ReadingContent).filter_by(reading_level=reading_level).count()
+            summary[reading_level.value] = count
+        
+        total = db.query(ReadingContent).count()
+        
+        return {
+            "success": True,
+            "message": f"Successfully added {content_count} new reading passages",
+            "added_count": content_count,
+            "skipped_count": len(skipped_titles),
+            "added_titles": added_titles,
+            "skipped_titles": skipped_titles,
+            "total_in_database": total,
+            "summary_by_level": summary
+        }
+        
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to populate content: {str(e)}"
+        )
+
+
+@router.get("/admin/reading-content-stats")
+async def get_content_stats(db: db_dependency) -> Dict[str, Any]:
+    """
+    Get statistics about reading content in database
+    
+    Returns counts by reading level and sample titles
+    """
+    
+    summary = {}
+    for reading_level in ReadingLevel:
+        count = db.query(ReadingContent).filter_by(reading_level=reading_level).count()
+        summary[reading_level.value] = count
+    
+    total = db.query(ReadingContent).count()
+    
+    # Get some sample titles per level
+    samples = {}
+    for reading_level in ReadingLevel:
+        content_items = db.query(ReadingContent).filter_by(
+            reading_level=reading_level
+        ).limit(5).all()
+        samples[reading_level.value] = [item.title for item in content_items]
+    
+    return {
+        "total_content_items": total,
+        "by_reading_level": summary,
+        "sample_titles_per_level": samples
     }

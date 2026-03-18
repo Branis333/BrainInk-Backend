@@ -1,10 +1,12 @@
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi import APIRouter, HTTPException, Depends, status, Query
 from typing import Annotated, List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 import traceback
 import traceback
+from urllib.parse import urlparse
+import os
 
 from db.connection import db_dependency
 from models.study_area_models import (
@@ -26,7 +28,7 @@ from schemas.direct_join_schemas import SchoolSelectionResponse
 # Import shared utility functions
 from Endpoints.utils import (
     _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, 
-    ensure_user_has_any_role
+    ensure_user_has_any_role, get_kana_base_url
 )
 
 router = APIRouter(tags=["Academic Management", "Subjects", "Assignments"])
@@ -1261,7 +1263,15 @@ async def grade_class_assignments(
                 student_work = {
                     "student_id": student.id,
                     "student_name": student_name,
-                    "pdfs": [{"id": pdf.id, "path": getattr(pdf, 'pdf_path', ''), "filename": getattr(pdf, 'pdf_filename', '')} for pdf in student_pdfs],
+                    "pdfs": [
+                        {
+                            "id": pdf.id,
+                            "path": getattr(pdf, 'pdf_path', ''),
+                            "filename": getattr(pdf, 'pdf_filename', ''),
+                            "data": getattr(pdf, 'pdf_data', None)
+                        }
+                        for pdf in student_pdfs
+                    ],
                     "has_work": True
                 }
                 grading_data.append(student_work)
@@ -1335,19 +1345,31 @@ async def grade_class_assignments(
                 
                 # Process each PDF for this student
                 for pdf_info in pdfs:
+                    pdf_binary_data = pdf_info.get("data")
                     pdf_path = pdf_info.get("path", "")
                     
-                    # Convert PDF file to base64
+                    # Convert PDF data to base64 (DB-first, filesystem fallback)
                     try:
-                        # Construct full path if needed
+                        if pdf_binary_data:
+                            pdf_content = bytes(pdf_binary_data)
+                            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
+                            pdf_files.append(pdf_base64)
+                            student_names.append(student_name)
+                            print(f"Encoded PDF from database for {student_name} ({len(pdf_base64)} chars)")
+                            continue
+
+                        if not pdf_path:
+                            print(f"Skipping PDF for {student_name}: no database binary data and no file path")
+                            continue
+
+                        # Legacy fallback: read from file path when DB binary is unavailable
                         if not os.path.isabs(pdf_path):
-                            # Assume PDFs are stored in a relative path from backend
                             pdf_full_path = os.path.join(os.getcwd(), pdf_path)
                         else:
                             pdf_full_path = pdf_path
-                        
-                        print(f"Reading PDF from: {pdf_full_path}")
-                        
+
+                        print(f"Reading legacy PDF from path: {pdf_full_path}")
+
                         with open(pdf_full_path, 'rb') as pdf_file:
                             pdf_content = pdf_file.read()
                             pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
@@ -1389,8 +1411,9 @@ async def grade_class_assignments(
                     kana_payload["grading_rubric"] = "Standard academic grading criteria based on correctness, completeness, and presentation quality."
                 
                 # Use environment variable or default K.A.N.A. endpoint
-                kana_base_url = "http://localhost:10000"  # Default K.A.N.A. server
+                kana_base_url = get_kana_base_url()
                 kana_endpoint = f"{kana_base_url}/api/kana/bulk-grade-pdfs"
+                print(f"ℹ️ grade-class resolved KANA endpoint: {kana_endpoint}")
                 
                 response = requests.post(
                     kana_endpoint,
@@ -1533,6 +1556,41 @@ async def grade_class_assignments(
         },
         "students_data": grading_data,
         "total_students": len(grading_data)
+    }
+
+
+@router.get("/grades/grade-class/target")
+async def get_grade_class_target(
+    db: db_dependency,
+    current_user: user_dependency,
+    refresh: bool = Query(False, description="Clear cached KANA URL before resolving")
+):
+    """
+    Debug endpoint to show where /grades/grade-class will send K.A.N.A. requests.
+    """
+    ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+
+    if refresh and hasattr(get_kana_base_url, "cache_clear"):
+        get_kana_base_url.cache_clear()
+
+    base_url = get_kana_base_url()
+    endpoint = f"{base_url}/api/kana/bulk-grade-pdfs"
+    parsed = urlparse(base_url)
+
+    return {
+        "status": "ok",
+        "source_endpoint": "/study-area/academic/grades/grade-class",
+        "resolved_kana_base_url": base_url,
+        "resolved_bulk_grade_endpoint": endpoint,
+        "host": parsed.hostname,
+        "scheme": parsed.scheme,
+        "uses_https": parsed.scheme == "https",
+        "env_snapshot": {
+            "KANA_BASE_URL": (os.getenv("KANA_BASE_URL") or "").strip().strip('"').strip("'"),
+            "KANA_API_URL": (os.getenv("KANA_API_URL") or "").strip().strip('"').strip("'"),
+            "ALLOW_LOCAL_KANA_URL": (os.getenv("ALLOW_LOCAL_KANA_URL") or "").strip(),
+            "ALLOW_LEGACY_KANA_URL": (os.getenv("ALLOW_LEGACY_KANA_URL") or "").strip()
+        }
     }
 
 # === ACADEMIC STATUS ENDPOINTS ===

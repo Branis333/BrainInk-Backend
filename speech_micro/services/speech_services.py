@@ -2,13 +2,9 @@ import os
 import tempfile
 import librosa
 import soundfile as sf
-# import speech_recognition as sr
 from pydub import AudioSegment
-from sqlalchemy.orm import Session
-from models.speech_models import SpeechTranscription, TranscriptionHistory
 from schemas.speech_schemas import TranscriptionSettings, ProcessingStatus
 from typing import Optional, Tuple, Dict, Any, List
-from datetime import datetime, timedelta
 import json
 import time
 import asyncio
@@ -20,65 +16,106 @@ import numpy as np
 
 from utils.speech_flags import WHISPER_AVAILABLE, SPEECH_RECOGNITION_AVAILABLE
 
-executor = ThreadPoolExecutor(max_workers=2)
+if WHISPER_AVAILABLE:
+    import whisper
 
+if SPEECH_RECOGNITION_AVAILABLE:
+    import speech_recognition as sr
+
+executor = ThreadPoolExecutor(max_workers=2)
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
 
 class SpeechService:
-    def __init__(self, db: Session):
-        self.db = db
+    _whisper_model = None
+
+    def __init__(self):
         self.upload_dir = os.getenv("UPLOAD_DIR", "uploads/audio")
-        self.max_file_size = int(os.getenv("MAX_FILE_SIZE_MB", 100)) * 1024 * 1024  # Convert to bytes
-        self.max_duration = int(os.getenv("MAX_DURATION_MINUTES", 30)) * 60  # Convert to seconds
-        
-        # Create upload directory if it doesn't exist
+        self.max_file_size = int(os.getenv("MAX_FILE_SIZE_MB", 100)) * 1024 * 1024
+        self.max_duration = int(os.getenv("MAX_DURATION_MINUTES", 30)) * 60
         os.makedirs(self.upload_dir, exist_ok=True)
-        
-        # Initialize speech recognition
-        self.recognizer = sr.Recognizer()
-        
-        # Initialize Whisper if available
-        self.whisper_model = None
-        if WHISPER_AVAILABLE:
-            try:
-                self.whisper_model = whisper.load_model("base")
-            except Exception as e:
-                print(f"Failed to load Whisper model: {e}")
-    
-    async def save_audio_file(self, file, user_id: int) -> Tuple[bool, str, Optional[str]]:
-        """Save uploaded audio file and return file path"""
+        if SPEECH_RECOGNITION_AVAILABLE:
+            self.recognizer = sr.Recognizer()
+
+    @classmethod
+    def get_whisper_model(cls):
+        if cls._whisper_model is None and WHISPER_AVAILABLE:
+            print(f"Loading Whisper model ({WHISPER_MODEL_SIZE})...")
+            cls._whisper_model = whisper.load_model(WHISPER_MODEL_SIZE)
+            print("Whisper model loaded successfully")
+        return cls._whisper_model
+
+    @classmethod
+    def clear_memory(cls):
         try:
-            # Check file size
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        import gc
+        gc.collect()
+
+    def transcribe_with_whisper(self, audio_path: str, language: Optional[str] = None):
+        try:
+            model = self.get_whisper_model()
+            if not model:
+                return {"success": False, "error": "Whisper model not available"}
+            whisper_language = None
+            if language and language.lower() not in ['english', 'en']:
+                lang_map = {
+                    'spanish': 'es',
+                    'french': 'fr',
+                    'german': 'de',
+                    'italian': 'it',
+                    'portuguese': 'pt',
+                    'russian': 'ru',
+                    'chinese': 'zh',
+                    'japanese': 'ja',
+                    'korean': 'ko',
+                    'arabic': 'ar',
+                    'swahili': 'sw',
+                    'afrikaans': 'af'
+                }
+                whisper_language = lang_map.get(language.lower(), language.lower()[:2])
+            result = model.transcribe(
+                audio_path,
+                language=whisper_language,
+                verbose=False,
+                fp16=False,
+                condition_on_previous_text=False,
+                temperature=0.0
+            )
+            self.clear_memory()
+            return {
+                "success": True,
+                "text": result["text"].strip(),
+                "language": result.get("language"),
+                "confidence": None
+            }
+        except Exception as e:
+            self.clear_memory()
+            return {"success": False, "error": str(e)}
+
+    async def save_audio_file(self, file, user_id: int) -> Tuple[bool, str, Optional[str]]:
+        try:
             file_content = await file.read()
             if len(file_content) > self.max_file_size:
                 return False, f"File too large. Maximum size: {self.max_file_size // (1024*1024)}MB", None
-            
-            # Generate unique filename
             timestamp = int(time.time())
             file_extension = os.path.splitext(file.filename)[1].lower()
             safe_filename = f"user_{user_id}_{timestamp}_{file.filename}"
             file_path = os.path.join(self.upload_dir, safe_filename)
-            
-            # Save file
             async with aiofiles.open(file_path, 'wb') as f:
                 await f.write(file_content)
-            
             return True, "File saved successfully", file_path
-            
         except Exception as e:
             return False, f"Failed to save file: {str(e)}", None
-    
+
     def get_audio_info(self, file_path: str) -> Dict[str, Any]:
-        """Extract audio file information"""
         try:
-            # Use librosa to get audio info
             y, sr = librosa.load(file_path, sr=None)
             duration = librosa.get_duration(y=y, sr=sr)
-            
-            # Get file size
             file_size = os.path.getsize(file_path)
-            
-            # Try to get more detailed info with pydub
             try:
                 audio = AudioSegment.from_file(file_path)
                 channels = audio.channels
@@ -88,7 +125,6 @@ class SpeechService:
                 channels = 1
                 sample_rate = sr
                 format_name = file_path.split('.')[-1].lower()
-            
             return {
                 "duration_seconds": duration,
                 "sample_rate": sample_rate,
@@ -96,7 +132,6 @@ class SpeechService:
                 "file_size": file_size,
                 "format": format_name
             }
-            
         except Exception as e:
             print(f"Error getting audio info: {e}")
             return {
@@ -106,423 +141,25 @@ class SpeechService:
                 "file_size": os.path.getsize(file_path) if os.path.exists(file_path) else 0,
                 "format": file_path.split('.')[-1].lower() if '.' in file_path else "unknown"
             }
-    
-    def create_transcription_record(self, user_id: int, filename: str, file_path: str, audio_info: Dict[str, Any], settings: TranscriptionSettings) -> SpeechTranscription:
-        """Create initial transcription record in database"""
-        try:
-            transcription = SpeechTranscription(
-                user_id=user_id,
-                original_filename=filename,
-                file_path=file_path,
-                file_size=audio_info["file_size"],
-                duration_seconds=audio_info["duration_seconds"],
-                sample_rate=audio_info["sample_rate"],
-                channels=audio_info["channels"],
-                format=audio_info["format"],
-                processing_status="pending",
-                processing_engine=settings.engine,
-                settings_json=json.dumps(settings.dict()),
-                language_detected=settings.language
-            )
-            
-            self.db.add(transcription)
-            self.db.commit()
-            self.db.refresh(transcription)
-            
-            # Log history
-            self.log_transcription_action(user_id, transcription.id, "created", "Transcription job created")
-            
-            return transcription
-            
-        except Exception as e:
-            self.db.rollback()
-            print(f"Error creating transcription record: {e}")
-            raise e
-    
-    async def process_transcription(self, transcription_id: int) -> bool:
-        """Process audio transcription"""
-        try:
-            # Get transcription record
-            transcription = self.db.query(SpeechTranscription).filter(
-                SpeechTranscription.id == transcription_id
-            ).first()
-            
-            if not transcription:
-                return False
-            
-            # Update status to processing
-            transcription.processing_status = "processing"
-            self.db.commit()
-            
-            start_time = time.time()
-            
-            # Get settings
-            settings = json.loads(transcription.settings_json) if transcription.settings_json else {}
-            engine = settings.get("engine", "whisper")
-            
-            # Process based on engine
-            if engine == "whisper" and self.whisper_model:
-                result = await self._transcribe_with_whisper(transcription.file_path, settings)
-            else:
-                result = await self._transcribe_with_speech_recognition(transcription.file_path, settings)
-            
-            processing_time = time.time() - start_time
-            
-            if result["success"]:
-                # Update transcription with results
-                transcription.transcription_text = result["text"]
-                transcription.confidence_score = result.get("confidence")
-                transcription.language_detected = result.get("language") or transcription.language_detected
-                transcription.processing_status = "completed"
-                transcription.processing_time_seconds = processing_time
-                transcription.completed_at = datetime.utcnow()
-                transcription.error_message = None
-            else:
-                # Update with error
-                transcription.processing_status = "failed"
-                transcription.error_message = result["error"]
-                transcription.processing_time_seconds = processing_time
-            
-            transcription.updated_at = datetime.utcnow()
-            self.db.commit()
-            
-            # Log completion
-            action = "completed" if result["success"] else "failed"
-            self.log_transcription_action(
-                transcription.user_id, 
-                transcription_id, 
-                action, 
-                f"Processing {action} in {processing_time:.2f}s"
-            )
-            
-            return result["success"]
-            
-        except Exception as e:
-            # Update transcription with error
-            try:
-                transcription = self.db.query(SpeechTranscription).filter(
-                    SpeechTranscription.id == transcription_id
-                ).first()
-                if transcription:
-                    transcription.processing_status = "failed"
-                    transcription.error_message = str(e)
-                    transcription.updated_at = datetime.utcnow()
-                    self.db.commit()
-            except:
-                pass
-            
-            print(f"Error processing transcription {transcription_id}: {e}")
-            return False
-    
-    async def _transcribe_with_whisper(self, file_path: str, settings: Dict[str, Any]) -> Dict[str, Any]:
-        """Transcribe using Whisper"""
-        try:
-            if not self.whisper_model:
-                return {"success": False, "error": "Whisper model not available"}
-            
-            # Transcribe
-            result = self.whisper_model.transcribe(
-                file_path,
-                language=settings.get("language"),
-                verbose=False
-            )
-            
-            return {
-                "success": True,
-                "text": result["text"].strip(),
-                "language": result.get("language"),
-                "confidence": None  # Whisper doesn't return confidence scores
-            }
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    async def _transcribe_with_speech_recognition(self, file_path: str, settings: Dict[str, Any]) -> Dict[str, Any]:
-        """Transcribe using SpeechRecognition library"""
-        try:
-            # Convert to WAV if needed
-            wav_path = await self._convert_to_wav(file_path)
-            
-            # Load audio
-            with sr.AudioFile(wav_path) as source:
-                audio = self.recognizer.record(source)
-            
-            # Transcribe
-            try:
-                # Try Google Web Speech API (free tier)
-                text = self.recognizer.recognize_google(
-                    audio,
-                    language=settings.get("language", "en-US")
-                )
-                
-                return {
-                    "success": True,
-                    "text": text,
-                    "language": settings.get("language", "en-US"),
-                    "confidence": None
-                }
-                
-            except sr.UnknownValueError:
-                return {"success": False, "error": "Could not understand audio"}
-            except sr.RequestError as e:
-                return {"success": False, "error": f"Recognition service error: {e}"}
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-    
-    async def _convert_to_wav(self, file_path: str) -> str:
-        """Convert audio file to WAV format"""
-        try:
-            if file_path.lower().endswith('.wav'):
-                return file_path
-            
-            # Create temporary WAV file
-            wav_path = file_path.rsplit('.', 1)[0] + '_converted.wav'
-            
-            # Convert using pydub
-            audio = AudioSegment.from_file(file_path)
-            audio.export(wav_path, format="wav")
-            
-            return wav_path
-            
-        except Exception as e:
-            print(f"Error converting to WAV: {e}")
-            raise e
-    
-    def get_transcription_by_id(self, transcription_id: int, user_id: int) -> Optional[SpeechTranscription]:
-        """Get transcription by ID for specific user"""
-        return self.db.query(SpeechTranscription).filter(
-            SpeechTranscription.id == transcription_id,
-            SpeechTranscription.user_id == user_id
-        ).first()
-    
-    def get_user_transcriptions(self, user_id: int, page: int = 1, page_size: int = 20) -> Tuple[List[SpeechTranscription], int]:
-        """Get user's transcriptions with pagination"""
-        try:
-            # Get total count
-            total_count = self.db.query(SpeechTranscription).filter(
-                SpeechTranscription.user_id == user_id
-            ).count()
-            
-            # Get paginated results
-            offset = (page - 1) * page_size
-            transcriptions = self.db.query(SpeechTranscription).filter(
-                SpeechTranscription.user_id == user_id
-            ).order_by(SpeechTranscription.created_at.desc()).offset(offset).limit(page_size).all()
-            
-            return transcriptions, total_count
-            
-        except Exception as e:
-            print(f"Error getting user transcriptions: {e}")
-            return [], 0
-    
-    def log_transcription_action(self, user_id: int, transcription_id: int, action: str, details: str = None):
-        """Log transcription action to history"""
-        try:
-            history = TranscriptionHistory(
-                user_id=user_id,
-                transcription_id=transcription_id,
-                action=action,
-                action_details=details
-            )
-            
-            self.db.add(history)
-            self.db.commit()
-            
-        except Exception as e:
-            print(f"Error logging transcription action: {e}")
-    
-    def delete_transcription(self, transcription_id: int, user_id: int) -> Tuple[bool, str]:
-        """Delete transcription and associated files"""
-        try:
-            transcription = self.get_transcription_by_id(transcription_id, user_id)
-            if not transcription:
-                return False, "Transcription not found"
-            
-            # Delete file from filesystem
-            try:
-                if os.path.exists(transcription.file_path):
-                    os.remove(transcription.file_path)
-                
-                # Also delete converted WAV file if exists
-                wav_path = transcription.file_path.rsplit('.', 1)[0] + '_converted.wav'
-                if os.path.exists(wav_path):
-                    os.remove(wav_path)
-            except Exception as e:
-                print(f"Error deleting files: {e}")
-            
-            # Delete from database
-            self.db.delete(transcription)
-            self.db.commit()
-            
-            # Log deletion
-            self.log_transcription_action(user_id, transcription_id, "deleted", "Transcription deleted by user")
-            
-            return True, "Transcription deleted successfully"
-            
-        except Exception as e:
-            self.db.rollback()
-            print(f"Error deleting transcription: {e}")
-            return False, f"Failed to delete transcription: {str(e)}"
-    
-    def get_user_stats(self, user_id: int) -> Dict[str, Any]:
-        """Get user's transcription statistics"""
-        try:
-            from sqlalchemy import func
-            
-            # Basic stats
-            stats = self.db.query(
-                func.count(SpeechTranscription.id).label('total_count'),
-                func.sum(SpeechTranscription.duration_seconds).label('total_duration'),
-                func.sum(SpeechTranscription.file_size).label('total_size'),
-                func.avg(SpeechTranscription.confidence_score).label('avg_confidence')
-            ).filter(SpeechTranscription.user_id == user_id).first()
-            
-            # This month count
-            this_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            this_month_count = self.db.query(SpeechTranscription).filter(
-                SpeechTranscription.user_id == user_id,
-                SpeechTranscription.created_at >= this_month
-            ).count()
-            
-            # Success rate
-            completed_count = self.db.query(SpeechTranscription).filter(
-                SpeechTranscription.user_id == user_id,
-                SpeechTranscription.processing_status == "completed"
-            ).count()
-            
-            success_rate = (completed_count / stats.total_count * 100) if stats.total_count > 0 else 0
-            
-            return {
-                "total_transcriptions": stats.total_count or 0,
-                "total_duration_minutes": round((stats.total_duration or 0) / 60, 2),
-                "total_file_size_mb": round((stats.total_size or 0) / (1024*1024), 2),
-                "average_confidence": round(stats.avg_confidence or 0, 2),
-                "success_rate": round(success_rate, 2),
-                "this_month_count": this_month_count
-            }
-            
-        except Exception as e:
-            print(f"Error getting user stats: {e}")
-            return {
-                "total_transcriptions": 0,
-                "total_duration_minutes": 0,
-                "total_file_size_mb": 0,
-                "average_confidence": 0,
-                "success_rate": 0,
-                "this_month_count": 0
-            }
-    
-    async def process_audio_buffer(audio_buffer, session_id, chunk_id, language, engine):
-        """Process accumulated audio buffer for transcription without temporary files"""
-        
-        try:
-            # Combine audio chunks
-            combined_audio = b''.join(audio_buffer)
-            
-            if len(combined_audio) < 1000:  # Skip very small buffers
-                return None
-            
-            print(f"Processing {len(combined_audio)} bytes of audio data for session {session_id}")
-            
-            # Use thread executor to avoid blocking
-            loop = asyncio.get_event_loop()
-            
-            if engine == TranscriptionEngine.WHISPER and WHISPER_AVAILABLE:
-                result = await loop.run_in_executor(
-                    executor,
-                    process_webm_audio_with_whisper,
-                    combined_audio,
-                    language,
-                    session_id,
-                    chunk_id
-                )
-                
-                if result and result.get("text", "").strip():
-                    return {
-                        "text": result["text"].strip(),
-                        "confidence": 0.8,
-                        "language": result.get("language", language)
-                    }
-            
-            elif engine == TranscriptionEngine.GOOGLE and SPEECH_RECOGNITION_AVAILABLE:
-                result = await loop.run_in_executor(
-                    executor,
-                    process_webm_audio_with_google,
-                    combined_audio,
-                    language,
-                    session_id,
-                    chunk_id
-                )
-                
-                if result and result.get("text", "").strip():
-                    return {
-                        "text": result["text"],
-                        "confidence": 0.8,
-                        "language": language or "en"
-                    }
-        
-        except Exception as e:
-            print(f"Error processing audio buffer: {e}")
-            return None
-        
-        return None
 
+    # --- Streaming and chunked audio processing methods (no DB required) ---
+
+    @staticmethod
     def process_webm_audio_with_whisper(audio_data, language, session_id, chunk_id):
-        """Process WebM audio with Whisper - runs in thread executor"""
-        
         try:
             print(f"Whisper processing session {session_id}, chunk {chunk_id}")
-            
-            # Convert WebM to numpy array using pydub
-            if not SPEECH_RECOGNITION_AVAILABLE:
-                print("pydub not available")
-                return None
-            
             from pydub import AudioSegment
-            
-            # Load WebM data directly into AudioSegment
-            try:
-                audio_segment = AudioSegment.from_file(
-                    io.BytesIO(audio_data), 
-                    format="webm"
-                )
-            except Exception as e:
-                print(f"Failed to load WebM data: {e}")
-                # Try as raw audio data
-                try:
-                    # Assume it's raw PCM data
-                    audio_segment = AudioSegment(
-                        data=audio_data,
-                        sample_width=2,  # 16-bit
-                        frame_rate=16000,
-                        channels=1
-                    )
-                except Exception as e2:
-                    print(f"Failed to load as raw PCM: {e2}")
-                    return None
-            
-            # Convert to optimal format for Whisper
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_data), format="webm")
             audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
-            
-            # Convert to numpy array
             audio_samples = np.array(audio_segment.get_array_of_samples())
-            
-            # Normalize to [-1, 1] range (Whisper expects this)
             if audio_samples.dtype == np.int16:
                 audio_samples = audio_samples.astype(np.float32) / 32768.0
             elif audio_samples.dtype == np.int32:
                 audio_samples = audio_samples.astype(np.float32) / 2147483648.0
-            
-            # Load model (with caching)
-            if not hasattr(process_webm_audio_with_whisper, '_model'):
-                print("Loading Whisper model...")
-                process_webm_audio_with_whisper._model = whisper.load_model("base")
-                print("Whisper model cached")
-            
-            model = process_webm_audio_with_whisper._model
-            
-            # Set language
+            if not hasattr(SpeechService.process_webm_audio_with_whisper, '_model'):
+                import whisper
+                SpeechService.process_webm_audio_with_whisper._model = whisper.load_model("base")
+            model = SpeechService.process_webm_audio_with_whisper._model
             whisper_language = None
             if language and language.lower() not in ['english', 'en']:
                 lang_map = {
@@ -531,10 +168,8 @@ class SpeechService:
                     'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko'
                 }
                 whisper_language = lang_map.get(language.lower(), language.lower()[:2])
-            
-            # Transcribe directly from numpy array (no file needed!)
             result = model.transcribe(
-                audio_samples,  # Pass numpy array directly
+                audio_samples,
                 language=whisper_language,
                 verbose=False,
                 fp16=False,
@@ -543,16 +178,245 @@ class SpeechService:
                 no_speech_threshold=0.6,
                 logprob_threshold=-1.0
             )
-            
             print(f"Whisper result: '{result['text'][:50]}...'")
             return result
-        
         except Exception as e:
             print(f"Whisper processing error: {e}")
             import traceback
             traceback.print_exc()
             return None
 
+    @staticmethod
+    def process_webm_audio_with_google(audio_data, language, session_id, chunk_id):
+        try:
+            print(f"Google processing session {session_id}, chunk {chunk_id}")
+            if not SPEECH_RECOGNITION_AVAILABLE:
+                return None
+            import speech_recognition as sr
+            from pydub import AudioSegment
+            audio_segment = AudioSegment.from_file(io.BytesIO(audio_data), format="webm")
+            audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
+            wav_buffer = io.BytesIO()
+            audio_segment.export(wav_buffer, format="wav")
+            wav_buffer.seek(0)
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_buffer) as source:
+                audio_data_sr = recognizer.record(source)
+            google_language = 'en-US'
+            if language:
+                lang_map = {
+                    'english': 'en-US', 'spanish': 'es-ES', 'french': 'fr-FR',
+                    'german': 'de-DE', 'italian': 'it-IT', 'portuguese': 'pt-PT',
+                    'russian': 'ru-RU', 'chinese': 'zh-CN', 'japanese': 'ja-JP',
+                    'korean': 'ko-KR'
+                }
+                google_language = lang_map.get(language.lower(), 'en-US')
+            text = recognizer.recognize_google(audio_data_sr, language=google_language)
+            print(f"Google result: '{text[:50]}...'")
+            return {"text": text}
+        except Exception as e:
+            print(f"Google processing error: {e}")
+            return None
+
+    @staticmethod
+    def process_streaming_audio_with_whisper(audio_data, language, session_id, chunk_id, previous_text="", audio_format="audio/webm"):
+        """Process streaming audio with Whisper - improved format handling"""
+        try:
+            print(f"Whisper processing accumulated audio for session {session_id}, chunk {chunk_id}")
+            print(f"Audio data size: {len(audio_data)} bytes")
+            print(f"Audio format: {audio_format}")
+            print(f"Previous text: '{previous_text}' ({len(previous_text)} chars total)")
+            
+            if len(audio_data) < 2000:  # Skip very small chunks
+                print("Audio data too small, skipping")
+                return None
+            
+            # Determine format from audio_format parameter
+            format_ext = "webm"  # default
+            pydub_format = "webm"
+            
+            if "webm" in audio_format.lower():
+                format_ext = "webm"
+                pydub_format = "webm"
+            elif "ogg" in audio_format.lower():
+                format_ext = "ogg"
+                pydub_format = "ogg"
+            elif "mp4" in audio_format.lower():
+                format_ext = "mp4"
+                pydub_format = "mp4"
+            elif "wav" in audio_format.lower():
+                format_ext = "wav"
+                pydub_format = "wav"
+            
+            print(f"Using format: {pydub_format} (.{format_ext})")
+            
+            # Check for proper headers based on format
+            has_proper_header = False
+            if format_ext == "webm":
+                has_proper_header = audio_data.startswith(b'\x1a\x45\xdf\xa3') or b'webm' in audio_data[:100].lower()
+            elif format_ext == "ogg":
+                has_proper_header = audio_data.startswith(b'OggS')
+            elif format_ext == "wav":
+                has_proper_header = audio_data.startswith(b'RIFF')
+            elif format_ext == "mp4":
+                has_proper_header = b'ftyp' in audio_data[:32] or b'moov' in audio_data[:100]
+            
+            print(f"Proper {format_ext} header found: {has_proper_header}")
+            
+            if not has_proper_header:
+                print("No proper header found - attempting direct processing anyway")
+                print(f"First 20 bytes: {audio_data[:20]}")
+            
+            audio_segment = None
+            success = False
+            
+            # Try to process with the specified format first
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{format_ext}") as tmp:
+                    tmp.write(audio_data)
+                    tmp_path = tmp.name
+                
+                # Try loading with the specified format
+                try:
+                    audio_segment = AudioSegment.from_file(tmp_path, format=pydub_format)
+                    print(f"Successfully loaded as {pydub_format}")
+                    success = True
+                except Exception as format_error:
+                    print(f"Failed to load as {pydub_format}: {format_error}")
+                    
+                    # Try without specifying format (let pydub auto-detect)
+                    try:
+                        audio_segment = AudioSegment.from_file(tmp_path)
+                        print("Successfully loaded with auto-detection")
+                        success = True
+                    except Exception as auto_error:
+                        print(f"Auto-detection failed: {auto_error}")
+                        
+                        # Try all common formats as fallback
+                        fallback_formats = ['webm', 'ogg', 'wav', 'mp4', 'm4a']
+                        for fmt in fallback_formats:
+                            if fmt == pydub_format:
+                                continue  # Already tried this one
+                            try:
+                                # Create new temp file with different extension
+                                new_path = tmp_path.replace(f'.{format_ext}', f'.{fmt}')
+                                with open(new_path, 'wb') as f:
+                                    f.write(audio_data)
+                                
+                                audio_segment = AudioSegment.from_file(new_path, format=fmt)
+                                print(f"Successfully loaded as {fmt} (fallback)")
+                                success = True
+                                
+                                # Clean up the new temp file
+                                if os.path.exists(new_path):
+                                    os.unlink(new_path)
+                                break
+                                
+                            except Exception as fmt_error:
+                                print(f"Failed to load as {fmt}: {fmt_error}")
+                                if 'new_path' in locals() and os.path.exists(new_path):
+                                    try:
+                                        os.unlink(new_path)
+                                    except:
+                                        pass
+                                continue
+                
+                # Clean up main temp file
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                    
+            except Exception as e:
+                print(f"Error creating temp file: {e}")
+                return None
+            
+            if not success or audio_segment is None:
+                print("All audio format attempts failed")
+                return None
+            
+            # Downsample to 16kHz mono for Whisper
+            audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
+            
+            duration_ms = len(audio_segment)
+            duration_seconds = duration_ms / 1000.0
+            print(f"Audio duration: {duration_seconds:.2f} seconds")
+            
+            # Skip very short audio segments
+            if duration_seconds < 1.0:  # Require at least 1 second for better accuracy
+                print("Audio too short for transcription, skipping")
+                return None
+            
+            # Convert to float32 for Whisper
+            audio_samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
+            if audio_segment.sample_width == 2:  # 16-bit PCM
+                audio_samples /= 32768.0
+            elif audio_segment.sample_width == 4:  # 32-bit PCM
+                audio_samples /= 2147483648.0
+            elif audio_segment.sample_width == 1:  # 8-bit PCM
+                audio_samples = (audio_samples - 128) / 128.0
+            
+            # Load model (with caching)
+            if not hasattr(SpeechService.process_streaming_audio_with_whisper, '_model'):
+                print(f"Loading Whisper model ({WHISPER_MODEL_SIZE})...")
+                import whisper
+                SpeechService.process_streaming_audio_with_whisper._model = whisper.load_model(WHISPER_MODEL_SIZE)
+                print("Whisper model cached")
+            
+            model = SpeechService.process_streaming_audio_with_whisper._model
+            
+            # Set language parameter with all supported languages
+            whisper_language = None
+            if language and language.lower() not in ['english', 'en']:
+                lang_map = {
+                    'spanish': 'es', 'french': 'fr', 'german': 'de',
+                    'italian': 'it', 'portuguese': 'pt', 'russian': 'ru',
+                    'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko',
+                    'arabic': 'ar', 'swahili': 'sw', 'afrikaans': 'af'
+                }
+                whisper_language = lang_map.get(language.lower(), language.lower()[:2])
+            
+            print(f"Starting Whisper transcription (language: {whisper_language or 'auto'})")
+            
+            # Use more sensitive settings for live transcription
+            result = model.transcribe(
+                audio_samples,
+                language=whisper_language,
+                verbose=False,
+                fp16=False,
+                condition_on_previous_text=False,
+                temperature=0.0,
+                no_speech_threshold=0.4,  # More sensitive to speech
+                logprob_threshold=-1.0,   # More lenient
+                compression_ratio_threshold=2.4,
+                word_timestamps=False,
+            )
+            
+            full_text = result['text'].strip()
+            print(f"Full transcription result: '{full_text}'")
+            
+            # Deduplicate text by removing overlap with previous text
+            new_text = SpeechService._extract_new_text(full_text, previous_text)
+            print(f"New text after deduplication: '{new_text}'")
+            
+            # Return result for any meaningful new text
+            if new_text and len(new_text) > 0 and new_text not in ['...', '.', ' ', 'you', 'Thank you.']:
+                return {
+                    'text': new_text,
+                    'full_text': full_text,  # Include full text for debugging
+                    'language': result.get('language', language or 'en'),
+                    'duration': duration_seconds,
+                    'confidence': 0.8  # Default confidence for Whisper
+                }
+            else:
+                print("No meaningful transcription result")
+                return None
+                
+        except Exception as e:
+            print(f"Whisper streaming processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    @staticmethod
     def process_webm_audio_with_google(audio_data, language, session_id, chunk_id):
         """Process WebM audio with Google Speech Recognition - runs in thread executor"""
         try:
@@ -562,7 +426,6 @@ class SpeechService:
                 return None
 
             import speech_recognition as sr
-            from pydub import AudioSegment
 
             # Convert WebM to AudioSegment
             try:
@@ -587,14 +450,15 @@ class SpeechService:
             with sr.AudioFile(wav_buffer) as source:
                 audio_data_sr = recognizer.record(source)
 
-            # Set language
+            # Set language with Afrikaans support
             google_language = 'en-US'
             if language:
                 lang_map = {
                     'english': 'en-US', 'spanish': 'es-ES', 'french': 'fr-FR',
                     'german': 'de-DE', 'italian': 'it-IT', 'portuguese': 'pt-PT',
                     'russian': 'ru-RU', 'chinese': 'zh-CN', 'japanese': 'ja-JP',
-                    'korean': 'ko-KR'
+                    'korean': 'ko-KR', 'arabic': 'ar-SA', 'swahili': 'sw-KE',
+                    'afrikaans': 'af-ZA'  # Added Afrikaans
                 }
                 google_language = lang_map.get(language.lower(), 'en-US')
 
@@ -606,51 +470,53 @@ class SpeechService:
         except Exception as e:
             print(f"Google processing error: {e}")
             return None
-    
-    import tempfile
-    import os
 
-    def process_streaming_audio_with_whisper(audio_data, language, session_id, chunk_id):
-        import tempfile
-        import os
-        import numpy as np
-        from pydub import AudioSegment
-
+    @staticmethod
+    def process_incremental_audio_with_whisper(audio_data, language, session_id, chunk_id, previous_text=""):
+        """Process incremental audio chunk with Whisper - with text deduplication"""
         try:
-            print(f"Whisper processing streaming session {session_id}, chunk {chunk_id}")
-
-            # Only try to decode as WebM if header is present
-            if audio_data[:4] != b'\x1A\x45\xDF\xA3':
-                print("Buffer does not start with WebM header, skipping decode.")
+            print(f"Whisper processing incremental audio for session {session_id}, chunk {chunk_id}")
+            print(f"New audio data size: {len(audio_data)} bytes")
+            
+            # Check if this looks like a valid WebM file
+            if len(audio_data) < 1000:
+                print("Audio data too small, skipping")
                 return None
-
-            # Write accumulated audio to a temp file
+                
+            # Check for WebM header
+            if audio_data[:4] != b'\x1A\x45\xDF\xA3':
+                print("No WebM header found - invalid WebM data")
+                return None
+            
+            # Write audio to a temp file
             with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
                 tmp.write(audio_data)
                 tmp_path = tmp.name
-
+            
             try:
+                # Load as WebM
                 audio_segment = AudioSegment.from_file(tmp_path, format="webm")
-                print("Successfully loaded as WebM via temp file")
+                print("Successfully loaded incremental WebM data")
             except Exception as e:
                 print(f"WebM loading failed: {e}")
                 os.unlink(tmp_path)
                 return None
-
+            
             os.unlink(tmp_path)
-
+            
             # Downsample to 16kHz mono for Whisper
             audio_segment = audio_segment.set_frame_rate(16000).set_channels(1)
-
+            
             duration_ms = len(audio_segment)
             duration_seconds = duration_ms / 1000.0
             print(f"Audio duration: {duration_seconds:.2f} seconds")
-
+            
+            # Require at least 0.3 seconds of audio for meaningful transcription
             if duration_seconds < 0.3:
-                print("Audio too short, skipping")
+                print("Audio too short for transcription, skipping")
                 return None
-
-            # Always output float32 for Whisper
+            
+            # Convert to float32 for Whisper
             audio_samples = np.array(audio_segment.get_array_of_samples()).astype(np.float32)
             if audio_segment.sample_width == 2:  # 16-bit PCM
                 audio_samples /= 32768.0
@@ -658,28 +524,185 @@ class SpeechService:
                 audio_samples /= 2147483648.0
             elif audio_segment.sample_width == 1:  # 8-bit PCM
                 audio_samples = (audio_samples - 128) / 128.0
-
+            
             # Load model (with caching)
-            if not hasattr(process_streaming_audio_with_whisper, '_model'):
-                print("Loading Whisper model...")
+            if not hasattr(SpeechService.process_incremental_audio_with_whisper, '_model'):
+                print(f"Loading Whisper model ({WHISPER_MODEL_SIZE})...")
                 import whisper
-                process_streaming_audio_with_whisper._model = whisper.load_model("base")
-                print("Whisper model cached")
-
-            model = process_streaming_audio_with_whisper._model
-
+                SpeechService.process_incremental_audio_with_whisper._model = whisper.load_model(WHISPER_MODEL_SIZE)
+                print("Whisper model cached for incremental processing")
+            
+            model = SpeechService.process_incremental_audio_with_whisper._model
+            
             # Set language parameter
             whisper_language = None
             if language and language.lower() not in ['english', 'en']:
                 lang_map = {
                     'spanish': 'es', 'french': 'fr', 'german': 'de',
                     'italian': 'it', 'portuguese': 'pt', 'russian': 'ru',
-                    'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko'
+                    'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko',
+                    'arabic': 'ar', 'swahili': 'sw', 'afrikaans': 'af'
                 }
                 whisper_language = lang_map.get(language.lower(), language.lower()[:2])
-
-            print(f"Starting Whisper transcription (language: {whisper_language or 'auto'})")
-
+            
+            print(f"Starting incremental Whisper transcription (language: {whisper_language or 'auto'})")
+            
+            # Use optimized settings for incremental transcription
+            result = model.transcribe(
+                audio_samples,
+                language=whisper_language,
+                verbose=False,
+                fp16=False,
+                condition_on_previous_text=False,  # Very important: don't condition on previous text
+                temperature=0.0,
+                no_speech_threshold=0.3,  # More sensitive to speech
+                logprob_threshold=-1.0,   # More lenient
+                compression_ratio_threshold=2.4,
+                word_timestamps=False,
+                initial_prompt="",  # No prompt to avoid context bleeding
+            )
+            
+            full_text = result['text'].strip()
+            print(f"Full transcription result: '{full_text}'")
+            
+            # Deduplicate text by removing overlap with previous text
+            new_text = SpeechService._extract_new_text(full_text, previous_text)
+            
+            print(f"New text after deduplication: '{new_text}'")
+            
+            # Return result for any meaningful new text
+            if new_text and len(new_text) > 0 and new_text not in ['...', '.', ' ', 'you', 'Thank you.']:
+                return {
+                    'text': new_text,
+                    'full_text': full_text,  # Include full text for debugging
+                    'language': result.get('language', language or 'en'),
+                    'duration': duration_seconds,
+                    'confidence': 0.8  # Default confidence for Whisper
+                }
+            else:
+                print("No meaningful new text after deduplication")
+                return None
+                
+        except Exception as e:
+            print(f"Incremental Whisper processing error: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
+    @staticmethod
+    def _extract_new_text(full_text: str, previous_text: str) -> str:
+        """Extract new text from full transcription by removing overlap with previous text"""
+        if not previous_text:
+            return full_text
+        
+        # Convert to lowercase for comparison
+        full_lower = full_text.lower().strip()
+        prev_lower = previous_text.lower().strip()
+        
+        # If full text is completely contained in previous text, no new content
+        if full_lower in prev_lower:
+            return ""
+        
+        # If previous text is completely contained in full text, extract the new part
+        if prev_lower in full_lower:
+            # Find where the previous text ends in the full text
+            prev_end_index = full_lower.find(prev_lower) + len(prev_lower)
+            new_text = full_text[prev_end_index:].strip()
+            return new_text
+        
+        # Try to find the best overlap by checking word boundaries
+        full_words = full_text.split()
+        prev_words = previous_text.split()
+        
+        if not prev_words:
+            return full_text
+        
+        # Look for the longest suffix of previous_text that matches a prefix of full_text
+        best_overlap = 0
+        for i in range(1, min(len(prev_words), len(full_words)) + 1):
+            if prev_words[-i:] == full_words[:i]:
+                best_overlap = i
+        
+        # Extract new words after the overlap
+        if best_overlap > 0:
+            new_words = full_words[best_overlap:]
+            return " ".join(new_words)
+        else:
+            # No clear overlap found, return the full text as it might be entirely new
+            return full_text
+    
+    @staticmethod
+    def process_pcm_audio_with_whisper(audio_data, language, session_id, chunk_id, previous_text="", sample_rate=16000, channels=1, bits_per_sample=16):
+        """Process raw PCM audio with Whisper - direct processing without file format issues"""
+        try:
+            print(f"Whisper processing PCM audio for session {session_id}, chunk {chunk_id}")
+            print(f"PCM data size: {len(audio_data)} bytes")
+            print(f"Sample rate: {sample_rate}, Channels: {channels}, Bits: {bits_per_sample}")
+            print(f"Previous text: '{previous_text}' ({len(previous_text)} chars total)")
+            
+            if len(audio_data) < 4000:  # Skip very small chunks (less than ~0.125s at 16kHz)
+                print("PCM data too small, skipping")
+                return None
+            
+            # Convert bytes to numpy array based on bits per sample
+            if bits_per_sample == 16:
+                # Convert from bytes to int16 array
+                audio_samples = np.frombuffer(audio_data, dtype=np.int16)
+                # Convert to float32 for Whisper (normalize to [-1, 1])
+                audio_samples = audio_samples.astype(np.float32) / 32768.0
+            elif bits_per_sample == 32:
+                # Convert from bytes to int32 array
+                audio_samples = np.frombuffer(audio_data, dtype=np.int32)
+                # Convert to float32 for Whisper (normalize to [-1, 1])
+                audio_samples = audio_samples.astype(np.float32) / 2147483648.0
+            else:
+                print(f"Unsupported bits per sample: {bits_per_sample}")
+                return None
+            
+            # Handle multi-channel audio by taking the first channel
+            if channels > 1:
+                # Reshape and take first channel
+                audio_samples = audio_samples.reshape(-1, channels)[:, 0]
+            
+            duration_seconds = len(audio_samples) / sample_rate
+            print(f"PCM audio duration: {duration_seconds:.2f} seconds")
+            
+            # Skip very short audio segments
+            if duration_seconds < 0.5:  # Require at least 0.5 seconds
+                print("PCM audio too short for transcription, skipping")
+                return None
+            
+            # Resample to 16kHz if needed (Whisper's expected sample rate)
+            if sample_rate != 16000:
+                # Simple linear interpolation resampling
+                target_length = int(len(audio_samples) * 16000 / sample_rate)
+                indices = np.linspace(0, len(audio_samples) - 1, target_length)
+                audio_samples = np.interp(indices, np.arange(len(audio_samples)), audio_samples)
+                print(f"Resampled from {sample_rate}Hz to 16kHz")
+            
+            # Load model (with caching)
+            if not hasattr(SpeechService.process_pcm_audio_with_whisper, '_model'):
+                print(f"Loading Whisper model ({WHISPER_MODEL_SIZE})...")
+                import whisper
+                SpeechService.process_pcm_audio_with_whisper._model = whisper.load_model(WHISPER_MODEL_SIZE)
+                print("Whisper model cached for PCM processing")
+            
+            model = SpeechService.process_pcm_audio_with_whisper._model
+            
+            # Set language parameter
+            whisper_language = None
+            if language and language.lower() not in ['english', 'en']:
+                lang_map = {
+                    'spanish': 'es', 'french': 'fr', 'german': 'de',
+                    'italian': 'it', 'portuguese': 'pt', 'russian': 'ru',
+                    'chinese': 'zh', 'japanese': 'ja', 'korean': 'ko',
+                    'arabic': 'ar', 'swahili': 'sw', 'afrikaans': 'af'
+                }
+                whisper_language = lang_map.get(language.lower(), language.lower()[:2])
+            
+            print(f"Starting Whisper transcription on PCM data (language: {whisper_language or 'auto'})")
+            
+            # Use optimized settings for PCM transcription
             result = model.transcribe(
                 audio_samples,
                 language=whisper_language,
@@ -687,50 +710,34 @@ class SpeechService:
                 fp16=False,
                 condition_on_previous_text=False,
                 temperature=0.0,
-                no_speech_threshold=0.5,
-                logprob_threshold=-0.8,
+                no_speech_threshold=0.4,  # More sensitive to speech
+                logprob_threshold=-1.0,   # More lenient
                 compression_ratio_threshold=2.4,
                 word_timestamps=False,
             )
-
-            text = result['text'].strip()
-            print(f"Whisper result ({duration_seconds:.1f}s): '{text[:100]}{'...' if len(text) > 100 else ''}'")
-
-            if text and len(text) > 1 and text not in ['...', '.', ' ']:
+            
+            full_text = result['text'].strip()
+            print(f"PCM transcription result: '{full_text}'")
+            
+            # Deduplicate text by removing overlap with previous text
+            new_text = SpeechService._extract_new_text(full_text, previous_text)
+            print(f"New text after deduplication: '{new_text}'")
+            
+            # Return result for any meaningful new text
+            if new_text and len(new_text) > 0 and new_text not in ['...', '.', ' ', 'you', 'Thank you.']:
                 return {
-                    'text': text,
+                    'text': new_text,
+                    'full_text': full_text,  # Include full text for debugging
                     'language': result.get('language', language or 'en'),
-                    'duration': duration_seconds
+                    'duration': duration_seconds,
+                    'confidence': 0.8  # Default confidence for Whisper
                 }
             else:
-                print("No meaningful transcription result")
+                print("No meaningful PCM transcription result")
                 return None
-
+                
         except Exception as e:
-            print(f"Whisper streaming processing error: {e}")
+            print(f"PCM Whisper processing error: {e}")
             import traceback
             traceback.print_exc()
             return None
-
-    def transcribe_with_whisper(self, audio_path: str, language: Optional[str] = None):
-        try:
-            print(f"Loading Whisper model ({WHISPER_MODEL_SIZE})...")
-            model = whisper.load_model(WHISPER_MODEL_SIZE)  # Use the environment variable
-            print("Whisper model loaded successfully")
-            
-            # Transcribe
-            result = model.transcribe(
-                audio_path,
-                language=language,
-                verbose=False
-            )
-            
-            return {
-                "success": True,
-                "text": result["text"].strip(),
-                "language": result.get("language"),
-                "confidence": None  # Whisper doesn't return confidence scores
-            }
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}

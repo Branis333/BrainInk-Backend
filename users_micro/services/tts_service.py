@@ -12,6 +12,8 @@ from typing import Optional, Dict, Any, List
 from datetime import datetime
 import json
 
+from services.azure_tts_service import azure_tts_service
+
 # Try to import Google TTS - will use fallback if not available
 try:
     from google.cloud import texttospeech
@@ -26,11 +28,11 @@ try:
 except ImportError:
     PYTTSX3_AVAILABLE = False
 
-try:
-    import azure.cognitiveservices.speech as speechsdk
-    AZURE_TTS_AVAILABLE = True
-except ImportError:
-    AZURE_TTS_AVAILABLE = False
+AZURE_VOICE_MAP = {
+    "child_friendly": "en-US-AvaNeural",
+    "teacher": "en-US-GuyNeural",
+    "clear": "en-US-JennyNeural",
+}
 
 
 class TTSService:
@@ -47,13 +49,35 @@ class TTSService:
     def _detect_available_tts(self) -> str:
         """Detect which TTS method is available"""
         
-        # Check for Google Cloud TTS (best quality)
-        if GOOGLE_TTS_AVAILABLE and os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
-            return "google_cloud"
-        
-        # Check for Azure TTS
-        if AZURE_TTS_AVAILABLE and os.getenv("AZURE_SPEECH_KEY"):
+        # Prefer Azure Speech if configured
+        if azure_tts_service.is_available:
             return "azure"
+
+        # Check for Google Cloud TTS (best quality)
+        credentials_json = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+        credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+        
+        if GOOGLE_TTS_AVAILABLE and (credentials_json or credentials_path):
+            # If JSON is in environment variable, create temp file
+            if credentials_json and not credentials_path:
+                try:
+                    import json
+                    import tempfile
+                    
+                    # Create temporary credentials file
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+                        json.dump(json.loads(credentials_json), f)
+                        temp_path = f.name
+                    
+                    # Set the credentials path for Google client
+                    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = temp_path
+                    print(f"✅ Created Google Cloud credentials file from environment variable")
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to create credentials file from env var: {e}")
+                    return "system_fallback"
+            
+            return "google_cloud"
         
         # Check for local pyttsx3
         if PYTTSX3_AVAILABLE:
@@ -101,11 +125,16 @@ class TTSService:
                     return cached_result
             
             # Generate new audio based on available method
-            if self.tts_method == "google_cloud":
-                result = await self._generate_google_cloud_tts(text, voice_type, speed)
-            elif self.tts_method == "azure":
+            method = self.tts_method
+            if method == "azure" and not azure_tts_service.is_available:
+                method = self._detect_available_tts()
+                self.tts_method = method
+
+            if method == "azure":
                 result = await self._generate_azure_tts(text, voice_type, speed)
-            elif self.tts_method == "pyttsx3":
+            elif method == "google_cloud":
+                result = await self._generate_google_cloud_tts(text, voice_type, speed)
+            elif method == "pyttsx3":
                 result = await self._generate_pyttsx3_tts(text, voice_type, speed)
             else:
                 result = await self._generate_fallback_tts(text, voice_type, speed)
@@ -127,6 +156,36 @@ class TTSService:
                 "error": str(e)
             }
     
+    async def _generate_azure_tts(
+        self,
+        text: str,
+        voice_type: str,
+        speed: float,
+    ) -> Dict[str, Any]:
+        """Generate TTS using Azure Cognitive Services."""
+
+        mapped_voice = AZURE_VOICE_MAP.get(voice_type, AZURE_VOICE_MAP["child_friendly"])
+        result = await azure_tts_service.synthesize(
+            text=text,
+            voice=mapped_voice,
+            speed=speed,
+        )
+
+        filename = f"tts_{uuid.uuid4().hex}.wav"
+        file_path = self.output_dir / filename
+        with open(file_path, "wb") as f:
+            f.write(result["audio_bytes"])
+
+        return {
+            "success": True,
+            "audio_url": f"/reading-assistant/pronunciation-audio/{filename}",
+            "audio_file": str(file_path),
+            "duration_seconds": result["duration_seconds"],
+            "text": text,
+            "voice": result["voice"],
+            "provider": result["provider"],
+        }
+
     async def _generate_google_cloud_tts(
         self,
         text: str,
@@ -254,25 +313,99 @@ class TTSService:
     ) -> Dict[str, Any]:
         """Fallback TTS when no service is available"""
         
-        # Create a mock audio file or use system TTS
-        filename = f"tts_fallback_{uuid.uuid4().hex}.txt"
-        file_path = self.output_dir / filename
-        
-        # Save text file as placeholder
-        with open(file_path, "w") as f:
-            f.write(f"Pronunciation: {text}\nVoice: {voice_type}\nSpeed: {speed}")
-        
-        word_count = len(text.split())
-        estimated_duration = (word_count * 0.6) / speed
-        
-        return {
-            "success": True,
-            "audio_url": f"/reading-assistant/pronunciation-audio/{filename}",
-            "audio_file": str(file_path),
-            "duration_seconds": estimated_duration,
-            "text": text,
-            "fallback": True
-        }
+        try:
+            # Try to create a simple audio file with pyttsx3 if available
+            if PYTTSX3_AVAILABLE:
+                filename = f"tts_fallback_{uuid.uuid4().hex}.wav"
+                file_path = self.output_dir / filename
+                
+                try:
+                    import pyttsx3
+                    engine = pyttsx3.init()
+                    
+                    # Set speech rate
+                    rate = engine.getProperty('rate')
+                    engine.setProperty('rate', int(rate * speed))
+                    
+                    # Set voice if available
+                    voices = engine.getProperty('voices')
+                    if voices:
+                        # Try to use a female voice for child-friendliness
+                        for voice in voices:
+                            if 'female' in voice.name.lower() or 'woman' in voice.name.lower():
+                                engine.setProperty('voice', voice.id)
+                                break
+                    
+                    # Save to file
+                    engine.save_to_file(text, str(file_path))
+                    engine.runAndWait()
+                    
+                    if os.path.exists(file_path) and os.path.getsize(file_path) > 0:
+                        word_count = len(text.split())
+                        estimated_duration = (word_count * 0.6) / speed
+                        
+                        return {
+                            "success": True,
+                            "audio_url": f"/after-school/reading-assistant/pronunciation-audio/{filename}",
+                            "audio_file": str(file_path),
+                            "duration_seconds": estimated_duration,
+                            "text": text,
+                            "method": "pyttsx3_fallback"
+                        }
+                except Exception as pyttsx_error:
+                    print(f"⚠️ pyttsx3 fallback failed: {pyttsx_error}")
+            
+            # Ultimate fallback - create minimal WAV file with silence
+            filename = f"tts_silence_{uuid.uuid4().hex}.wav"
+            file_path = self.output_dir / filename
+            
+            # Create minimal WAV file header (44 bytes) + 1 second of silence
+            sample_rate = 16000
+            duration = max(1.0, len(text.split()) * 0.5)  # 0.5 seconds per word
+            num_samples = int(sample_rate * duration)
+            
+            # WAV file header
+            wav_header = bytearray(44)
+            wav_header[0:4] = b'RIFF'
+            wav_header[8:12] = b'WAVE'
+            wav_header[12:16] = b'fmt '
+            wav_header[16:20] = (16).to_bytes(4, 'little')  # fmt chunk size
+            wav_header[20:22] = (1).to_bytes(2, 'little')   # PCM format
+            wav_header[22:24] = (1).to_bytes(2, 'little')   # mono
+            wav_header[24:28] = sample_rate.to_bytes(4, 'little')
+            wav_header[28:32] = (sample_rate * 2).to_bytes(4, 'little')  # byte rate
+            wav_header[32:34] = (2).to_bytes(2, 'little')   # block align
+            wav_header[34:36] = (16).to_bytes(2, 'little')  # bits per sample
+            wav_header[36:40] = b'data'
+            wav_header[40:44] = (num_samples * 2).to_bytes(4, 'little')  # data size
+            
+            # Update RIFF chunk size
+            wav_header[4:8] = (36 + num_samples * 2).to_bytes(4, 'little')
+            
+            # Write WAV file with silence
+            with open(file_path, 'wb') as f:
+                f.write(wav_header)
+                # Write silence (zeros)
+                silence_data = bytes(num_samples * 2)  # 2 bytes per sample (16-bit)
+                f.write(silence_data)
+            
+            return {
+                "success": True,
+                "audio_url": f"/after-school/reading-assistant/pronunciation-audio/{filename}",
+                "audio_file": str(file_path),
+                "duration_seconds": duration,
+                "text": text,
+                "method": "silence_fallback"
+            }
+            
+        except Exception as e:
+            print(f"❌ All TTS methods failed: {e}")
+            # Return error state
+            return {
+                "success": False,
+                "error": f"TTS generation failed: {str(e)}",
+                "text": text
+            }
     
     async def generate_word_pronunciation(
         self,

@@ -1,0 +1,2174 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BrainInk Video Call</title>
+    <link rel="icon"
+        href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🧠</text></svg>">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            color: #333;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            padding: 15px 30px;
+            border-radius: 15px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .room-info {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .room-id {
+            background: #667eea;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            font-weight: bold;
+        }
+
+        .participants-count {
+            background: #4CAF50;
+            color: white;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 14px;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+            height: calc(100vh - 140px);
+        }
+
+        .video-section {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .video-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .video-container {
+            position: relative;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            aspect-ratio: 16/9;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .video-stream {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .video-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+            color: white;
+            padding: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .user-name {
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .user-status {
+            display: flex;
+            gap: 8px;
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4CAF50;
+        }
+
+        .status-indicator.muted {
+            background: #f44336;
+        }
+
+        .status-indicator.transcribing {
+            background: #ff9800;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+        }
+
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            padding: 20px;
+            background: rgba(0, 0, 0, 0.05);
+            border-radius: 10px;
+        }
+
+        .control-btn {
+            width: 50px;
+            height: 50px;
+            border: none;
+            border-radius: 50%;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 18px;
+        }
+
+        .control-btn.mic {
+            background: #4CAF50;
+        }
+
+        .control-btn.mic.muted {
+            background: #f44336;
+        }
+
+        .control-btn.camera {
+            background: #2196F3;
+        }
+
+        .control-btn.camera.off {
+            background: #757575;
+        }
+
+        .control-btn.end-call {
+            background: #f44336;
+        }
+
+        .control-btn:hover {
+            transform: scale(1.1);
+        }
+
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .transcription-panel {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .transcription-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            margin-bottom: 20px;
+            padding-bottom: 20px;
+            border-bottom: 1px solid #eee;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .control-group label {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .control-group select,
+        .control-group input {
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s ease;
+        }
+
+        .control-group select:focus,
+        .control-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .session-controls {
+            display: flex;
+            gap: 10px;
+        }
+
+        .session-btn {
+            flex: 1;
+            padding: 12px;
+            border: none;
+            border-radius: 8px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .session-btn.start {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .session-btn.end {
+            background: #f44336;
+            color: white;
+        }
+
+        .session-btn.clear {
+            background: #ff9800;
+            color: white;
+        }
+
+        .session-btn.analyze {
+            background: #17a2b8;
+            color: white;
+        }
+
+        .session-btn.transcript {
+            background: #6f42c1;
+            color: white;
+        }
+
+        .analysis-tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 15px;
+        }
+
+        .analysis-tab {
+            padding: 8px 16px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            border-bottom: 3px solid transparent;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .analysis-tab.active {
+            border-bottom-color: #667eea;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .analysis-tab:hover:not(.active) {
+            background: #f5f5f5;
+        }
+
+        .analysis-tab-content {
+            display: none;
+        }
+
+        .analysis-tab-content.active {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .session-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .session-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .transcription-output {
+            flex: 1;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 15px;
+            background: #f9f9f9;
+            overflow-y: auto;
+            max-height: 300px;
+        }
+
+        .transcription-entry {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+        }
+
+        .transcription-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            font-size: 12px;
+            color: #666;
+        }
+
+        .speaker-name {
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .timestamp {
+            color: #999;
+        }
+
+        .transcription-text {
+            color: #333;
+            line-height: 1.4;
+        }
+
+        .participants-panel {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+        }
+
+        .participants-header {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+
+        .participant-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px;
+            margin-bottom: 8px;
+            background: #f5f5f5;
+            border-radius: 8px;
+        }
+
+        .participant-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: #667eea;
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+
+        .participant-info {
+            flex: 1;
+        }
+
+        .participant-name {
+            font-weight: bold;
+            color: #333;
+        }
+
+        .participant-status {
+            font-size: 12px;
+            color: #666;
+        }
+
+        .join-form {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            max-width: 500px;
+            margin: 100px auto;
+        }
+
+        .join-form h2 {
+            text-align: center;
+            margin-bottom: 30px;
+            color: #333;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .join-buttons {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+
+        .join-btn {
+            flex: 1;
+            padding: 15px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .join-btn.primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .join-btn.secondary {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .join-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+
+        .error-message {
+            background: #f44336;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .success-message {
+            background: #4CAF50;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 50px;
+            color: #666;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        @media (max-width: 768px) {
+            .main-content {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto;
+            }
+
+            .video-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .header {
+                flex-direction: column;
+                gap: 15px;
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- Join Form (shown initially) -->
+    <div id="joinForm" class="join-form">
+        <h2>Join Video Call</h2>
+        <div id="errorMessage" class="error-message hidden"></div>
+        <div id="successMessage" class="success-message hidden"></div>
+
+        <!-- Loading Section -->
+        <div id="loadingSection">
+            <div style="text-align: center; padding: 40px;">
+                <div class="spinner" style="width: 40px; height: 40px; margin: 0 auto 20px;"></div>
+                <p>Authenticating and loading user info...</p>
+            </div>
+        </div>
+
+        <!-- Room Section -->
+        <div id="roomSection" class="hidden">
+            <div class="form-group">
+                <label for="roomId">Room ID (leave empty to create new room)</label>
+                <input type="text" id="roomId" placeholder="Enter room ID or leave empty">
+            </div>
+
+            <div class="join-buttons">
+                <button class="join-btn primary" onclick="joinRoom()">Join Room</button>
+                <button class="join-btn secondary" onclick="createRoom()">Create New Room</button>
+            </div>
+
+            <div style="margin-top: 15px; text-align: center;">
+                <span style="color: #666;">Logged in as: <strong id="loggedInUser"></strong></span>
+                <button onclick="clearToken()"
+                    style="margin-left: 15px; background: #f44336; color: white; border: none; padding: 5px 10px; border-radius: 5px; cursor: pointer;">Clear
+                    Token</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main Video Call Interface (hidden initially) -->
+    <div id="videoCallInterface" class="hidden">
+        <div class="container">
+            <header class="header">
+                <div class="logo">🧠 BrainInk</div>
+                <div class="room-info">
+                    <div class="room-id" id="displayRoomId">Room: </div>
+                    <div class="participants-count" id="participantsCount">1 participant</div>
+                    <button class="control-btn end-call" onclick="leaveCall()" title="Leave Call">📞</button>
+                </div>
+            </header>
+
+            <div class="main-content">
+                <div class="video-section">
+                    <div class="video-grid" id="videoGrid">
+                        <!-- Video streams will be added here dynamically -->
+                    </div>
+
+                    <div class="controls">
+                        <button class="control-btn mic" id="micBtn" onclick="toggleMic()" title="Microphone">🎤</button>
+                        <button class="control-btn camera" id="cameraBtn" onclick="toggleCamera()"
+                            title="Camera">📹</button>
+                        <button class="control-btn end-call" onclick="leaveCall()" title="Leave Call">📞</button>
+                    </div>
+                </div>
+
+                <div class="sidebar">
+                    <div class="transcription-panel">
+                        <h3>Live Transcription</h3>
+
+                        <div class="transcription-controls">
+                            <div class="control-group">
+                                <label for="languageSelect">Language:</label>
+                                <select id="languageSelect">
+                                    <option value="en">English</option>
+                                    <option value="es">Spanish</option>
+                                    <option value="fr">French</option>
+                                    <option value="de">German</option>
+                                    <option value="it">Italian</option>
+                                    <option value="pt">Portuguese</option>
+                                    <option value="ru">Russian</option>
+                                    <option value="ja">Japanese</option>
+                                    <option value="ko">Korean</option>
+                                    <option value="zh">Chinese</option>
+                                </select>
+                            </div>
+
+                            <div class="control-group">
+                                <label for="meetingTypeSelect">Meeting Type:</label>
+                                <select id="meetingTypeSelect">
+                                    <option value="general">General Meeting</option>
+                                    <option value="presentation">Presentation</option>
+                                    <option value="interview">Interview</option>
+                                    <option value="debate">Debate</option>
+                                    <option value="brainstorming">Brainstorming</option>
+                                </select>
+                            </div>
+
+                            <div class="session-controls">
+                                <button class="session-btn test" onclick="testMicrophone()"
+                                    style="background: #28a745;">🎤 Test Mic</button>
+                                <button class="session-btn start" id="startBtn"
+                                    onclick="startTranscription()">Start</button>
+                                <button class="session-btn end" id="endBtn" onclick="endTranscription()"
+                                    disabled>End</button>
+                                <button class="session-btn clear" id="clearBtn"
+                                    onclick="clearTranscription()">Clear</button>
+                            </div>
+
+                            <div class="analysis-controls"
+                                style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #eee;">
+                                <button class="session-btn analyze" id="analyzeBtn" onclick="analyzeSession()" disabled
+                                    style="background: #17a2b8;">🔍 Analyze Session</button>
+                                <button class="session-btn transcript" id="transcriptBtn" onclick="getFullTranscript()"
+                                    disabled style="background: #6f42c1;">📄 Full Transcript</button>
+                            </div>
+                        </div>
+
+                        <div class="transcription-output" id="transcriptionOutput">
+                            <div style="text-align: center; color: #666; padding: 20px;">
+                                Transcription will appear here...
+                            </div>
+                        </div>
+
+                        <!-- Analysis Results Section -->
+                        <div id="analysisSection"
+                            style="display: none; margin-top: 20px; border-top: 2px solid #e0e0e0; padding-top: 20px;">
+                            <h4>📊 Session Analysis</h4>
+
+                            <!-- Analysis Tabs -->
+                            <div class="analysis-tabs"
+                                style="display: flex; border-bottom: 1px solid #ddd; margin-bottom: 15px;">
+                                <button class="analysis-tab active" onclick="showAnalysisTab('overview', this)">📊
+                                    Overview</button>
+                                <button class="analysis-tab" onclick="showAnalysisTab('speakers', this)">👥
+                                    Speakers</button>
+                                <button class="analysis-tab" onclick="showAnalysisTab('transcript', this)">📄
+                                    Transcript</button>
+                            </div>
+
+                            <!-- Analysis Tab Contents -->
+                            <div id="overview-analysis" class="analysis-tab-content active">
+                                <div id="analysisOverview"
+                                    style="background: #f8f9fa; padding: 15px; border-radius: 8px; max-height: 300px; overflow-y: auto;">
+                                    Analysis results will appear here...
+                                </div>
+                            </div>
+
+                            <div id="speakers-analysis" class="analysis-tab-content" style="display: none;">
+                                <div id="speakerAnalysis"
+                                    style="background: #f8f9fa; padding: 15px; border-radius: 8px; max-height: 300px; overflow-y: auto;">
+                                    Speaker analysis will appear here...
+                                </div>
+                            </div>
+
+                            <div id="transcript-analysis" class="analysis-tab-content" style="display: none;">
+                                <div id="transcriptAnalysis"
+                                    style="background: #f8f9fa; padding: 15px; border-radius: 8px; max-height: 300px; overflow-y: auto;">
+                                    Full transcript will appear here...
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="participants-panel">
+                        <div class="participants-header">Participants</div>
+                        <div id="participantsList">
+                            <!-- Participants will be added here dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global variables
+        let currentRoomId = null;
+        let currentUserId = null;
+        let currentUserName = null;
+        let authToken = null;
+        let userEmail = null;
+        let ws = null;
+        let localStream = null;
+        let peerConnections = {};
+        let isTranscribing = false;
+        let transcriptionSocket = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let sessionId = null;
+        let chunkId = 0;
+        let segmentNumber = 0;
+        let currentAudioFormat = null;
+        let transcriptionSessionId = null; // Store the session ID for analysis
+
+        // API base URL
+        const API_BASE_URL = 'http://localhost:8000';
+
+        // Get token from browser prompt or local storage
+        function getAuthToken() {
+            // Try to get from localStorage first
+            let token = localStorage.getItem('brainink_token');
+
+            if (!token) {
+                // Prompt user for token
+                token = prompt('Please enter your Bearer token (without "Bearer " prefix):');
+                if (token) {
+                    // Remove "Bearer " if user included it
+                    token = token.replace(/^Bearer\s+/i, '');
+                    // Save to localStorage for future use
+                    localStorage.setItem('brainink_token', token);
+                }
+            }
+
+            return token;
+        }
+
+        // WebRTC configuration
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // Utility functions
+        function showMessage(message, isError = false) {
+            const errorDiv = document.getElementById('errorMessage');
+            const successDiv = document.getElementById('successMessage');
+
+            if (isError) {
+                errorDiv.textContent = message;
+                errorDiv.classList.remove('hidden');
+                successDiv.classList.add('hidden');
+            } else {
+                successDiv.textContent = message;
+                successDiv.classList.remove('hidden');
+                errorDiv.classList.add('hidden');
+            }
+
+            // Hide message after 5 seconds
+            setTimeout(() => {
+                errorDiv.classList.add('hidden');
+                successDiv.classList.add('hidden');
+            }, 5000);
+        }
+
+        // Authentication functions
+        async function initializeApp() {
+            // Get authentication token
+            authToken = getAuthToken();
+
+            if (!authToken) {
+                showMessage('Authentication token is required', true);
+                return;
+            }
+
+            try {
+                // Get user info from token
+                await getCurrentUser();
+
+                // Show room section
+                document.getElementById('loadingSection').classList.add('hidden');
+                document.getElementById('roomSection').classList.remove('hidden');
+                document.getElementById('loggedInUser').textContent = `${currentUserName} (ID: ${currentUserId})`;
+
+                showMessage('Authentication successful!');
+
+            } catch (error) {
+                showMessage('Authentication failed: ' + error.message, true);
+                // Clear invalid token
+                localStorage.removeItem('brainink_token');
+                authToken = null;
+            }
+        }
+
+        async function getCurrentUser() {
+            try {
+                // Decode JWT token to get user info directly (without calling /auth/me)
+                const tokenPayload = parseJwtToken(authToken);
+
+                if (!tokenPayload || !tokenPayload.id || !tokenPayload.uname) {
+                    throw new Error('Invalid token format');
+                }
+
+                currentUserId = tokenPayload.id;
+                currentUserName = tokenPayload.uname;
+                userEmail = tokenPayload.email || `${currentUserName}@example.com`;
+
+                // Verify token is still valid by making a simple API call
+                const testResponse = await fetch(`${API_BASE_URL}/video-call/my-rooms?limit=1`, {
+                    headers: getAuthHeaders()
+                });
+
+                if (!testResponse.ok) {
+                    throw new Error('Token is invalid or expired');
+                }
+
+            } catch (error) {
+                console.error('Failed to get user info:', error);
+                throw new Error('Failed to authenticate user');
+            }
+        }
+
+        function parseJwtToken(token) {
+            try {
+                const base64Url = token.split('.')[1];
+                const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+                const jsonPayload = decodeURIComponent(atob(base64).split('').map(function (c) {
+                    return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+                }).join(''));
+
+                return JSON.parse(jsonPayload);
+            } catch (error) {
+                console.error('Error parsing JWT token:', error);
+                return null;
+            }
+        }
+
+        function clearToken() {
+            localStorage.removeItem('brainink_token');
+            authToken = null;
+            currentUserId = null;
+            currentUserName = null;
+            userEmail = null;
+
+            // Reset UI
+            document.getElementById('loadingSection').classList.remove('hidden');
+            document.getElementById('roomSection').classList.add('hidden');
+            document.getElementById('roomId').value = '';
+
+            // Restart initialization
+            setTimeout(() => {
+                initializeApp();
+            }, 500);
+        }
+
+        // Helper function to get auth headers
+        function getAuthHeaders() {
+            return {
+                'Authorization': `Bearer ${authToken}`,
+                'Content-Type': 'application/json'
+            };
+        }
+
+        // Room management functions
+        async function createRoom() {
+            if (!authToken) {
+                showMessage('Please login first', true);
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/video-call/create-room`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        room_name: `${currentUserName}'s Meeting`,
+                        max_participants: 10
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to create room');
+                }
+
+                const data = await response.json();
+                currentRoomId = data.room_id;
+
+                showMessage(`Room created! Room ID: ${currentRoomId}`);
+
+                // Auto-join the created room
+                setTimeout(() => {
+                    joinVideoCall();
+                }, 1500);
+
+            } catch (error) {
+                showMessage('Failed to create room: ' + error.message, true);
+            }
+        }
+
+        async function joinRoom() {
+            if (!authToken) {
+                showMessage('Please login first', true);
+                return;
+            }
+
+            const roomId = document.getElementById('roomId').value.trim();
+
+            if (!roomId) {
+                // Create new room if no room ID provided
+                await createRoom();
+                return;
+            }
+
+            try {
+                // Check if room exists and join it
+                const response = await fetch(`${API_BASE_URL}/video-call/join-room`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({ room_id: roomId })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to join room');
+                }
+
+                const data = await response.json();
+                currentRoomId = roomId;
+
+                showMessage('Joining room...');
+                setTimeout(() => {
+                    joinVideoCall();
+                }, 1000);
+
+            } catch (error) {
+                showMessage('Failed to join room: ' + error.message, true);
+            }
+        }
+
+        // Video call functions
+        async function joinVideoCall() {
+            try {
+                // Get user media
+                localStream = await navigator.mediaDevices.getUserMedia({
+                    video: true,
+                    audio: true
+                });
+
+                // Hide join form and show video interface
+                document.getElementById('joinForm').classList.add('hidden');
+                document.getElementById('videoCallInterface').classList.remove('hidden');
+
+                // Update UI
+                document.getElementById('displayRoomId').textContent = `Room: ${currentRoomId}`;
+
+                // Add local video
+                addVideoStream(currentUserId, currentUserName, localStream, true);
+
+                // Connect to WebSocket
+                connectWebSocket();
+
+            } catch (error) {
+                showMessage('Failed to access camera/microphone: ' + error.message, true);
+            }
+        }
+
+        function connectWebSocket() {
+            const wsUrl = `ws://localhost:8000/video-call/room/${currentRoomId}/ws?token=${authToken}`;
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                console.log('Connected to video call WebSocket');
+            };
+
+            ws.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+                await handleWebSocketMessage(message);
+            };
+
+            ws.onclose = () => {
+                console.log('Disconnected from video call WebSocket');
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+                showMessage('Connection error occurred', true);
+            };
+        }
+
+        async function handleWebSocketMessage(message) {
+            switch (message.type) {
+                case 'room_joined':
+                    // Update participants list
+                    updateParticipantsList(message.users_in_room);
+                    break;
+
+                case 'user_joined':
+                    // Add new participant
+                    addParticipant(message.user_id, message.user_name);
+                    createPeerConnection(message.user_id, true);
+                    break;
+
+                case 'user_left':
+                    // Remove participant
+                    removeParticipant(message.user_id);
+                    if (peerConnections[message.user_id]) {
+                        peerConnections[message.user_id].close();
+                        delete peerConnections[message.user_id];
+                    }
+                    break;
+
+                case 'webrtc_signal':
+                    await handleWebRTCSignal(message);
+                    break;
+
+                case 'transcription_status':
+                    handleTranscriptionStatus(message);
+                    break;
+
+                case 'transcription_update':
+                    handleTranscriptionUpdate(message);
+                    break;
+
+                case 'user_status':
+                    updateUserStatus(message);
+                    break;
+
+                case 'room_closed':
+                    showMessage('Room has been closed', true);
+                    leaveCall();
+                    break;
+            }
+        }
+
+        // WebRTC functions
+        async function createPeerConnection(userId, isInitiator) {
+            const pc = new RTCPeerConnection(rtcConfig);
+            peerConnections[userId] = pc;
+
+            // Add local stream to peer connection
+            localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
+
+            // Handle remote stream
+            pc.ontrack = (event) => {
+                const remoteStream = event.streams[0];
+                const participant = getParticipantInfo(userId);
+                addVideoStream(userId, participant ? participant.name : 'Unknown', remoteStream, false);
+            };
+
+            // Handle ICE candidates
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    sendWebSocketMessage({
+                        type: 'webrtc_signal',
+                        signal_type: 'ice-candidate',
+                        candidate: event.candidate,
+                        target_user_id: userId
+                    });
+                }
+            };
+
+            if (isInitiator) {
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                sendWebSocketMessage({
+                    type: 'webrtc_signal',
+                    signal_type: 'offer',
+                    offer: offer,
+                    target_user_id: userId
+                });
+            }
+        }
+
+        async function handleWebRTCSignal(message) {
+            const userId = message.sender_user_id;
+            let pc = peerConnections[userId];
+
+            if (!pc) {
+                pc = await createPeerConnection(userId, false);
+            }
+
+            switch (message.signal_type) {
+                case 'offer':
+                    await pc.setRemoteDescription(message.offer);
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+
+                    sendWebSocketMessage({
+                        type: 'webrtc_signal',
+                        signal_type: 'answer',
+                        answer: answer,
+                        target_user_id: userId
+                    });
+                    break;
+
+                case 'answer':
+                    await pc.setRemoteDescription(message.answer);
+                    break;
+
+                case 'ice-candidate':
+                    await pc.addIceCandidate(message.candidate);
+                    break;
+            }
+        }
+
+        // UI functions
+        function addVideoStream(userId, userName, stream, isLocal) {
+            const videoGrid = document.getElementById('videoGrid');
+
+            // Remove existing video for this user
+            const existingVideo = document.getElementById(`video-${userId}`);
+            if (existingVideo) {
+                existingVideo.remove();
+            }
+
+            const videoContainer = document.createElement('div');
+            videoContainer.className = 'video-container';
+            videoContainer.id = `video-${userId}`;
+
+            const video = document.createElement('video');
+            video.className = 'video-stream';
+            video.srcObject = stream;
+            video.autoplay = true;
+            video.playsInline = true;
+            if (isLocal) {
+                video.muted = true; // Prevent audio feedback
+            }
+
+            const overlay = document.createElement('div');
+            overlay.className = 'video-overlay';
+            overlay.innerHTML = `
+                <div class="user-name">${userName} ${isLocal ? '(You)' : ''}</div>
+                <div class="user-status">
+                    <div class="status-indicator" id="audio-${userId}"></div>
+                    <div class="status-indicator" id="transcription-${userId}"></div>
+                </div>
+            `;
+
+            videoContainer.appendChild(video);
+            videoContainer.appendChild(overlay);
+            videoGrid.appendChild(videoContainer);
+        }
+
+        function updateParticipantsList(users) {
+            const participantsList = document.getElementById('participantsList');
+            participantsList.innerHTML = '';
+
+            // Add yourself
+            addParticipantToList(currentUserId, currentUserName, true);
+
+            // Add other users
+            users.forEach(user => {
+                addParticipantToList(user.user_id, user.user_name, false);
+            });
+
+            updateParticipantsCount();
+        }
+
+        function addParticipant(userId, userName) {
+            addParticipantToList(userId, userName, false);
+            updateParticipantsCount();
+        }
+
+        function removeParticipant(userId) {
+            const participantElement = document.getElementById(`participant-${userId}`);
+            if (participantElement) {
+                participantElement.remove();
+            }
+
+            const videoElement = document.getElementById(`video-${userId}`);
+            if (videoElement) {
+                videoElement.remove();
+            }
+
+            updateParticipantsCount();
+        }
+
+        function addParticipantToList(userId, userName, isYou) {
+            const participantsList = document.getElementById('participantsList');
+
+            const participantItem = document.createElement('div');
+            participantItem.className = 'participant-item';
+            participantItem.id = `participant-${userId}`;
+
+            const initial = userName.charAt(0).toUpperCase();
+
+            participantItem.innerHTML = `
+                <div class="participant-avatar">${initial}</div>
+                <div class="participant-info">
+                    <div class="participant-name">${userName} ${isYou ? '(You)' : ''}</div>
+                    <div class="participant-status">Online</div>
+                </div>
+            `;
+
+            participantsList.appendChild(participantItem);
+        }
+
+        function updateParticipantsCount() {
+            const count = document.querySelectorAll('.participant-item').length;
+            document.getElementById('participantsCount').textContent = `${count} participant${count !== 1 ? 's' : ''}`;
+        }
+
+        // Control functions
+        let isMicMuted = false;
+        let isCameraOff = false;
+
+        function toggleMic() {
+            isMicMuted = !isMicMuted;
+            const micBtn = document.getElementById('micBtn');
+
+            if (localStream) {
+                localStream.getAudioTracks().forEach(track => {
+                    track.enabled = !isMicMuted;
+                });
+            }
+
+            micBtn.classList.toggle('muted', isMicMuted);
+            micBtn.textContent = isMicMuted ? '🎤❌' : '🎤';
+
+            // Update status indicator
+            const audioIndicator = document.getElementById(`audio-${currentUserId}`);
+            if (audioIndicator) {
+                audioIndicator.classList.toggle('muted', isMicMuted);
+            }
+
+            // Send status update
+            sendWebSocketMessage({
+                type: 'user_status',
+                status_type: 'audio',
+                muted: isMicMuted
+            });
+        }
+
+        function toggleCamera() {
+            isCameraOff = !isCameraOff;
+            const cameraBtn = document.getElementById('cameraBtn');
+
+            if (localStream) {
+                localStream.getVideoTracks().forEach(track => {
+                    track.enabled = !isCameraOff;
+                });
+            }
+
+            cameraBtn.classList.toggle('off', isCameraOff);
+            cameraBtn.textContent = isCameraOff ? '📹❌' : '📹';
+
+            // Send status update
+            sendWebSocketMessage({
+                type: 'user_status',
+                status_type: 'video',
+                enabled: !isCameraOff
+            });
+        }
+
+        function leaveCall() {
+            // Stop local stream
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+
+            // Close peer connections
+            Object.values(peerConnections).forEach(pc => pc.close());
+            peerConnections = {};
+
+            // Close WebSocket
+            if (ws) {
+                ws.close();
+            }
+
+            // Stop transcription
+            if (isTranscribing) {
+                endTranscription();
+            }
+
+            // Leave room via API
+            if (currentRoomId && authToken) {
+                fetch(`${API_BASE_URL}/video-call/leave-room`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({ room_id: currentRoomId })
+                }).catch(console.error);
+            }
+
+            // Reset UI
+            document.getElementById('videoCallInterface').classList.add('hidden');
+            document.getElementById('joinForm').classList.remove('hidden');
+
+            // Show room section
+            document.getElementById('loadingSection').classList.add('hidden');
+            document.getElementById('roomSection').classList.remove('hidden');
+
+            // Clear room form only
+            document.getElementById('roomId').value = '';
+
+            // Reset room variables only
+            currentRoomId = null;
+        }
+
+        // Transcription functions
+        async function startTranscription() {
+            if (isTranscribing || !authToken) return;
+
+            const language = document.getElementById('languageSelect').value;
+            const meetingType = document.getElementById('meetingTypeSelect').value;
+
+            try {
+                // Start transcription session via API
+                const response = await fetch(`${API_BASE_URL}/video-call/room/${currentRoomId}/start-transcription`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        session_name: `${currentUserName}'s transcription`,
+                        language: language
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || 'Failed to start transcription');
+                }
+
+                const sessionData = await response.json();
+                transcriptionSessionId = sessionData.id;
+
+                // Start audio capture for transcription
+                const audioStream = await navigator.mediaDevices.getUserMedia({
+                    audio: {
+                        echoCancellation: false,  // Disable to preserve speech clarity
+                        noiseSuppression: false,  // Disable to preserve speech
+                        autoGainControl: false,   // Disable automatic gain
+                        sampleRate: 44100,        // Higher sample rate for better quality
+                        channelCount: 1
+                    }
+                });
+
+                // Check if we got audio tracks
+                const audioTracks = audioStream.getAudioTracks();
+                if (audioTracks.length === 0) {
+                    throw new Error('No audio tracks available - check microphone permissions');
+                }
+
+                console.log(`Audio track: ${audioTracks[0].label}, enabled: ${audioTracks[0].enabled}`);
+
+                sessionId = transcriptionSessionId;
+                chunkId = 0;
+                segmentNumber = 0;
+                isTranscribing = true;
+
+                // Update UI
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('endBtn').disabled = false;
+
+                // Use Web Audio API for better real-time audio processing
+                console.log('Using Web Audio API for PCM audio processing');
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(audioStream);
+                const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                let lastSendTime = 0;
+                const sendInterval = 3000; // Send audio every 3 seconds for better speech recognition
+                let audioBuffer = [];
+
+                // Convert to PCM and send audio data
+                processor.onaudioprocess = (e) => {
+                    if (!isTranscribing || !transcriptionSocket || transcriptionSocket.readyState !== WebSocket.OPEN) {
+                        return;
+                    }
+
+                    const inputData = e.inputBuffer.getChannelData(0);
+
+                    // Calculate audio level for debugging
+                    let sum = 0;
+                    for (let i = 0; i < inputData.length; i++) {
+                        sum += Math.abs(inputData[i]);
+                    }
+                    const avgLevel = sum / inputData.length;
+
+                    // Log audio level every 100 chunks for monitoring
+                    if (Math.random() < 0.01) { // 1% chance to log
+                        console.log(`Microphone level: ${(avgLevel * 100).toFixed(2)}%`);
+                    }
+
+                    // Convert float32 to int16 PCM
+                    const pcmData = new Int16Array(inputData.length);
+                    for (let i = 0; i < inputData.length; i++) {
+                        pcmData[i] = Math.max(-32768, Math.min(32767, inputData[i] * 32767));
+                    }
+
+                    // Accumulate audio data
+                    audioBuffer.push(pcmData);
+
+                    // Send accumulated audio every second
+                    const now = Date.now();
+                    if (now - lastSendTime >= sendInterval && audioBuffer.length > 0) {
+                        try {
+                            // Combine all buffered audio
+                            const totalLength = audioBuffer.reduce((sum, arr) => sum + arr.length, 0);
+                            const combinedAudio = new Int16Array(totalLength);
+                            let offset = 0;
+                            for (const buffer of audioBuffer) {
+                                combinedAudio.set(buffer, offset);
+                                offset += buffer.length;
+                            }
+
+                            // Calculate average audio level for this chunk
+                            let sum = 0;
+                            for (let i = 0; i < combinedAudio.length; i++) {
+                                sum += Math.abs(combinedAudio[i]);
+                            }
+                            const avgLevel = sum / combinedAudio.length;
+
+                            // Only send audio if it's above a certain threshold (indicates speech)
+                            const silenceThreshold = 50; // Lowered from 100 for quieter audio
+                            if (avgLevel > silenceThreshold) {
+                                console.log(`🎤 Sending audio - Level: ${avgLevel.toFixed(0)}, samples: ${combinedAudio.length}`);
+                                // Send audio chunk directly without recursion
+                                sendPCMAudioChunk(combinedAudio);
+                            } else {
+                                console.log(`🔇 Silence detected - Level: ${avgLevel.toFixed(0)}, skipping transmission`);
+                            }
+                            audioBuffer = []; // Clear buffer
+                            lastSendTime = now;
+                        } catch (error) {
+                            console.error('Error in audio processing:', error);
+                            audioBuffer = []; // Clear buffer on error
+                        }
+                    }
+                };
+
+                source.connect(processor);
+                processor.connect(audioContext.destination);
+
+                // Store audio context for cleanup
+                currentAudioFormat = 'audio/pcm';
+                window.currentAudioContext = audioContext;
+                window.currentProcessor = processor;
+
+                // Connect to transcription WebSocket with authentication
+                const transcriptionWsUrl = `ws://localhost:8000/video-call/transcription/live?token=${authToken}&session_id=${transcriptionSessionId}&language=${language}`;
+                transcriptionSocket = new WebSocket(transcriptionWsUrl);
+
+                transcriptionSocket.onopen = () => {
+                    console.log('Connected to transcription WebSocket');
+
+                    // Send initialization message to start the session
+                    transcriptionSocket.send(JSON.stringify({
+                        type: 'start_recording',
+                        session_id: transcriptionSessionId,
+                        language: language,
+                        meeting_type: meetingType
+                    }));
+
+                    // Notify other users that transcription started
+                    sendWebSocketMessage({
+                        type: 'transcription_start',
+                        session_id: transcriptionSessionId,
+                        language: language,
+                        meeting_type: meetingType
+                    });
+                };
+
+                transcriptionSocket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    handleTranscriptionResponse(data);
+                };
+
+                transcriptionSocket.onerror = (error) => {
+                    console.error('Transcription WebSocket error:', error);
+                    showMessage('Transcription connection error', true);
+                };
+
+                transcriptionSocket.onclose = (event) => {
+                    console.log('Transcription WebSocket closed:', event.code, event.reason);
+                    if (event.code !== 1000 && isTranscribing) { // 1000 is normal closure
+                        console.warn('Transcription connection lost unexpectedly');
+                        showMessage('⚠️ Transcription connection lost. Results may be delayed.', true);
+
+                        // Try to reconnect after a short delay if still transcribing
+                        setTimeout(() => {
+                            if (isTranscribing && (!transcriptionSocket || transcriptionSocket.readyState === WebSocket.CLOSED)) {
+                                console.log('Attempting to reconnect transcription WebSocket...');
+                                reconnectTranscriptionSocket();
+                            }
+                        }, 2000);
+                    }
+                };
+
+                // Update status indicator
+                const transcriptionIndicator = document.getElementById(`transcription-${currentUserId}`);
+                if (transcriptionIndicator) {
+                    transcriptionIndicator.classList.add('transcribing');
+                }
+
+                // Enable analysis buttons
+                document.getElementById('analyzeBtn').disabled = false;
+                document.getElementById('transcriptBtn').disabled = false;
+
+            } catch (error) {
+                console.error('Failed to start transcription:', error);
+                showMessage('Failed to start transcription: ' + error.message, true);
+            }
+        }
+
+        async function sendPCMAudioChunk(pcmData) {
+            if (!transcriptionSocket || transcriptionSocket.readyState !== WebSocket.OPEN) {
+                console.warn('WebSocket not ready for audio transmission');
+                return;
+            }
+
+            try {
+                // Convert Int16Array to base64
+                const buffer = new ArrayBuffer(pcmData.length * 2);
+                const view = new DataView(buffer);
+                for (let i = 0; i < pcmData.length; i++) {
+                    view.setInt16(i * 2, pcmData[i], true); // little-endian
+                }
+
+                // Convert to base64
+                const bytes = new Uint8Array(buffer);
+                let binary = '';
+                for (let i = 0; i < bytes.byteLength; i++) {
+                    binary += String.fromCharCode(bytes[i]);
+                }
+                const base64Audio = btoa(binary);
+
+                const message = {
+                    type: 'audio_chunk',
+                    session_id: transcriptionSessionId,
+                    audio_data: base64Audio,
+                    timestamp: Date.now(),
+                    speaker_info: {
+                        user_id: currentUserId,
+                        user_name: currentUserName,
+                        role: 'participant'
+                    },
+                    audio_format: 'audio/pcm',
+                    sample_rate: 44100,  // Send actual sample rate
+                    channels: 1,
+                    format: 'pcm'
+                };
+
+                transcriptionSocket.send(JSON.stringify(message));
+                console.log(`Sent PCM audio chunk: ${pcmData.length} samples`);
+            } catch (error) {
+                console.error('Error sending PCM audio chunk:', error);
+                // Don't retry to avoid recursion
+            }
+        }
+
+        async function processAudioChunk(audioBlob) {
+            if (!transcriptionSocket || transcriptionSocket.readyState !== WebSocket.OPEN || !transcriptionSessionId) {
+                return;
+            }
+
+            try {
+                // Convert blob to array buffer
+                const arrayBuffer = await audioBlob.arrayBuffer();
+
+                // Convert to base64
+                const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+                // Send audio data to transcription service with authentication
+                const message = {
+                    type: 'audio_chunk',
+                    session_id: transcriptionSessionId,
+                    audio_data: base64Audio,
+                    timestamp: Date.now(),
+                    speaker_info: {
+                        user_id: currentUserId,
+                        user_name: currentUserName,
+                        role: 'participant'
+                    },
+                    audio_format: currentAudioFormat || 'audio/webm'
+                };
+
+                transcriptionSocket.send(JSON.stringify(message));
+
+                // Also send to API for storage
+                await fetch(`${API_BASE_URL}/video-call/session/${transcriptionSessionId}/add-transcription`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        transcribed_text: '',
+                        confidence_score: 95,
+                        start_time_seconds: Math.floor(Date.now() / 1000),
+                        is_final: false
+                    })
+                }).catch(console.error);
+
+            } catch (error) {
+                console.error('Error processing audio chunk:', error);
+            }
+        }
+
+        function handleTranscriptionResponse(data) {
+            console.log('Transcription response:', data);
+
+            if (data.type === 'transcription' && data.text && data.text.trim()) {
+                // Add to local transcription display
+                addTranscriptionEntry(currentUserName, data.text, data.timestamp);
+
+                // Show success message briefly
+                showMessage(`✅ Transcribed: "${data.text}"`, false);
+
+                // Store transcription via API
+                if (transcriptionSessionId) {
+                    fetch(`${API_BASE_URL}/video-call/session/${transcriptionSessionId}/add-transcription`, {
+                        method: 'POST',
+                        headers: getAuthHeaders(),
+                        body: JSON.stringify({
+                            transcribed_text: data.text,
+                            confidence_score: data.confidence || 95,
+                            start_time_seconds: Math.floor((data.timestamp || Date.now()) / 1000),
+                            is_final: true,
+                            speaker_name: currentUserName
+                        })
+                    }).catch(console.error);
+                }
+
+                // Send to other users via video call WebSocket
+                sendWebSocketMessage({
+                    type: 'transcription_chunk',
+                    text: data.text,
+                    chunk_id: data.chunk_id,
+                    segment_number: data.segment_number,
+                    speaker_info: {
+                        user_id: currentUserId,
+                        user_name: currentUserName
+                    }
+                });
+            } else if (data.type === 'session_started') {
+                console.log('Transcription session started:', data.session_id);
+                // Session ID should already be set from API call
+            } else if (data.type === 'recording_started') {
+                console.log('Recording started');
+                showMessage('🎤 Recording and transcription active', false);
+            } else if (data.type === 'silence') {
+                console.log('Silence detected:', data.reason || 'unknown reason');
+            } else if (data.type === 'chunk_received') {
+                console.log('Audio chunk received by server');
+            } else if (data.type === 'error') {
+                console.error('Transcription error:', data.error || data.message);
+                showMessage('Transcription error: ' + (data.error || data.message), true);
+            }
+        }
+
+        function endTranscription() {
+            if (!isTranscribing) return;
+
+            isTranscribing = false;
+
+            // Stop media recorder if it exists
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+
+            // Clean up Web Audio API resources
+            if (window.currentAudioContext) {
+                if (window.currentProcessor) {
+                    window.currentProcessor.disconnect();
+                    window.currentProcessor = null;
+                }
+                window.currentAudioContext.close();
+                window.currentAudioContext = null;
+            }
+
+            // Send stop message to transcription WebSocket
+            if (transcriptionSocket && transcriptionSocket.readyState === WebSocket.OPEN) {
+                transcriptionSocket.send(JSON.stringify({
+                    type: 'stop_recording'
+                }));
+            }
+
+            // End transcription session via API
+            if (transcriptionSessionId && authToken) {
+                fetch(`${API_BASE_URL}/video-call/end-transcription`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({ session_id: transcriptionSessionId })
+                }).catch(console.error);
+            }
+
+            // Close transcription WebSocket
+            if (transcriptionSocket) {
+                transcriptionSocket.close();
+                transcriptionSocket = null;
+            }
+
+            // Update UI
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('endBtn').disabled = true;
+
+            // Keep analysis buttons enabled if we have a session
+            if (transcriptionSessionId) {
+                document.getElementById('analyzeBtn').disabled = false;
+                document.getElementById('transcriptBtn').disabled = false;
+            }
+
+            // Update status indicator
+            const transcriptionIndicator = document.getElementById(`transcription-${currentUserId}`);
+            if (transcriptionIndicator) {
+                transcriptionIndicator.classList.remove('transcribing');
+            }
+
+            // Notify other users
+            const transcriptionOutput = document.getElementById('transcriptionOutput');
+            const finalText = transcriptionOutput.textContent;
+
+            sendWebSocketMessage({
+                type: 'transcription_end',
+                final_text: finalText
+            });
+
+            segmentNumber++;
+        }
+
+        function clearTranscription() {
+            const transcriptionOutput = document.getElementById('transcriptionOutput');
+            transcriptionOutput.innerHTML = `
+                <div style="text-align: center; color: #666; padding: 20px;">
+                    Transcription will appear here...
+                </div>
+            `;
+
+            // Hide analysis section and clear content
+            document.getElementById('analysisSection').style.display = 'none';
+            document.getElementById('analysisOverview').innerHTML = 'Analysis results will appear here...';
+            document.getElementById('speakerAnalysis').innerHTML = 'Speaker analysis will appear here...';
+            document.getElementById('transcriptAnalysis').innerHTML = 'Full transcript will appear here...';
+
+            // Disable analysis buttons
+            document.getElementById('analyzeBtn').disabled = true;
+            document.getElementById('transcriptBtn').disabled = true;
+
+            // Reset session ID
+            transcriptionSessionId = null;
+        }
+
+        function addTranscriptionEntry(speakerName, text, timestamp) {
+            const transcriptionOutput = document.getElementById('transcriptionOutput');
+
+            // Remove placeholder text
+            if (transcriptionOutput.innerHTML.includes('Transcription will appear here')) {
+                transcriptionOutput.innerHTML = '';
+            }
+
+            const entry = document.createElement('div');
+            entry.className = 'transcription-entry';
+
+            const time = new Date(timestamp).toLocaleTimeString();
+
+            entry.innerHTML = `
+                <div class="transcription-header">
+                    <span class="speaker-name">${speakerName}</span>
+                    <span class="timestamp">${time}</span>
+                </div>
+                <div class="transcription-text">${text}</div>
+            `;
+
+            transcriptionOutput.appendChild(entry);
+            transcriptionOutput.scrollTop = transcriptionOutput.scrollHeight;
+        }
+
+        // Handle transcription updates from other users
+        function handleTranscriptionStatus(message) {
+            const indicator = document.getElementById(`transcription-${message.user_id}`);
+            if (indicator) {
+                if (message.status === 'started') {
+                    indicator.classList.add('transcribing');
+                } else if (message.status === 'ended') {
+                    indicator.classList.remove('transcribing');
+                }
+            }
+        }
+
+        function handleTranscriptionUpdate(message) {
+            addTranscriptionEntry(message.user_name, message.text, message.timestamp);
+        }
+
+        function updateUserStatus(message) {
+            if (message.status_type === 'audio') {
+                const audioIndicator = document.getElementById(`audio-${message.sender_user_id}`);
+                if (audioIndicator) {
+                    audioIndicator.classList.toggle('muted', message.muted);
+                }
+            }
+        }
+
+        // Utility functions
+        function sendWebSocketMessage(message) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(message));
+            }
+        }
+
+        function getParticipantInfo(userId) {
+            // This would typically come from the participants list
+            // For now, return a basic structure
+            return { name: 'Unknown User' };
+        }
+
+        // Handle page reload/close
+        window.addEventListener('beforeunload', () => {
+            if (isTranscribing) {
+                endTranscription();
+            }
+            if (ws) {
+                ws.close();
+            }
+        });
+
+        // Auto-initialize on page load
+        window.addEventListener('load', () => {
+            // Auto-fill room ID from URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const roomId = urlParams.get('room');
+            if (roomId) {
+                document.getElementById('roomId').value = roomId;
+            }
+
+            // Initialize app with token
+            initializeApp();
+        });
+
+        // Analysis functions
+        async function analyzeSession() {
+            if (!transcriptionSessionId || !authToken) {
+                showMessage('No transcription session to analyze or not authenticated', true);
+                return;
+            }
+
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            analyzeBtn.innerHTML = '<span class="spinner"></span>Analyzing...';
+            analyzeBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/video-call/analyze-session/${transcriptionSessionId}`, {
+                    method: 'POST',
+                    headers: getAuthHeaders(),
+                    body: JSON.stringify({
+                        analysis_type: 'full',
+                        include_sentiment: true,
+                        include_topics: true
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `Analysis failed: ${response.statusText}`);
+                }
+
+                const analysisData = await response.json();
+                displayAnalysis(analysisData);
+
+                // Show analysis section
+                document.getElementById('analysisSection').style.display = 'block';
+                showMessage('Analysis completed successfully');
+
+            } catch (error) {
+                console.error('Analysis error:', error);
+                showMessage('Analysis failed: ' + error.message, true);
+            } finally {
+                analyzeBtn.innerHTML = '🔍 Analyze Session';
+                analyzeBtn.disabled = false;
+            }
+        }
+
+        async function getFullTranscript() {
+            if (!transcriptionSessionId || !authToken) {
+                showMessage('No transcription session available or not authenticated', true);
+                return;
+            }
+
+            const transcriptBtn = document.getElementById('transcriptBtn');
+            transcriptBtn.innerHTML = '<span class="spinner"></span>Loading...';
+            transcriptBtn.disabled = true;
+
+            try {
+                const response = await fetch(`${API_BASE_URL}/video-call/full-transcript/${transcriptionSessionId}`, {
+                    headers: getAuthHeaders()
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.detail || `Failed to get transcript: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                displayTranscript(data);
+
+                // Show analysis section and switch to transcript tab
+                document.getElementById('analysisSection').style.display = 'block';
+                showAnalysisTab('transcript');
+                showMessage('Transcript loaded successfully');
+
+            } catch (error) {
+                console.error('Transcript error:', error);
+                showMessage('Failed to get transcript: ' + error.message, true);
+            } finally {
+                transcriptBtn.innerHTML = '📄 Full Transcript';
+                transcriptBtn.disabled = false;
+            }
+        }
+
+        function displayAnalysis(data) {
+            // Overview Analysis
+            const overviewHtml = `
+                <h4>📊 Session Analysis Overview</h4>
+                <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h5>📈 Session Metrics</h5>
+                    <p><strong>Total Duration:</strong> ${data.session_summary?.total_duration_minutes || 0} minutes</p>
+                    <p><strong>Total Words:</strong> ${data.session_summary?.total_words || 0}</p>
+                    <p><strong>Participants:</strong> ${data.session_summary?.participant_count || 1}</p>
+                    ${data.session_summary?.overall_sentiment ? `<p><strong>Overall Sentiment:</strong> ${data.session_summary.overall_sentiment}</p>` : ''}
+                </div>
+                
+                ${data.session_summary?.session_summary ? `
+                <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h5>📝 Session Summary</h5>
+                    <p>${data.session_summary.session_summary}</p>
+                </div>
+                ` : ''}
+
+                ${data.session_summary?.key_topics && data.session_summary.key_topics.length > 0 ? `
+                <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h5>🏷️ Key Topics</h5>
+                    <ul>
+                        ${data.session_summary.key_topics.map(topic => `<li>${topic}</li>`).join('')}
+                    </ul>
+                </div>
+                ` : ''}
+
+                ${data.analytics ? `
+                <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h5>📊 Analytics</h5>
+                    <p><strong>Question Count:</strong> ${data.analytics.question_count || 0}</p>
+                    ${data.analytics.main_topics ? `<p><strong>Main Topics:</strong> ${JSON.stringify(data.analytics.main_topics)}</p>` : ''}
+                    ${data.analytics.meeting_summary ? `<p><strong>Meeting Summary:</strong> ${data.analytics.meeting_summary}</p>` : ''}
+                </div>
+                ` : ''}
+            `;
+            document.getElementById('analysisOverview').innerHTML = overviewHtml;
+
+            // Speaker Analysis
+            const speakerHtml = `
+                <h4>👥 Speaker Analysis</h4>
+                <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h5>🎤 Speaking Time Distribution</h5>
+                    <div style="background-color: #f8f9fa; padding: 10px; border-radius: 5px;">
+                        <p><strong>${currentUserName}:</strong> Most active speaker in this session</p>
+                        <p><strong>Words Spoken:</strong> ${data.session_summary?.total_words || 0}</p>
+                        ${data.session_summary?.overall_sentiment ? `<p><strong>Sentiment:</strong> ${data.session_summary.overall_sentiment}</p>` : ''}
+                    </div>
+                </div>
+            `;
+            document.getElementById('speakerAnalysis').innerHTML = speakerHtml;
+        }
+
+        function displayTranscript(data) {
+            const transcriptHtml = `
+                <h4>📄 Complete Session Transcription</h4>
+                
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 10px 0;">
+                    <h5>📊 Session Statistics</h5>
+                    <p><strong>Total Entries:</strong> ${data.transcription_data?.length || 0}</p>
+                    <p><strong>Session Duration:</strong> ${data.session_info?.duration_minutes || 0} minutes</p>
+                    <p><strong>Total Words:</strong> ${data.session_info?.total_words || 0}</p>
+                </div>
+
+                <div style="background-color: white; padding: 15px; border-radius: 5px; margin: 10px 0; max-height: 400px; overflow-y: auto;">
+                    <h5>📝 Full Transcript</h5>
+                    ${data.combined_transcription || data.transcription_data?.map(entry => `
+                        <div style="margin-bottom: 15px; padding: 10px; border-left: 3px solid #667eea;">
+                            <div style="font-weight: bold; color: #667eea; margin-bottom: 5px;">
+                                ${entry.speaker_name || currentUserName} 
+                                <span style="font-weight: normal; color: #666; font-size: 12px;">
+                                    ${new Date(entry.timestamp).toLocaleTimeString()}
+                                </span>
+                            </div>
+                            <div style="line-height: 1.5;">${entry.transcribed_text}</div>
+                        </div>
+                    `).join('') || 'No transcription data available'}
+                </div>
+            `;
+            document.getElementById('transcriptAnalysis').innerHTML = transcriptHtml;
+        }
+
+        function showAnalysisTab(tabName, clickedElement = null) {
+            // Hide all tab contents
+            document.querySelectorAll('.analysis-tab-content').forEach(content => {
+                content.classList.remove('active');
+                content.style.display = 'none';
+            });
+
+            // Remove active class from all tabs
+            document.querySelectorAll('.analysis-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+
+            // Show selected tab content
+            const targetTab = document.getElementById(`${tabName}-analysis`);
+            if (targetTab) {
+                targetTab.classList.add('active');
+                targetTab.style.display = 'block';
+            }
+
+            // Add active class to clicked tab or find by tabName
+            if (clickedElement) {
+                clickedElement.classList.add('active');
+            } else {
+                // Find tab by checking onclick or text content
+                document.querySelectorAll('.analysis-tab').forEach(tab => {
+                    if (tab.onclick && tab.onclick.toString().includes(`'${tabName}'`)) {
+                        tab.classList.add('active');
+                    }
+                });
+            }
+        }
+
+        // Test microphone function
+        async function testMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const source = audioContext.createMediaStreamSource(stream);
+                const analyser = audioContext.createAnalyser();
+                source.connect(analyser);
+
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                let testDuration = 3000; // 3 seconds
+                let startTime = Date.now();
+                let maxLevel = 0;
+
+                const checkLevel = () => {
+                    analyser.getByteFrequencyData(dataArray);
+                    const level = Math.max(...dataArray);
+                    maxLevel = Math.max(maxLevel, level);
+
+                    if (Date.now() - startTime < testDuration) {
+                        requestAnimationFrame(checkLevel);
+                    } else {
+                        console.log(`🎤 Microphone test complete - Max level: ${maxLevel}/255`);
+                        if (maxLevel > 50) {
+                            showMessage(`✅ Microphone working! Max level: ${maxLevel}/255`);
+                        } else {
+                            showMessage(`⚠️ Microphone level very low: ${maxLevel}/255. Try speaking louder or checking permissions.`, true);
+                        }
+
+                        // Clean up
+                        stream.getTracks().forEach(track => track.stop());
+                        audioContext.close();
+                    }
+                };
+
+                console.log('🎤 Testing microphone for 3 seconds... Please speak now!');
+                showMessage('🎤 Testing microphone for 3 seconds... Please speak now!');
+                checkLevel();
+
+            } catch (error) {
+                console.error('Microphone test failed:', error);
+                showMessage('❌ Microphone test failed: ' + error.message, true);
+            }
+        }
+
+        // Reconnection function for transcription WebSocket
+        function reconnectTranscriptionSocket() {
+            if (!isTranscribing || !transcriptionSessionId || !authToken) {
+                console.log('Cannot reconnect: not transcribing or missing required data');
+                return;
+            }
+
+            const language = document.getElementById('languageSelect').value;
+            const transcriptionWsUrl = `ws://localhost:8000/video-call/transcription/live?token=${authToken}&session_id=${transcriptionSessionId}&language=${language}`;
+
+            console.log('Reconnecting transcription WebSocket...');
+            transcriptionSocket = new WebSocket(transcriptionWsUrl);
+
+            transcriptionSocket.onopen = () => {
+                console.log('✅ Transcription WebSocket reconnected successfully');
+                showMessage('✅ Transcription connection restored', false);
+
+                // Re-initialize the session
+                transcriptionSocket.send(JSON.stringify({
+                    type: 'start_recording',
+                    session_id: transcriptionSessionId,
+                    language: language
+                }));
+            };
+
+            transcriptionSocket.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleTranscriptionResponse(data);
+            };
+
+            transcriptionSocket.onerror = (error) => {
+                console.error('Transcription WebSocket reconnection error:', error);
+                showMessage('❌ Failed to reconnect transcription', true);
+            };
+
+            transcriptionSocket.onclose = (event) => {
+                console.log('Transcription WebSocket closed after reconnection:', event.code, event.reason);
+                if (event.code !== 1000 && isTranscribing) {
+                    // Try again after a longer delay
+                    setTimeout(() => {
+                        if (isTranscribing && (!transcriptionSocket || transcriptionSocket.readyState === WebSocket.CLOSED)) {
+                            console.log('Attempting another reconnection...');
+                            reconnectTranscriptionSocket();
+                        }
+                    }, 5000);
+                }
+            };
+        }
+
+        // ...existing code...
+    </script>
+</body>
+
+</html>

@@ -6,6 +6,9 @@ uvicorn[standing]
 python-multipart
 python-jose[cryptography]
 passlib[bcrypt]
+#for HTTP requests
+httpx
+aiohttp  # For async AI question generation service
 #end or auth
 #for db
 sqlalchemy

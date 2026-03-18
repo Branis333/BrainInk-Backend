@@ -134,6 +134,56 @@ Common functions used across multiple endpoints are stored in `utils.py`:
    start.bat   # Windows
    ```
 
+## Database Migrations (Mark‑Done Updates)
+
+To align the database with the mark‑done model changes (sessionless uploads, blocks/assignments, progress fields), run the direct migration script:
+
+1) Ensure you have a valid Postgres connection string in `DATABASE_URL` (includes sslmode if required)
+
+2) Run the migration
+
+Windows PowerShell:
+
+```powershell
+# From users_micro directory
+$env:DATABASE_URL = "<your_postgres_connection_string>";
+python .\migrate_mark_done_updates.py
+```
+
+Linux/Mac:
+
+```bash
+export DATABASE_URL="<your_postgres_connection_string>"
+python ./migrate_mark_done_updates.py
+```
+
+The script is idempotent; it safely adds/updates:
+- as_ai_submissions: session_id nullable, block_id, assignment_id, ai_* text columns, CHECK on lesson_id or block_id
+- as_study_sessions: lesson_id nullable, block_id, status, completion_percentage, marked_done_at
+- as_student_progress: blocks_completed, total_blocks, average_score, total_study_time, sessions_count, started_at, last_activity, completed_at
+
+Optional verification queries (Postgres):
+
+```sql
+-- Check nullability and defaults
+SELECT column_name, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_name IN ('as_ai_submissions','as_study_sessions','as_student_progress')
+   AND column_name IN (
+      'session_id','block_id','assignment_id','ai_corrections','ai_strengths','ai_improvements',
+      'lesson_id','status','completion_percentage','marked_done_at',
+      'blocks_completed','total_blocks','average_score','total_study_time','sessions_count','started_at','last_activity','completed_at'
+   )
+ORDER BY table_name, column_name;
+
+-- Check the CHECK constraint exists and is validated
+SELECT conname, convalidated
+FROM pg_constraint c
+JOIN pg_class t ON c.conrelid = t.oid
+WHERE t.relname = 'as_ai_submissions'
+   AND conname = 'ck_as_ai_submissions_lesson_or_block';
+```
+
 ## 📚 Documentation
 
 ### API Documentation
