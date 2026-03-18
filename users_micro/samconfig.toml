@@ -1,3 +1,13 @@
+version = 0.1
+
+[default.validate.parameters]
+lint = false
+
+[prod.deploy.parameters]
+stack_name = "brainink-users-micro"
+resolve_s3 = true
+s3_prefix = "brainink-users-micro"
+region = "eu-west-1"
 confirm_changeset = true
 capabilities = "CAPABILITY_IAM"
 resolve_image_repos = true
