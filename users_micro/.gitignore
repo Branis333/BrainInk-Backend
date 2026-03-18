@@ -74,3 +74,4 @@ htmlcov/
 temp/
 tmp/
 uploads/
+users_micro/samconfig.toml
