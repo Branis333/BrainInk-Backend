@@ -38,8 +38,8 @@ router = APIRouter(prefix="/after-school/notes", tags=["Student Notes & AI Analy
 # Dependency for current user
 user_dependency = Depends(get_current_user)
 
-# Upload directory for notes
-NOTES_UPLOAD_DIR = Path("uploads/notes")
+# Upload directory for notes (Lambda writable path)
+NOTES_UPLOAD_DIR = Path("/tmp/uploads/notes")
 NOTES_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 # Configuration

@@ -29,7 +29,7 @@ router = APIRouter(tags=["Syllabus"])
 user_dependency = Annotated[dict, Depends(get_current_user)]
 
 # Configuration
-UPLOAD_DIR = "uploads/textbooks"
+UPLOAD_DIR = "/tmp/uploads/textbooks"
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_DIR, exist_ok=True)
