@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 import traceback
 import traceback
-from urllib.parse import urlparse
 import os
+import tempfile
 
 from db.connection import db_dependency
 from models.study_area_models import (
@@ -28,8 +28,10 @@ from schemas.direct_join_schemas import SchoolSelectionResponse
 # Import shared utility functions
 from Endpoints.utils import (
     _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, 
-    ensure_user_has_any_role, get_kana_base_url
+    ensure_user_has_any_role
 )
+from services.nova_services.grading_services import nova_grading_service
+from services.nova_services.nova_services import nova_service
 
 router = APIRouter(tags=["Academic Management", "Subjects", "Assignments"])
 
@@ -1161,7 +1163,7 @@ async def grade_class_assignments(
     current_user: user_dependency
 ):
     """
-    Grade assignments for multiple students in a class using K.A.N.A. AI
+    Grade assignments for multiple students in a class using Nova AI.
     """
     try:
         ensure_user_role(db, current_user["user_id"], UserRole.teacher)
@@ -1236,7 +1238,7 @@ async def grade_class_assignments(
     if not students:
         raise HTTPException(status_code=404, detail="No students found for grading")
     
-    # Collect student work data for K.A.N.A. processing
+    # Collect student work data for Nova processing.
     grading_data = []
     for student in students:
         try:
@@ -1277,7 +1279,7 @@ async def grade_class_assignments(
                 grading_data.append(student_work)
                 print(f"Added student {student_name} with {len(student_pdfs)} PDFs to grading data")
             else:
-                # Add student even without uploaded work for K.A.N.A. to process
+                # Add student even without uploaded work so the response can explain what happened.
                 student_work = {
                     "student_id": student.id,
                     "student_name": student_name,
@@ -1325,224 +1327,161 @@ async def grade_class_assignments(
     
     print(f"Total grading data entries: {len(grading_data)}")
     
-    # Now process the actual grading with K.A.N.A. if we have PDF work
+    # Process grading with Nova for students that have PDFs.
     students_with_pdfs = [student for student in grading_data if student.get("has_work", False)]
-    
     if students_with_pdfs:
-        print(f"Processing {len(students_with_pdfs)} students with PDFs through K.A.N.A.")
-        
-        # Prepare data for K.A.N.A. bulk PDF grading
-        try:
-            import base64
-            import os
-            
-            pdf_files = []
-            student_names = []
-            
-            for student_data in students_with_pdfs:
-                student_name = student_data["student_name"]
-                pdfs = student_data.get("pdfs", [])
-                
-                # Process each PDF for this student
-                for pdf_info in pdfs:
-                    pdf_binary_data = pdf_info.get("data")
-                    pdf_path = pdf_info.get("path", "")
-                    
-                    # Convert PDF data to base64 (DB-first, filesystem fallback)
-                    try:
-                        if pdf_binary_data:
-                            pdf_content = bytes(pdf_binary_data)
-                            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
-                            pdf_files.append(pdf_base64)
-                            student_names.append(student_name)
-                            print(f"Encoded PDF from database for {student_name} ({len(pdf_base64)} chars)")
-                            continue
+        print(f"Processing {len(students_with_pdfs)} students with PDFs through Nova")
+        grading_results = []
 
-                        if not pdf_path:
-                            print(f"Skipping PDF for {student_name}: no database binary data and no file path")
-                            continue
+        for student_data in students_with_pdfs:
+            student_id = student_data.get("student_id")
+            student_name = student_data.get("student_name", f"Student {student_id}")
+            pdfs = student_data.get("pdfs", [])
 
-                        # Legacy fallback: read from file path when DB binary is unavailable
-                        if not os.path.isabs(pdf_path):
-                            pdf_full_path = os.path.join(os.getcwd(), pdf_path)
-                        else:
-                            pdf_full_path = pdf_path
+            if not pdfs:
+                grading_results.append({
+                    "student_id": student_id,
+                    "student_name": student_name,
+                    "success": False,
+                    "error": "No PDF data found for student"
+                })
+                continue
 
-                        print(f"Reading legacy PDF from path: {pdf_full_path}")
+            pdf_info = pdfs[0]
+            pdf_binary_data = pdf_info.get("data")
+            pdf_path = pdf_info.get("path", "")
+            temp_pdf_path = None
 
-                        with open(pdf_full_path, 'rb') as pdf_file:
-                            pdf_content = pdf_file.read()
-                            pdf_base64 = base64.b64encode(pdf_content).decode('utf-8')
-                            pdf_files.append(pdf_base64)
-                            student_names.append(student_name)
-                            
-                        print(f"Successfully encoded PDF for {student_name} ({len(pdf_base64)} chars)")
-                        
-                    except Exception as pdf_error:
-                        print(f"Error reading PDF for {student_name}: {pdf_error}")
-                        continue
-            
-            if pdf_files:
-                # Call K.A.N.A. bulk PDF grading endpoint
-                import requests
-                
-                kana_payload = {
-                    "pdf_files": pdf_files,
-                    "assignment_title": assignment.title,
-                    "max_points": assignment.max_points,
-                    "grading_rubric": assignment.rubric,
-                    "feedback_type": "both",
-                    "student_names": student_names
-                }
-                
-                print(f"Calling K.A.N.A. with {len(pdf_files)} PDFs...")
-                print(f"Assignment title: '{assignment.title}'")
-                print(f"Max points: {assignment.max_points}")
-                print(f"Rubric length: {len(assignment.rubric) if assignment.rubric else 0}")
-                print(f"Rubric content: '{assignment.rubric[:100] if assignment.rubric else 'None'}'...")
-                
-                # Validate required fields before sending
-                if not assignment.title or not assignment.title.strip():
-                    raise HTTPException(status_code=400, detail="Assignment title is missing or empty")
-                if not assignment.max_points or assignment.max_points <= 0:
-                    raise HTTPException(status_code=400, detail="Assignment max_points is missing or invalid")
-                if not assignment.rubric or not assignment.rubric.strip():
-                    print("⚠️ Assignment rubric is missing, using default rubric")
-                    kana_payload["grading_rubric"] = "Standard academic grading criteria based on correctness, completeness, and presentation quality."
-                
-                # Use environment variable or default K.A.N.A. endpoint
-                kana_base_url = get_kana_base_url()
-                kana_endpoint = f"{kana_base_url}/api/kana/bulk-grade-pdfs"
-                print(f"ℹ️ grade-class resolved KANA endpoint: {kana_endpoint}")
-                
-                response = requests.post(
-                    kana_endpoint,
-                    json=kana_payload,
-                    timeout=300  # 5 minute timeout for bulk grading
-                )
-                
-                if response.status_code == 200:
-                    kana_results = response.json()
-                    print(f"✅ K.A.N.A. grading successful: {kana_results.get('batch_summary', {}).get('successfully_graded', 0)} students graded")
-                    
-                    # Store grades in database
-                    from schemas.assignments_schemas import GradeCreate
-                    grading_results = []
-                    
-                    for result in kana_results.get("student_results", []):
-                        if result.get("success", False):
-                            student_name = result.get("student_name", "")
-                            score = result.get("score", 0)
-                            feedback = result.get("detailed_feedback", "")
-                            
-                            # Find student ID by name
-                            matching_student = None
-                            for student_data in grading_data:
-                                if student_data["student_name"] == student_name:
-                                    matching_student = student_data
-                                    break
-                            
-                            if matching_student:
-                                try:
-                                    # Create grade record
-                                    grade_create = GradeCreate(
-                                        assignment_id=assignment.id,
-                                        student_id=matching_student["student_id"],
-                                        points_earned=score,
-                                        feedback=feedback
-                                    )
-                                    
-                                    # Check if grade already exists
-                                    existing_grade = db.query(Grade).filter(
-                                        Grade.assignment_id == assignment.id,
-                                        Grade.student_id == matching_student["student_id"]
-                                    ).first()
-                                    
-                                    if existing_grade:
-                                        # Update existing grade
-                                        existing_grade.points_earned = score
-                                        existing_grade.feedback = feedback
-                                        existing_grade.teacher_id = teacher.id
-                                        existing_grade.graded_date = datetime.utcnow()
-                                        existing_grade.ai_generated = True
-                                        existing_grade.ai_confidence = 85  # High confidence for K.A.N.A. grading
-                                    else:
-                                        # Create new grade
-                                        new_grade = Grade(
-                                            assignment_id=assignment.id,
-                                            student_id=matching_student["student_id"],
-                                            teacher_id=teacher.id,
-                                            points_earned=score,
-                                            feedback=feedback,
-                                            ai_generated=True,
-                                            ai_confidence=85
-                                        )
-                                        db.add(new_grade)
-                                    
-                                    grading_results.append({
-                                        "student_id": matching_student["student_id"],
-                                        "student_name": student_name,
-                                        "score": score,
-                                        "max_points": assignment.max_points,
-                                        "percentage": result.get("percentage", 0),
-                                        "feedback": feedback,
-                                        "success": True
-                                    })
-                                    
-                                except Exception as grade_error:
-                                    print(f"Error saving grade for {student_name}: {grade_error}")
-                                    grading_results.append({
-                                        "student_name": student_name,
-                                        "error": str(grade_error),
-                                        "success": False
-                                    })
-                    
-                    # Commit all grades to database
-                    try:
-                        db.commit()
-                        print(f"✅ Successfully saved {len([r for r in grading_results if r['success']])} grades to database")
-                    except Exception as commit_error:
-                        db.rollback()
-                        print(f"❌ Error committing grades: {commit_error}")
-                        raise HTTPException(status_code=500, detail=f"Failed to save grades: {str(commit_error)}")
-                    
-                    # Return enhanced response with actual grading results
-                    return {
-                        "status": "success",
-                        "message": f"Successfully graded {len(grading_results)} students with K.A.N.A.",
-                        "assignment": {
-                            "id": assignment.id,
-                            "title": assignment.title,
-                            "description": assignment.description,
-                            "rubric": assignment.rubric,
-                            "max_points": assignment.max_points
-                        },
-                        "subject": {
-                            "id": subject.id,
-                            "name": subject.name
-                        },
-                        "grading_results": grading_results,
-                        "batch_summary": kana_results.get("batch_summary", {}),
-                        "total_students": len(grading_data),
-                        "students_graded": len([r for r in grading_results if r["success"]]),
-                        "students_failed": len([r for r in grading_results if not r["success"]])
-                    }
-                    
+            try:
+                if pdf_binary_data:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+                        temp_pdf.write(bytes(pdf_binary_data))
+                        temp_pdf.flush()
+                        temp_pdf_path = temp_pdf.name
+                    pdf_path_for_grading = temp_pdf_path
+                elif pdf_path:
+                    pdf_path_for_grading = os.path.join(os.getcwd(), pdf_path) if not os.path.isabs(pdf_path) else pdf_path
                 else:
-                    print(f"❌ K.A.N.A. grading failed: {response.status_code} - {response.text}")
-                    raise HTTPException(status_code=500, detail=f"K.A.N.A. grading failed: {response.status_code}")
-            
-            else:
-                print("No valid PDF files found for K.A.N.A. grading")
-                
-        except Exception as kana_error:
-            print(f"❌ K.A.N.A. integration error: {kana_error}")
-            # Continue with basic response even if K.A.N.A. fails
-    
-    # Return data for K.A.N.A. processing (fallback or when no PDFs available)
+                    grading_results.append({
+                        "student_id": student_id,
+                        "student_name": student_name,
+                        "success": False,
+                        "error": "No PDF binary data or file path available"
+                    })
+                    continue
+
+                grading_result = await nova_grading_service.grade_assignment_pdf(
+                    pdf_path=pdf_path_for_grading,
+                    assignment_title=assignment.title or "Assignment",
+                    assignment_description=assignment.description or "",
+                    rubric=assignment.rubric or "Standard academic grading criteria",
+                    max_points=assignment.max_points,
+                    feedback_type="both",
+                    student_name=student_name
+                )
+
+                if not grading_result.get("success", False):
+                    grading_results.append({
+                        "student_id": student_id,
+                        "student_name": student_name,
+                        "success": False,
+                        "error": grading_result.get("error", "Nova grading failed")
+                    })
+                    continue
+
+                points_earned = grading_result.get("points_earned", 0)
+                percentage = grading_result.get("percentage", 0)
+                feedback = grading_result.get("feedback", "")
+                confidence = grading_result.get("confidence", 80)
+
+                existing_grade = db.query(Grade).filter(
+                    Grade.assignment_id == assignment.id,
+                    Grade.student_id == student_id
+                ).first()
+
+                if existing_grade:
+                    existing_grade.points_earned = points_earned
+                    existing_grade.feedback = feedback
+                    existing_grade.teacher_id = teacher.id
+                    existing_grade.graded_date = datetime.utcnow()
+                    existing_grade.ai_generated = True
+                    existing_grade.ai_confidence = confidence
+                else:
+                    new_grade = Grade(
+                        assignment_id=assignment.id,
+                        student_id=student_id,
+                        teacher_id=teacher.id,
+                        points_earned=points_earned,
+                        feedback=feedback,
+                        ai_generated=True,
+                        ai_confidence=confidence,
+                    )
+                    db.add(new_grade)
+
+                grading_results.append({
+                    "student_id": student_id,
+                    "student_name": student_name,
+                    "score": points_earned,
+                    "points_earned": points_earned,
+                    "max_points": assignment.max_points,
+                    "percentage": percentage,
+                    "feedback": feedback,
+                    "detailed_feedback": feedback,
+                    "strengths": grading_result.get("strengths", []),
+                    "improvement_areas": grading_result.get("areas_for_improvement", []),
+                    "recommendations": grading_result.get("suggestions", []),
+                    "confidence": confidence,
+                    "success": True,
+                })
+            except Exception as grade_error:
+                grading_results.append({
+                    "student_id": student_id,
+                    "student_name": student_name,
+                    "success": False,
+                    "error": str(grade_error),
+                })
+            finally:
+                if temp_pdf_path:
+                    try:
+                        os.unlink(temp_pdf_path)
+                    except Exception:
+                        pass
+
+        try:
+            db.commit()
+        except Exception as commit_error:
+            db.rollback()
+            raise HTTPException(status_code=500, detail=f"Failed to save grades: {str(commit_error)}")
+
+        return {
+            "status": "success",
+            "message": f"Successfully graded {len([r for r in grading_results if r.get('success')])} students with Nova.",
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "description": assignment.description,
+                "rubric": assignment.rubric,
+                "max_points": assignment.max_points
+            },
+            "subject": {
+                "id": subject.id,
+                "name": subject.name
+            },
+            "grading_results": grading_results,
+            "batch_summary": {
+                "successfully_graded": len([r for r in grading_results if r.get("success")]),
+                "failed_grading": len([r for r in grading_results if not r.get("success")]),
+                "model": nova_service.model_id,
+            },
+            "total_students": len(grading_data),
+            "students_graded": len([r for r in grading_results if r.get("success")]),
+            "students_failed": len([r for r in grading_results if not r.get("success")])
+        }
+
+    # Fallback response when no PDF submissions exist.
     return {
         "status": "success",
-        "message": f"Found {len(grading_data)} students with work to grade",
+        "message": f"Found {len(grading_data)} students, but no PDF submissions were available for Nova grading",
         "assignment": {
             "id": assignment.id,
             "title": assignment.title,
@@ -1563,33 +1502,24 @@ async def grade_class_assignments(
 async def get_grade_class_target(
     db: db_dependency,
     current_user: user_dependency,
-    refresh: bool = Query(False, description="Clear cached KANA URL before resolving")
+    refresh: bool = Query(False, description="Reserved for compatibility; no cache reset required for Nova")
 ):
     """
-    Debug endpoint to show where /grades/grade-class will send K.A.N.A. requests.
+    Debug endpoint to show Nova grading configuration for /grades/grade-class.
     """
     ensure_user_role(db, current_user["user_id"], UserRole.teacher)
-
-    if refresh and hasattr(get_kana_base_url, "cache_clear"):
-        get_kana_base_url.cache_clear()
-
-    base_url = get_kana_base_url()
-    endpoint = f"{base_url}/api/kana/bulk-grade-pdfs"
-    parsed = urlparse(base_url)
 
     return {
         "status": "ok",
         "source_endpoint": "/study-area/academic/grades/grade-class",
-        "resolved_kana_base_url": base_url,
-        "resolved_bulk_grade_endpoint": endpoint,
-        "host": parsed.hostname,
-        "scheme": parsed.scheme,
-        "uses_https": parsed.scheme == "https",
+        "grading_provider": "nova",
+        "resolved_nova_model_id": nova_service.model_id,
+        "resolved_aws_region": nova_service.region,
+        "cache_refresh_requested": refresh,
         "env_snapshot": {
-            "KANA_BASE_URL": (os.getenv("KANA_BASE_URL") or "").strip().strip('"').strip("'"),
-            "KANA_API_URL": (os.getenv("KANA_API_URL") or "").strip().strip('"').strip("'"),
-            "ALLOW_LOCAL_KANA_URL": (os.getenv("ALLOW_LOCAL_KANA_URL") or "").strip(),
-            "ALLOW_LEGACY_KANA_URL": (os.getenv("ALLOW_LEGACY_KANA_URL") or "").strip()
+            "NOVA_MODEL_ID": (os.getenv("NOVA_MODEL_ID") or "").strip().strip('"').strip("'"),
+            "AWS_REGION": (os.getenv("AWS_REGION") or "").strip().strip('"').strip("'"),
+            "AWS_DEFAULT_REGION": (os.getenv("AWS_DEFAULT_REGION") or "").strip().strip('"').strip("'"),
         }
     }
 
