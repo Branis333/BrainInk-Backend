@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
 from db.connection import get_db, db_dependency
 from models.users_models import User
@@ -10,10 +10,10 @@ from schemas.syllabus_schemas import (
     SyllabusCreateRequest, SyllabusUpdateRequest, SyllabusResponse, SyllabusListResponse,
     WeeklyPlanCreateRequest, WeeklyPlanUpdateRequest, WeeklyPlanResponse,
     StudentProgressUpdateRequest, StudentSyllabusProgressResponse,
-    SyllabusWithProgressResponse, TextbookAnalysisRequest, KanaProcessingResponse
+    SyllabusWithProgressResponse, TextbookAnalysisRequest, KanaProcessingResponse as NovaProcessingResponse
 )
 from Endpoints.auth import get_current_user
-from Endpoints.utils import ensure_user_role, ensure_user_has_any_role, _get_user_roles, get_kana_base_url
+from Endpoints.utils import _get_user_roles
 from services.nova_services.syllabus_services import nova_syllabus_service
 from typing import List, Optional, Annotated
 import json
@@ -410,9 +410,9 @@ async def update_syllabus_status(
         "new_status": new_status
     }
 
-# --- TEXTBOOK UPLOAD & K.A.N.A. INTEGRATION ---
+# --- TEXTBOOK UPLOAD & NOVA INTEGRATION ---
 
-@router.post("/syllabuses/{syllabus_id}/upload-textbook", response_model=KanaProcessingResponse)
+@router.post("/syllabuses/{syllabus_id}/upload-textbook", response_model=NovaProcessingResponse)
 async def upload_textbook(
     syllabus_id: int,
     current_user: user_dependency,
@@ -508,7 +508,7 @@ async def upload_textbook(
 
         db.commit()
 
-        return KanaProcessingResponse(
+        return NovaProcessingResponse(
             success=True,
             message="Textbook processed successfully",
             processing_id=file_id,
