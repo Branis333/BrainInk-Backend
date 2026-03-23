@@ -1,11 +1,11 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from services.nova_services.nova_services import nova_service
+from services.gemma_services.gemma_services import gemma_service
 
 
-class NovaQuizService:
-	"""Minimal quiz generation workflow using Bedrock Nova."""
+class GemmaQuizService:
+	"""Minimal quiz generation workflow using Bedrock Gemma."""
 
 	@staticmethod
 	def _build_prompts(
@@ -118,7 +118,7 @@ Rules:
 		weakness_areas: Optional[List[str]] = None,
 		context: str = "",
 	) -> Dict[str, Any]:
-		prompts = NovaQuizService._build_prompts(
+		prompts = GemmaQuizService._build_prompts(
 			description=description,
 			num_questions=num_questions,
 			difficulty=difficulty,
@@ -128,16 +128,16 @@ Rules:
 			context=context,
 		)
 
-		payload = await nova_service.generate_json(
+		payload = await gemma_service.generate_json(
 			system_prompt=prompts["system"],
 			user_prompt=prompts["user"],
 			max_tokens=2200,
 			temperature=0.4,
 		)
 
-		questions = NovaQuizService._normalize_questions(payload.get("questions", []), num_questions)
+		questions = GemmaQuizService._normalize_questions(payload.get("questions", []), num_questions)
 		if not questions:
-			raise ValueError("Nova quiz response did not contain valid questions")
+			raise ValueError("Gemma quiz response did not contain valid questions")
 
 		for q in questions:
 			q["difficulty"] = difficulty
@@ -148,9 +148,9 @@ Rules:
 			"difficulty": difficulty,
 			"subject": subject,
 			"questions": questions,
-			"generated_by": "nova_ai",
-			"ai_model_used": nova_service.model_id,
+			"generated_by": "gemma_ai",
+			"ai_model_used": gemma_service.model_id,
 		}
 
 
-nova_quiz_service = NovaQuizService()
+gemma_quiz_service = GemmaQuizService()

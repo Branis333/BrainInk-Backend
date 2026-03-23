@@ -7,15 +7,17 @@ from typing import Any, Dict, List, Optional
 import boto3
 
 
-class NovaService:
-	"""Minimal Bedrock Nova client focused on JSON responses."""
+class GemmaService:
+	"""Minimal Bedrock Gemma client focused on JSON responses."""
 
 	def __init__(self) -> None:
-		# Prefer inference profile for Nova because some accounts/regions do not support on-demand model IDs.
+		# Prefer explicit Gemma model/profile IDs with backward-compatible Nova fallbacks.
 		self.model_id = (
-			os.getenv("NOVA_INFERENCE_PROFILE_ID")
+			os.getenv("GEMMA_MODEL_ID")
+			or os.getenv("GEMMA_INFERENCE_PROFILE_ID")
+			or os.getenv("NOVA_INFERENCE_PROFILE_ID")
 			or os.getenv("NOVA_MODEL_ID")
-			or "eu.amazon.nova-lite-v1:0"
+			or "google.gemma-3-27b-it"
 		)
 		self.region = os.getenv("AWS_REGION", "eu-west-1")
 		self._client = None
@@ -43,7 +45,7 @@ class NovaService:
 		)
 		parsed = self._extract_json(text)
 		if not isinstance(parsed, dict):
-			raise ValueError("Nova response did not contain a valid JSON object")
+			raise ValueError("Gemma response did not contain a valid JSON object")
 		return parsed
 
 	async def generate_json_with_images(
@@ -65,7 +67,7 @@ class NovaService:
 		)
 		parsed = self._extract_json(text)
 		if not isinstance(parsed, dict):
-			raise ValueError("Nova response did not contain a valid JSON object")
+			raise ValueError("Gemma response did not contain a valid JSON object")
 		return parsed
 
 	def _converse_text(
@@ -122,7 +124,7 @@ class NovaService:
 		parts = [part.get("text", "") for part in content if isinstance(part, dict)]
 		text = "\n".join([p for p in parts if p]).strip()
 		if not text:
-			raise ValueError("Empty response from Nova model")
+			raise ValueError("Empty response from Gemma model")
 		return text
 
 	def _extract_json(self, text: str) -> Any:
@@ -155,5 +157,4 @@ class NovaService:
 						return None
 		return None
 
-
-nova_service = NovaService()
+gemma_service = GemmaService()

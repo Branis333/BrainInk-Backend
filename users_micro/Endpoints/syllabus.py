@@ -10,11 +10,11 @@ from schemas.syllabus_schemas import (
     SyllabusCreateRequest, SyllabusUpdateRequest, SyllabusResponse, SyllabusListResponse,
     WeeklyPlanCreateRequest, WeeklyPlanUpdateRequest, WeeklyPlanResponse,
     StudentProgressUpdateRequest, StudentSyllabusProgressResponse,
-    SyllabusWithProgressResponse, TextbookAnalysisRequest, KanaProcessingResponse as NovaProcessingResponse
+    SyllabusWithProgressResponse, TextbookAnalysisRequest, KanaProcessingResponse as GemmaProcessingResponse
 )
 from Endpoints.auth import get_current_user
 from Endpoints.utils import _get_user_roles
-from services.nova_services.syllabus_services import nova_syllabus_service
+from services.gemma_services.syllabus_services import gemma_syllabus_service
 from typing import List, Optional, Annotated
 import json
 import os
@@ -410,16 +410,16 @@ async def update_syllabus_status(
         "new_status": new_status
     }
 
-# --- TEXTBOOK UPLOAD & NOVA INTEGRATION ---
+# --- TEXTBOOK UPLOAD & GEMMA INTEGRATION ---
 
-@router.post("/syllabuses/{syllabus_id}/upload-textbook", response_model=NovaProcessingResponse)
+@router.post("/syllabuses/{syllabus_id}/upload-textbook", response_model=GemmaProcessingResponse)
 async def upload_textbook(
     syllabus_id: int,
     current_user: user_dependency,
     db: db_dependency,
     textbook: UploadFile = File(...)
 ):
-    """Upload textbook and trigger local Nova AI syllabus processing."""
+    """Upload textbook and trigger local Gemma AI syllabus processing."""
     permissions = get_user_permissions(current_user, db)
 
     if not permissions["can_create_syllabus"]:
@@ -473,7 +473,7 @@ async def upload_textbook(
         syllabus.updated_date = datetime.utcnow()
         db.commit()
 
-        result = await nova_syllabus_service.process_textbook(
+        result = await gemma_syllabus_service.process_textbook(
             file_path=file_path,
             term_length_weeks=syllabus.term_length_weeks,
             subject_name=syllabus.subject.name,
@@ -508,7 +508,7 @@ async def upload_textbook(
 
         db.commit()
 
-        return NovaProcessingResponse(
+        return GemmaProcessingResponse(
             success=True,
             message="Textbook processed successfully",
             processing_id=file_id,
@@ -522,7 +522,7 @@ async def upload_textbook(
             os.remove(file_path)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Nova syllabus processing failed: {str(e)}"
+            detail=f"Gemma syllabus processing failed: {str(e)}"
         )
 
 # --- WEEKLY PLANS ENDPOINTS ---

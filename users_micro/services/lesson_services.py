@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 
 from models.study_area_models import LessonPlan, Teacher, Subject, Classroom
-from services.nova_services.lessonplan_services import nova_lessonplan_service
+from services.gemma_services.lessonplan_services import gemma_lessonplan_service
 
 
 def _as_json_list(value: Optional[List[Any]]) -> str:
@@ -297,11 +297,11 @@ async def generate_and_create_lesson_plan(
 	extracted_context = ""
 	source_summary = None
 	if file_bytes and file_name:
-		extracted_context = nova_lessonplan_service.extract_pdf_text_from_bytes(file_bytes)
+		extracted_context = gemma_lessonplan_service.extract_pdf_text_from_bytes(file_bytes)
 		source_summary = extracted_context[:4000]
 
 	objectives_hint = _clean_string_list(learning_objectives)
-	ai_payload = await nova_lessonplan_service.generate_lesson_plan(
+	ai_payload = await gemma_lessonplan_service.generate_lesson_plan(
 		subject_name=subject.name,
 		classroom_name=classroom.name,
 		title=title,

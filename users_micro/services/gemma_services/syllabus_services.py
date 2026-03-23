@@ -3,11 +3,11 @@ from typing import Any, Dict, List, Optional
 
 from pypdf import PdfReader
 
-from services.nova_services.nova_services import nova_service
+from services.gemma_services.gemma_services import gemma_service
 
 
-class NovaSyllabusService:
-	"""Minimal syllabus generation workflow using Bedrock Nova."""
+class GemmaSyllabusService:
+	"""Minimal syllabus generation workflow using Bedrock Gemma."""
 
 	@staticmethod
 	def extract_pdf_text(file_path: str) -> str:
@@ -112,20 +112,20 @@ Rules:
 		subject_name: str,
 		additional_preferences: Optional[Dict[str, Any]] = None,
 	) -> Dict[str, Any]:
-		textbook_text = NovaSyllabusService.extract_pdf_text(file_path)
+		textbook_text = GemmaSyllabusService.extract_pdf_text(file_path)
 		if not textbook_text:
 			raise ValueError("Could not extract text from textbook PDF")
 
 		# Keep context bounded for stable model latency.
 		textbook_text = textbook_text[:50000]
-		prompts = NovaSyllabusService._build_prompts(
+		prompts = GemmaSyllabusService._build_prompts(
 			textbook_text=textbook_text,
 			term_length_weeks=term_length_weeks,
 			subject_name=subject_name,
 			additional_preferences=additional_preferences,
 		)
 
-		payload = await nova_service.generate_json(
+		payload = await gemma_service.generate_json(
 			system_prompt=prompts["system"],
 			user_prompt=prompts["user"],
 			max_tokens=3500,
@@ -143,13 +143,13 @@ Rules:
 			},
 		}
 
-		weekly_plans = NovaSyllabusService._normalize_weekly_plans(payload.get("weekly_plans"), term_length_weeks)
+		weekly_plans = GemmaSyllabusService._normalize_weekly_plans(payload.get("weekly_plans"), term_length_weeks)
 
 		return {
 			"analysis_data": analysis_data,
 			"weekly_plans": weekly_plans,
-			"ai_model_used": nova_service.model_id,
+			"ai_model_used": gemma_service.model_id,
 		}
 
 
-nova_syllabus_service = NovaSyllabusService()
+gemma_syllabus_service = GemmaSyllabusService()
