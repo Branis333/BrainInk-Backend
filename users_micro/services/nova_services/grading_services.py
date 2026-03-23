@@ -1,6 +1,7 @@
 from pathlib import Path
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple
+import re
 
 from PIL import Image
 from pypdf import PdfReader
@@ -14,6 +15,28 @@ class NovaGradingService:
 	MAX_IMAGES_PER_SUBMISSION = 12
 	MAX_IMAGE_DIMENSION = 1800
 	JPEG_QUALITY = 85
+	MIN_MEANINGFUL_TEXT_CHARS = 30
+	MIN_MEANINGFUL_WORDS = 6
+
+	@staticmethod
+	def _is_meaningful_submission_text(submission_text: str) -> bool:
+		if not submission_text or not submission_text.strip():
+			return False
+
+		cleaned = re.sub(r"\s+", " ", submission_text).strip()
+		if len(cleaned) < NovaGradingService.MIN_MEANINGFUL_TEXT_CHARS:
+			return False
+
+		words = re.findall(r"[A-Za-z0-9]{2,}", cleaned)
+		if len(words) < NovaGradingService.MIN_MEANINGFUL_WORDS:
+			return False
+
+		# Reject highly repetitive/noisy OCR like "aaaa aaaa" or symbol-heavy artifacts.
+		unique_ratio = (len(set(words)) / len(words)) if words else 0
+		if unique_ratio < 0.25:
+			return False
+
+		return True
 
 	@staticmethod
 	def _normalize_image_bytes(raw_bytes: bytes, source_ext: str) -> Optional[Tuple[bytes, str]]:
@@ -110,8 +133,8 @@ SUBMISSION OCR TRANSCRIPT (from the same PDF images):
 You are grading one student submission.
 
 GOAL:
-- Produce an accurate, rubric-aligned score and high-quality actionable feedback.
-- Be strict but fair: do not over-credit missing evidence and do not under-credit correct work.
+- Produce an accurate, rubric-aligned score with clear teacher-quality feedback.
+- Be strict and evidence-driven: do not award points without visible support in the submission.
 
 GRADING CONTEXT:
 - Assignment title: {assignment_title}
@@ -129,14 +152,13 @@ SUBMISSION VISUAL INPUT:
 {transcript_block}
 
 GRADING METHOD (must follow):
-1) Identify the expected outcomes from the assignment + rubric.
-2) Evaluate what the submission images explicitly demonstrate.
-3) Use the OCR transcript to cross-check details and improve consistency.
-4) If image and transcript disagree, prefer what is most visually supported by the images.
-5) Match demonstrated evidence to rubric criteria.
-6) Deduct points for inaccuracies, omissions, weak reasoning, or rubric misses.
-7) Keep scoring proportional to quality and completeness.
-8) If rubric details are vague, infer reasonable academic criteria from assignment description.
+1) Identify each rubric category and its expected evidence.
+2) Evaluate what the submission explicitly demonstrates for each category.
+3) Use the OCR transcript only to cross-check; if transcript conflicts with image evidence, trust the image evidence.
+4) Assign points conservatively per rubric category based on demonstrated evidence.
+5) Sum category points and ensure the total matches points_earned.
+6) Deduct points for mathematical errors, missing steps, or unclear reasoning.
+7) If evidence is weak or missing for a category, award low or zero points for that category.
 
 SCORING CALIBRATION:
 - 90-100%: Excellent mastery, complete and accurate, strong reasoning.
@@ -146,11 +168,13 @@ SCORING CALIBRATION:
 - 0-39%: Minimal relevant evidence, mostly incorrect or off-task.
 
 FEEDBACK QUALITY REQUIREMENTS:
-- feedback must summarize score rationale in 3-8 sentences.
-- strengths: 2-5 concrete positives tied to actual submission evidence.
-- areas_for_improvement: 2-5 concrete gaps or mistakes.
-- suggestions: 2-5 actionable next steps the student can apply immediately.
-- Avoid vague comments like "do better". Be specific and instructional.
+- feedback must be 4-8 sentences in professional teacher tone with strong grammar.
+- feedback must begin with: "Score: X/{max_points}."
+- feedback must mention at least 3 rubric categories by name.
+- strengths: 2-5 concrete positives tied to specific work shown.
+- areas_for_improvement: 2-5 concrete, specific mistakes or missing steps.
+- suggestions: 2-5 actionable next steps tied directly to weak rubric categories.
+- Avoid generic language. Do not repeat rubric text without applying it to this student's work.
 
 CONFIDENCE GUIDELINES:
 - 85-100: clear evidence and rubric alignment.
@@ -163,7 +187,7 @@ OUTPUT RULES:
 - Do not include any keys outside the required schema.
 - points_earned must be an integer in [0, {max_points}].
 - confidence must be an integer in [0, 100].
-- If evidence is insufficient, give conservative scoring and explain why in feedback.
+- If evidence is insufficient, assign low/zero points and explain exactly why.
 - Never fabricate student content.
 
 REQUIRED JSON SCHEMA:
@@ -193,6 +217,28 @@ REQUIRED JSON SCHEMA:
 		try:
 			if not Path(pdf_path).exists():
 				return {"success": False, "error": "PDF file not found"}
+
+			if submission_text is not None and not NovaGradingService._is_meaningful_submission_text(submission_text):
+				return {
+					"success": True,
+					"points_earned": 0,
+					"max_points": max_points,
+					"percentage": 0,
+					"feedback": "No meaningful submission content was detected in the uploaded file. The file appears blank, unreadable, or unrelated to the assignment. Please upload a clear and complete submission.",
+					"strengths": [],
+					"areas_for_improvement": [
+						"Upload the correct assignment file",
+						"Ensure the file contains readable written work",
+						"Use clear scans/photos with adequate lighting and contrast",
+					],
+					"suggestions": [
+						"Re-upload the correct file and resubmit for grading",
+						"Verify all pages are visible and legible before submission",
+					],
+					"confidence": 99,
+					"ai_model_used": nova_service.model_id,
+					"insufficient_submission_evidence": True,
+				}
 
 			submission_images = NovaGradingService._extract_pdf_images(pdf_path)
 			if not submission_images:
