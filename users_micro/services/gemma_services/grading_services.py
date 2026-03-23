@@ -6,11 +6,11 @@ import re
 from PIL import Image
 from pypdf import PdfReader
 
-from services.nova_services.nova_services import nova_service
+from services.gemma_services.gemma_services import gemma_service
 
 
-class NovaGradingService:
-	"""Vision-first grading workflow using Bedrock Nova."""
+class GemmaGradingService:
+	"""Vision-first grading workflow using Bedrock Gemma."""
 
 	MAX_IMAGES_PER_SUBMISSION = 12
 	MAX_IMAGE_DIMENSION = 1800
@@ -24,11 +24,11 @@ class NovaGradingService:
 			return False
 
 		cleaned = re.sub(r"\s+", " ", submission_text).strip()
-		if len(cleaned) < NovaGradingService.MIN_MEANINGFUL_TEXT_CHARS:
+		if len(cleaned) < GemmaGradingService.MIN_MEANINGFUL_TEXT_CHARS:
 			return False
 
 		words = re.findall(r"[A-Za-z0-9]{2,}", cleaned)
-		if len(words) < NovaGradingService.MIN_MEANINGFUL_WORDS:
+		if len(words) < GemmaGradingService.MIN_MEANINGFUL_WORDS:
 			return False
 
 		# Reject highly repetitive/noisy OCR like "aaaa aaaa" or symbol-heavy artifacts.
@@ -55,12 +55,12 @@ class NovaGradingService:
 			with Image.open(BytesIO(raw_bytes)) as img:
 				img = img.convert("RGB")
 				img.thumbnail((
-					NovaGradingService.MAX_IMAGE_DIMENSION,
-					NovaGradingService.MAX_IMAGE_DIMENSION,
+					GemmaGradingService.MAX_IMAGE_DIMENSION,
+					GemmaGradingService.MAX_IMAGE_DIMENSION,
 				))
 
 				out = BytesIO()
-				img.save(out, format="JPEG", quality=NovaGradingService.JPEG_QUALITY, optimize=True)
+				img.save(out, format="JPEG", quality=GemmaGradingService.JPEG_QUALITY, optimize=True)
 				return out.getvalue(), "jpeg"
 		except Exception:
 			return None
@@ -71,7 +71,7 @@ class NovaGradingService:
 		images: List[Dict[str, Any]] = []
 
 		for page_number, page in enumerate(reader.pages, start=1):
-			if len(images) >= NovaGradingService.MAX_IMAGES_PER_SUBMISSION:
+			if len(images) >= GemmaGradingService.MAX_IMAGES_PER_SUBMISSION:
 				break
 
 			page_images = list(page.images or [])
@@ -82,14 +82,14 @@ class NovaGradingService:
 			page_images.sort(key=lambda img: len(getattr(img, "data", b"")), reverse=True)
 
 			for image_index, image_file in enumerate(page_images, start=1):
-				if len(images) >= NovaGradingService.MAX_IMAGES_PER_SUBMISSION:
+				if len(images) >= GemmaGradingService.MAX_IMAGES_PER_SUBMISSION:
 					break
 
 				raw_bytes = getattr(image_file, "data", b"")
 				name = str(getattr(image_file, "name", ""))
 				ext = Path(name).suffix.lower().lstrip(".") if name else ""
 
-				normalized = NovaGradingService._normalize_image_bytes(raw_bytes, ext)
+				normalized = GemmaGradingService._normalize_image_bytes(raw_bytes, ext)
 				if not normalized:
 					continue
 
@@ -218,7 +218,7 @@ REQUIRED JSON SCHEMA:
 			if not Path(pdf_path).exists():
 				return {"success": False, "error": "PDF file not found"}
 
-			if submission_text is not None and not NovaGradingService._is_meaningful_submission_text(submission_text):
+			if submission_text is not None and not GemmaGradingService._is_meaningful_submission_text(submission_text):
 				return {
 					"success": True,
 					"points_earned": 0,
@@ -236,15 +236,15 @@ REQUIRED JSON SCHEMA:
 						"Verify all pages are visible and legible before submission",
 					],
 					"confidence": 99,
-					"ai_model_used": nova_service.model_id,
+					"ai_model_used": gemma_service.model_id,
 					"insufficient_submission_evidence": True,
 				}
 
-			submission_images = NovaGradingService._extract_pdf_images(pdf_path)
+			submission_images = GemmaGradingService._extract_pdf_images(pdf_path)
 			if not submission_images:
 				return {"success": False, "error": "Could not extract readable page images from PDF"}
 
-			prompts = NovaGradingService._build_prompts(
+			prompts = GemmaGradingService._build_prompts(
 				assignment_title=assignment_title,
 				assignment_description=assignment_description,
 				rubric=rubric,
@@ -255,7 +255,7 @@ REQUIRED JSON SCHEMA:
 				submission_text=(submission_text or ""),
 			)
 
-			payload = await nova_service.generate_json_with_images(
+			payload = await gemma_service.generate_json_with_images(
 				system_prompt=prompts["system"],
 				user_prompt=prompts["user"],
 				images=submission_images,
@@ -280,24 +280,24 @@ REQUIRED JSON SCHEMA:
 				"areas_for_improvement": payload.get("areas_for_improvement", []),
 				"suggestions": payload.get("suggestions", []),
 				"confidence": confidence,
-				"ai_model_used": nova_service.model_id,
+				"ai_model_used": gemma_service.model_id,
 			}
 		except Exception as e:
-			return {"success": False, "error": f"Nova grading error: {str(e)}"}
+			return {"success": False, "error": f"Gemma grading error: {str(e)}"}
 
 	@staticmethod
 	async def extract_text_from_pdf_with_vision(
 		pdf_path: str,
 		max_images: int = 8,
 	) -> Dict[str, Any]:
-		"""Extract text from image-based PDF pages using Nova vision input."""
+		"""Extract text from image-based PDF pages using Gemma vision input."""
 		all_images: List[Dict[str, Any]] = []
 		selected_images: List[Dict[str, Any]] = []
 		try:
 			if not Path(pdf_path).exists():
 				return {"success": False, "error": "PDF file not found"}
 
-			all_images = NovaGradingService._extract_pdf_images(pdf_path)
+			all_images = GemmaGradingService._extract_pdf_images(pdf_path)
 			if not all_images:
 				return {"success": False, "error": "Could not extract readable page images from PDF"}
 
@@ -326,7 +326,7 @@ Return ONLY this JSON schema:
 }
 """.strip()
 
-			payload = await nova_service.generate_json_with_images(
+			payload = await gemma_service.generate_json_with_images(
 				system_prompt=system_prompt,
 				user_prompt=user_prompt,
 				images=selected_images,
@@ -353,18 +353,18 @@ Return ONLY this JSON schema:
 				"confidence": confidence,
 				"image_count": len(selected_images),
 				"total_images_available": len(all_images),
-				"ai_model_used": nova_service.model_id,
+				"ai_model_used": gemma_service.model_id,
 			}
 		except Exception as e:
 			error_text = str(e)
 			if "Unable to locate credentials" in error_text:
 				error_text = (
-					"Nova vision extraction error: Unable to locate AWS credentials. "
+					"Gemma vision extraction error: Unable to locate AWS credentials. "
 					"Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION "
 					"(and AWS_SESSION_TOKEN if using temporary credentials)."
 				)
 			else:
-				error_text = f"Nova vision extraction error: {error_text}"
+				error_text = f"Gemma vision extraction error: {error_text}"
 
 			return {
 				"success": False,
@@ -373,5 +373,4 @@ Return ONLY this JSON schema:
 				"total_images_available": len(all_images),
 			}
 
-
-nova_grading_service = NovaGradingService()
+gemma_grading_service = GemmaGradingService()

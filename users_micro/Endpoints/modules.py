@@ -12,7 +12,7 @@ from typing import List, Optional, Dict, Any, Tuple
 import json
 from datetime import datetime, timezone
 from pydantic import BaseModel
-from services.nova_services.generate_assignment_service import nova_quiz_service
+from services.gemma_services.generate_assignment_service import gemma_quiz_service
 
 # Create router for quiz endpoints
 router = APIRouter(tags=["Generated Quizzes"])
@@ -247,13 +247,13 @@ def _build_quiz_record(
         "max_attempts": 3,
         "time_limit_minutes": 15,
         "attempts": [],
-        "generated_by": "nova_ai",
-        "nova_available": True,
+        "generated_by": "gemma_ai",
+        "gemma_available": True,
         "service_version": service_version,
     }
 
 
-async def _generate_quiz_with_nova(request: QuizGenerationRequest, service_version: str) -> Dict[str, Any]:
+async def _generate_quiz_with_gemma(request: QuizGenerationRequest, service_version: str) -> Dict[str, Any]:
     difficulty, student_level = _resolve_difficulty_and_level(request.grade)
 
     if not request.force_refresh:
@@ -269,8 +269,8 @@ async def _generate_quiz_with_nova(request: QuizGenerationRequest, service_versi
                 try:
                     created_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
                     age_sec = (now_utc - created_dt).total_seconds()
-                    if age_sec <= 120 and quiz.get("generated_by") in {"nova_ai", "fallback"}:
-                        print("🟡 Returning cached Nova-backed quiz (<=2 min old)")
+                    if age_sec <= 120 and quiz.get("generated_by") in {"gemma_ai", "fallback"}:
+                        print("🟡 Returning cached Gemma-backed quiz (<=2 min old)")
                         return quiz
                 except Exception:
                     continue
@@ -283,7 +283,7 @@ async def _generate_quiz_with_nova(request: QuizGenerationRequest, service_versi
 
     questions: List[Dict[str, Any]] = []
     try:
-        quiz_data = await nova_quiz_service.generate_quiz(
+        quiz_data = await gemma_quiz_service.generate_quiz(
             description=description,
             num_questions=5,
             difficulty=difficulty,
@@ -295,7 +295,7 @@ async def _generate_quiz_with_nova(request: QuizGenerationRequest, service_versi
         if quiz_data and quiz_data.get("questions"):
             questions = quiz_data["questions"]
     except Exception as exc:
-        print(f"⚠️ Nova quiz generation failed, using fallback: {exc}")
+        print(f"⚠️ Gemma quiz generation failed, using fallback: {exc}")
 
     if len(questions) < 5:
         fallback_questions = generate_fallback_questions(request, difficulty)
@@ -309,14 +309,15 @@ async def _generate_quiz_with_nova(request: QuizGenerationRequest, service_versi
     generated_quizzes[quiz["id"]] = quiz
     return quiz
 
+@router.post("/generate-with-gemma-v2")
 @router.post("/generate-with-nova-v2")
-async def generate_quiz_with_nova_v2(request: QuizGenerationRequest):
-    """Generate a quiz using the Nova pipeline (v2)."""
+async def generate_quiz_with_gemma_v2(request: QuizGenerationRequest):
+    """Generate a quiz using the Gemma pipeline (v2)."""
     try:
-        print(f"🧠 [NOVA V2] Generating quiz for student {request.student_id}, assignment {request.assignment_id}")
-        return await _generate_quiz_with_nova(request, service_version="NovaQuizService_v2")
+        print(f"🧠 [GEMMA V2] Generating quiz for student {request.student_id}, assignment {request.assignment_id}")
+        return await _generate_quiz_with_gemma(request, service_version="GemmaQuizService_v2")
     except Exception as e:
-        print(f"❌ Failed to generate quiz with Nova v2: {e}")
+        print(f"❌ Failed to generate quiz with Gemma v2: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate quiz: {str(e)}"
@@ -325,13 +326,13 @@ async def generate_quiz_with_nova_v2(request: QuizGenerationRequest):
 
 @router.post("/generate-with-kana-v2")
 async def generate_quiz_with_kana_v2(request: QuizGenerationRequest):
-    """Legacy alias for clients still calling the old route. Uses Nova internally."""
-    return await generate_quiz_with_nova_v2(request)
+    """Legacy alias for clients still calling the old route. Uses Gemma internally."""
+    return await generate_quiz_with_gemma_v2(request)
 
 async def call_kana_service_direct(request: QuizGenerationRequest, difficulty: str, student_level: str, weakness_areas_text: str) -> Dict:
-    """Legacy helper name retained for compatibility; uses Nova internally."""
+    """Legacy helper name retained for compatibility; uses Gemma internally."""
     description = f"Generate an improvement quiz based on feedback: '{request.feedback}'. Focus on {weakness_areas_text} in {request.subject}."
-    quiz = await nova_quiz_service.generate_quiz(
+    quiz = await gemma_quiz_service.generate_quiz(
         description=description,
         num_questions=5,
         difficulty=difficulty,
@@ -342,14 +343,15 @@ async def call_kana_service_direct(request: QuizGenerationRequest, difficulty: s
     )
     return quiz
 
+@router.post("/generate-with-gemma")
 @router.post("/generate-with-nova")
-async def generate_quiz_with_nova(request: QuizGenerationRequest):
-    """Generate a quiz using the Nova pipeline (v1 compatibility route)."""
+async def generate_quiz_with_gemma(request: QuizGenerationRequest):
+    """Generate a quiz using the Gemma pipeline (v1 compatibility route)."""
     try:
-        print(f"🧠 [NOVA V1] Generating quiz for student {request.student_id}, assignment {request.assignment_id}")
-        return await _generate_quiz_with_nova(request, service_version="NovaQuizService_v1")
+        print(f"🧠 [GEMMA V1] Generating quiz for student {request.student_id}, assignment {request.assignment_id}")
+        return await _generate_quiz_with_gemma(request, service_version="GemmaQuizService_v1")
     except Exception as e:
-        print(f"❌ Failed to generate quiz with Nova v1: {e}")
+        print(f"❌ Failed to generate quiz with Gemma v1: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to generate quiz: {str(e)}"
@@ -357,8 +359,8 @@ async def generate_quiz_with_nova(request: QuizGenerationRequest):
 
 @router.post("/generate-with-kana")
 async def generate_quiz_with_kana(request: QuizGenerationRequest):
-    """Legacy alias for clients still calling the old route. Uses Nova internally."""
-    return await generate_quiz_with_nova(request)
+    """Legacy alias for clients still calling the old route. Uses Gemma internally."""
+    return await generate_quiz_with_gemma(request)
 
 def parse_kana_response(response: str, request: QuizGenerationRequest, difficulty: str) -> List[Dict]:
     """Parse AI response into quiz questions - supports multiple legacy formats."""
@@ -537,15 +539,16 @@ def generate_attempt_feedback(score: int, correct: int, total: int) -> str:
     else:
         return f"You scored {score}% ({correct}/{total} correct). Don't worry, this is a learning opportunity! Review the explanations and try again."
 
+@router.get("/health/gemma-service")
 @router.get("/health/nova-service")
-async def check_nova_service_health():
-    """Check Nova quiz generation service readiness."""
+async def check_gemma_service_health():
+    """Check Gemma quiz generation service readiness."""
     try:
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "overall_status": "healthy",
-            "provider": "nova",
-            "service": "nova_quiz_service",
+            "provider": "gemma",
+            "service": "gemma_quiz_service",
         }
     except Exception as e:
         return {
@@ -557,8 +560,8 @@ async def check_nova_service_health():
 
 @router.get("/health/kana-service")
 async def check_kana_service_health():
-    """Legacy health alias retained for compatibility. Returns Nova health."""
-    return await check_nova_service_health()
+    """Legacy health alias retained for compatibility. Returns Gemma health."""
+    return await check_gemma_service_health()
 
 def calculate_average_score() -> float:
     """Calculate average score across all quiz attempts."""

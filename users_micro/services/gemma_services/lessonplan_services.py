@@ -3,11 +3,11 @@ from typing import Any, Dict, List, Optional
 
 from pypdf import PdfReader
 
-from services.nova_services.nova_services import nova_service
+from services.gemma_services.gemma_services import gemma_service
 
 
-class NovaLessonPlanService:
-	"""Minimal Nova service for generating structured lesson plans."""
+class GemmaLessonPlanService:
+	"""Minimal Gemma service for generating structured lesson plans."""
 
 	@staticmethod
 	def extract_pdf_text_from_bytes(file_bytes: bytes) -> str:
@@ -104,7 +104,7 @@ CONSTRAINTS:
 		learning_objectives_hint: Optional[List[str]] = None,
 		source_context: str = "",
 	) -> Dict[str, Any]:
-		prompts = NovaLessonPlanService._build_prompts(
+		prompts = GemmaLessonPlanService._build_prompts(
 			subject_name=subject_name,
 			classroom_name=classroom_name,
 			title=title,
@@ -114,7 +114,7 @@ CONSTRAINTS:
 			source_context=source_context[:12000],
 		)
 
-		payload = await nova_service.generate_json(
+		payload = await gemma_service.generate_json(
 			system_prompt=prompts["system"],
 			user_prompt=prompts["user"],
 			max_tokens=2600,
@@ -128,13 +128,13 @@ CONSTRAINTS:
 			"title": str(payload.get("title", title)).strip()[:200] or title,
 			"description": str(payload.get("description", description)).strip() or description,
 			"duration_minutes": generated_duration,
-			"learning_objectives": NovaLessonPlanService._clean_string_list(payload.get("learning_objectives")) or (learning_objectives_hint or []),
-			"activities": NovaLessonPlanService._clean_string_list(payload.get("activities")),
-			"materials_needed": NovaLessonPlanService._clean_string_list(payload.get("materials_needed")),
+			"learning_objectives": GemmaLessonPlanService._clean_string_list(payload.get("learning_objectives")) or (learning_objectives_hint or []),
+			"activities": GemmaLessonPlanService._clean_string_list(payload.get("activities")),
+			"materials_needed": GemmaLessonPlanService._clean_string_list(payload.get("materials_needed")),
 			"assessment_strategy": str(payload.get("assessment_strategy", "")).strip() or None,
 			"homework": str(payload.get("homework", "")).strip() or None,
-			"ai_model_used": nova_service.model_id,
+			"ai_model_used": gemma_service.model_id,
 		}
 
 
-nova_lessonplan_service = NovaLessonPlanService()
+gemma_lessonplan_service = GemmaLessonPlanService()

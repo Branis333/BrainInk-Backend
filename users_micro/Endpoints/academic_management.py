@@ -30,8 +30,8 @@ from Endpoints.utils import (
     _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, 
     ensure_user_has_any_role
 )
-from services.nova_services.grading_services import nova_grading_service
-from services.nova_services.nova_services import nova_service
+from services.gemma_services.grading_services import gemma_grading_service
+from services.gemma_services.gemma_services import gemma_service
 
 router = APIRouter(tags=["Academic Management", "Subjects", "Assignments"])
 
@@ -1163,7 +1163,7 @@ async def grade_class_assignments(
     current_user: user_dependency
 ):
     """
-    Grade assignments for multiple students in a class using Nova AI.
+    Grade assignments for multiple students in a class using Gemma AI.
     """
     try:
         ensure_user_role(db, current_user["user_id"], UserRole.teacher)
@@ -1238,7 +1238,7 @@ async def grade_class_assignments(
     if not students:
         raise HTTPException(status_code=404, detail="No students found for grading")
     
-    # Collect student work data for Nova processing.
+    # Collect student work data for Gemma processing.
     grading_data = []
     for student in students:
         try:
@@ -1327,10 +1327,10 @@ async def grade_class_assignments(
     
     print(f"Total grading data entries: {len(grading_data)}")
     
-    # Process grading with Nova for students that have PDFs.
+    # Process grading with Gemma for students that have PDFs.
     students_with_pdfs = [student for student in grading_data if student.get("has_work", False)]
     if students_with_pdfs:
-        print(f"Processing {len(students_with_pdfs)} students with PDFs through Nova")
+        print(f"Processing {len(students_with_pdfs)} students with PDFs through Gemma")
         grading_results = []
 
         for student_data in students_with_pdfs:
@@ -1386,7 +1386,7 @@ async def grade_class_assignments(
 
                 extracted_text = ""
                 try:
-                    extraction_result = await nova_grading_service.extract_text_from_pdf_with_vision(
+                    extraction_result = await gemma_grading_service.extract_text_from_pdf_with_vision(
                         pdf_path=pdf_path_for_grading,
                         max_images=8,
                     )
@@ -1395,7 +1395,7 @@ async def grade_class_assignments(
                 except Exception as extraction_error:
                     print(f"OCR extraction warning for student {student_id}: {str(extraction_error)}")
 
-                grading_result = await nova_grading_service.grade_assignment_pdf(
+                grading_result = await gemma_grading_service.grade_assignment_pdf(
                     pdf_path=pdf_path_for_grading,
                     assignment_title=assignment.title or "Assignment",
                     assignment_description=assignment.description or "",
@@ -1407,7 +1407,7 @@ async def grade_class_assignments(
                 )
 
                 if not grading_result.get("success", False):
-                    failure_reason = grading_result.get("error", "Nova grading failed")
+                    failure_reason = grading_result.get("error", "Gemma grading failed")
                     grading_results.append({
                         "student_id": student_id,
                         "student_name": student_name,
@@ -1425,7 +1425,7 @@ async def grade_class_assignments(
 
                 points_earned = grading_result.get("points_earned", 0)
                 percentage = grading_result.get("percentage", 0)
-                feedback = grading_result.get("feedback") or "Nova grading completed without additional narrative feedback."
+                feedback = grading_result.get("feedback") or "Gemma grading completed without additional narrative feedback."
                 strengths = grading_result.get("strengths", [])
                 improvement_areas = grading_result.get("areas_for_improvement", [])
                 recommendations = grading_result.get("suggestions", [])
@@ -1517,7 +1517,7 @@ async def grade_class_assignments(
 
         return {
             "status": "success",
-            "message": f"Successfully graded {len([r for r in grading_results if r.get('success')])} students with Nova.",
+            "message": f"Successfully graded {len([r for r in grading_results if r.get('success')])} students with Gemma.",
             "assignment": {
                 "id": assignment.id,
                 "title": assignment.title,
@@ -1533,7 +1533,7 @@ async def grade_class_assignments(
             "batch_summary": {
                 "successfully_graded": len([r for r in grading_results if r.get("success")]),
                 "failed_grading": len([r for r in grading_results if not r.get("success")]),
-                "model": nova_service.model_id,
+                "model": gemma_service.model_id,
             },
             "total_students": len(grading_data),
             "students_graded": len([r for r in grading_results if r.get("success")]),
@@ -1543,7 +1543,7 @@ async def grade_class_assignments(
     # Fallback response when no PDF submissions exist.
     return {
         "status": "success",
-        "message": f"Found {len(grading_data)} students, but no PDF submissions were available for Nova grading",
+        "message": f"Found {len(grading_data)} students, but no PDF submissions were available for Gemma grading",
         "assignment": {
             "id": assignment.id,
             "title": assignment.title,
@@ -1564,21 +1564,23 @@ async def grade_class_assignments(
 async def get_grade_class_target(
     db: db_dependency,
     current_user: user_dependency,
-    refresh: bool = Query(False, description="Reserved for compatibility; no cache reset required for Nova")
+    refresh: bool = Query(False, description="Reserved for compatibility; no cache reset required for Gemma")
 ):
     """
-    Debug endpoint to show Nova grading configuration for /grades/grade-class.
+    Debug endpoint to show Gemma grading configuration for /grades/grade-class.
     """
     ensure_user_role(db, current_user["user_id"], UserRole.teacher)
 
     return {
         "status": "ok",
         "source_endpoint": "/study-area/academic/grades/grade-class",
-        "grading_provider": "nova",
-        "resolved_nova_model_id": nova_service.model_id,
-        "resolved_aws_region": nova_service.region,
+        "grading_provider": "gemma",
+        "resolved_gemma_model_id": gemma_service.model_id,
+        "resolved_aws_region": gemma_service.region,
         "cache_refresh_requested": refresh,
         "env_snapshot": {
+            "GEMMA_MODEL_ID": (os.getenv("GEMMA_MODEL_ID") or "").strip().strip('"').strip("'"),
+            "GEMMA_INFERENCE_PROFILE_ID": (os.getenv("GEMMA_INFERENCE_PROFILE_ID") or "").strip().strip('"').strip("'"),
             "NOVA_MODEL_ID": (os.getenv("NOVA_MODEL_ID") or "").strip().strip('"').strip("'"),
             "AWS_REGION": (os.getenv("AWS_REGION") or "").strip().strip('"').strip("'"),
             "AWS_DEFAULT_REGION": (os.getenv("AWS_DEFAULT_REGION") or "").strip().strip('"').strip("'"),
@@ -1586,13 +1588,14 @@ async def get_grade_class_target(
     }
 
 
+@router.post("/grades/gemma-vision-extract-test")
 @router.post("/grades/nova-vision-extract-test")
-async def test_nova_vision_extract(
+async def test_gemma_vision_extract(
     pdf: UploadFile = File(..., description="PDF to test vision-based text extraction"),
-    max_images: int = Query(8, ge=1, le=20, description="Maximum embedded PDF images to send to Nova"),
+    max_images: int = Query(8, ge=1, le=20, description="Maximum embedded PDF images to send to Gemma"),
 ):
     """
-    Public testing endpoint: extract text from image-based PDFs using Nova vision.
+    Public testing endpoint: extract text from image-based PDFs using Gemma vision.
 
     This endpoint intentionally does not require authentication so frontend teams can
     validate OCR/vision extraction before running full grading flows.
@@ -1611,7 +1614,7 @@ async def test_nova_vision_extract(
             temp_pdf.flush()
             temp_pdf_path = temp_pdf.name
 
-        extraction_result = await nova_grading_service.extract_text_from_pdf_with_vision(
+        extraction_result = await gemma_grading_service.extract_text_from_pdf_with_vision(
             pdf_path=temp_pdf_path,
             max_images=max_images,
         )

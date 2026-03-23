@@ -32,7 +32,7 @@ from schemas.assignments_schemas import (
 from Endpoints.auth import get_current_user
 from Endpoints.utils import _get_user_roles, check_user_role, ensure_user_role, check_user_has_any_role, ensure_user_has_any_role
 from Endpoints.kana_service import KanaService
-from services.nova_services.grading_services import nova_grading_service
+from services.gemma_services.grading_services import gemma_grading_service
 
 router = APIRouter(tags=["Assignment Image Upload, PDF Management & Bulk Upload"])
 
@@ -823,8 +823,8 @@ async def auto_grade_assignment(
             else:
                 raise Exception("No PDF binary data or file path available for grading")
             
-            # Call Nova grading service
-            grading_result = await nova_grading_service.grade_assignment_pdf(
+            # Call Gemma grading service
+            grading_result = await gemma_grading_service.grade_assignment_pdf(
                 pdf_path=pdf_path_for_grading,
                 assignment_title=session.assignment.title,
                 assignment_description=session.assignment.description,
