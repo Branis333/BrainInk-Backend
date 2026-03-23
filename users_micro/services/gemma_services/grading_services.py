@@ -19,6 +19,73 @@ class GemmaGradingService:
 	MIN_MEANINGFUL_WORDS = 6
 
 	@staticmethod
+	def _build_rubric_paragraph_prompts(
+		*,
+		assignment_title: str,
+		rubric: str,
+		max_points: int,
+		submission_image_count: int,
+		submission_text: str = "",
+	) -> Dict[str, str]:
+		system_prompt = (
+			"You are a strict, evidence-based teacher grading assistant with vision capability. "
+			"Grade using only the rubric and the student's submission evidence from attached images. "
+			"Return only valid JSON."
+		)
+
+		transcript_block = ""
+		if submission_text and submission_text.strip():
+			transcript_block = f"""
+SUBMISSION OCR TRANSCRIPT (cross-check only):
+{submission_text[:7000]}
+"""
+
+		user_prompt = f"""
+You are grading one student submission.
+
+INPUTS:
+- Assignment title: {assignment_title}
+- Rubric:
+{rubric}
+- Total max points: {max_points}
+- Attached submission page images: {submission_image_count}
+
+{transcript_block}
+
+CRITICAL REQUIREMENTS:
+1) For each rubric criterion, provide a short paragraph (2-4 sentences) explaining the awarded score.
+2) Use evidence from the student's actual work (equations, steps, values, statements, or missing work).
+3) Do NOT just restate the rubric language.
+4) If evidence is missing, explicitly say what is missing and why points were lost.
+5) Keep feedback concise and teacher-like.
+6) points_awarded must be between 0 and criterion max_points.
+7) total_points must equal the sum of criterion points_awarded.
+
+OUTPUT JSON SCHEMA (ONLY this object):
+{{
+  "criterion_feedback": [
+    {{
+      "criterion": "string",
+      "points_awarded": 0,
+      "max_points": 0,
+			"paragraph": "string",
+			"evidence_snippet": "string"
+    }}
+  ],
+  "total_points": 0,
+  "overall_conclusion": "string",
+  "confidence": 0
+}}
+
+STYLE:
+- Each paragraph should read like: what the student did, what is correct/incorrect, and why this score.
+- evidence_snippet should quote a short concrete element from the submission (formula, value, step, or statement).
+- overall_conclusion should be 2-4 sentences summarizing overall performance and one next-step recommendation.
+""".strip()
+
+		return {"system": system_prompt, "user": user_prompt}
+
+	@staticmethod
 	def _is_meaningful_submission_text(submission_text: str) -> bool:
 		if not submission_text or not submission_text.strip():
 			return False
@@ -372,5 +439,130 @@ Return ONLY this JSON schema:
 				"image_count": len(selected_images),
 				"total_images_available": len(all_images),
 			}
+
+	@staticmethod
+	async def grade_pdf_with_rubric_paragraphs(
+		pdf_path: str,
+		rubric: str,
+		assignment_title: str = "Assignment",
+		max_points: int = 100,
+		max_images: int = 8,
+	) -> Dict[str, Any]:
+		"""Return per-rubric scored paragraph feedback and overall conclusion for a PDF submission."""
+		try:
+			if not Path(pdf_path).exists():
+				return {"success": False, "error": "PDF file not found"}
+
+			if not rubric or not rubric.strip():
+				return {"success": False, "error": "Rubric is required"}
+
+			max_images = max(1, min(20, int(max_images)))
+			all_images = GemmaGradingService._extract_pdf_images(pdf_path)
+			if not all_images:
+				return {"success": False, "error": "Could not extract readable page images from PDF"}
+
+			submission_images = all_images[:max_images]
+
+			extraction_result = await GemmaGradingService.extract_text_from_pdf_with_vision(
+				pdf_path=pdf_path,
+				max_images=max_images,
+			)
+			submission_text = extraction_result.get("extracted_text", "") if extraction_result.get("success") else ""
+
+			prompts = GemmaGradingService._build_rubric_paragraph_prompts(
+				assignment_title=assignment_title,
+				rubric=rubric,
+				max_points=max_points,
+				submission_image_count=len(submission_images),
+				submission_text=submission_text,
+			)
+
+			payload = await gemma_service.generate_json_with_images(
+				system_prompt=prompts["system"],
+				user_prompt=prompts["user"],
+				images=submission_images,
+				max_tokens=2600,
+				temperature=0.2,
+			)
+
+			raw_items = payload.get("criterion_feedback") if isinstance(payload.get("criterion_feedback"), list) else []
+			criterion_feedback: List[Dict[str, Any]] = []
+			total_points = 0
+
+			for item in raw_items:
+				if not isinstance(item, dict):
+					continue
+
+				criterion = str(item.get("criterion", "")).strip()
+				paragraph = str(item.get("paragraph", "")).strip()
+				evidence_snippet = str(item.get("evidence_snippet", "")).strip()
+				if not criterion:
+					continue
+
+				try:
+					item_max = int(float(item.get("max_points", 0)))
+				except Exception:
+					item_max = 0
+				item_max = max(0, item_max)
+
+				try:
+					awarded = int(float(item.get("points_awarded", 0)))
+				except Exception:
+					awarded = 0
+				awarded = max(0, min(item_max if item_max > 0 else max_points, awarded))
+
+				total_points += awarded
+
+				criterion_feedback.append(
+					{
+						"criterion": criterion,
+						"points_awarded": awarded,
+						"max_points": item_max,
+						"paragraph": paragraph,
+						"evidence_snippet": evidence_snippet,
+						"score_display": f"{awarded}/{item_max}" if item_max > 0 else str(awarded),
+					}
+				)
+
+			if not criterion_feedback:
+				return {
+					"success": False,
+					"error": "Model did not return criterion-level rubric feedback",
+					"ai_model_used": gemma_service.model_id,
+				}
+
+			try:
+				model_total = int(float(payload.get("total_points", total_points)))
+			except Exception:
+				model_total = total_points
+			resolved_total = min(max_points, max(0, total_points if total_points != model_total else model_total))
+
+			try:
+				confidence = int(float(payload.get("confidence", 80)))
+			except Exception:
+				confidence = 80
+			confidence = max(0, min(100, confidence))
+
+			overall_conclusion = str(payload.get("overall_conclusion", "")).strip()
+			if not overall_conclusion:
+				overall_conclusion = "The submission shows partial mastery of the rubric criteria. Focus on the lower-scoring areas for improvement in the next attempt."
+
+			percentage = round((resolved_total / max_points) * 100, 2) if max_points > 0 else 0
+
+			return {
+				"success": True,
+				"criterion_feedback": criterion_feedback,
+				"total_points": resolved_total,
+				"max_points": max_points,
+				"percentage": percentage,
+				"overall_conclusion": overall_conclusion,
+				"confidence": confidence,
+				"submission_text": submission_text,
+				"image_count": len(submission_images),
+				"total_images_available": len(all_images),
+				"ai_model_used": gemma_service.model_id,
+			}
+		except Exception as e:
+			return {"success": False, "error": f"Gemma rubric paragraph grading error: {str(e)}"}
 
 gemma_grading_service = GemmaGradingService()

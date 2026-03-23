@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File, Form
 from typing import Annotated, List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
@@ -1395,15 +1395,12 @@ async def grade_class_assignments(
                 except Exception as extraction_error:
                     print(f"OCR extraction warning for student {student_id}: {str(extraction_error)}")
 
-                grading_result = await gemma_grading_service.grade_assignment_pdf(
+                grading_result = await gemma_grading_service.grade_pdf_with_rubric_paragraphs(
                     pdf_path=pdf_path_for_grading,
-                    assignment_title=assignment.title or "Assignment",
-                    assignment_description=assignment.description or "",
                     rubric=assignment.rubric or "Standard academic grading criteria",
+                    assignment_title=assignment.title or "Assignment",
                     max_points=assignment.max_points,
-                    feedback_type="both",
-                    student_name=student_name,
-                    submission_text=extracted_text,
+                    max_images=8,
                 )
 
                 if not grading_result.get("success", False):
@@ -1423,28 +1420,64 @@ async def grade_class_assignments(
                     })
                     continue
 
-                points_earned = grading_result.get("points_earned", 0)
+                points_earned = grading_result.get("total_points", grading_result.get("points_earned", 0))
+
                 percentage = grading_result.get("percentage", 0)
-                feedback = grading_result.get("feedback") or "Gemma grading completed without additional narrative feedback."
-                strengths = grading_result.get("strengths", [])
-                improvement_areas = grading_result.get("areas_for_improvement", [])
-                recommendations = grading_result.get("suggestions", [])
+                criterion_feedback = grading_result.get("criterion_feedback", []) if isinstance(grading_result.get("criterion_feedback"), list) else []
+                overall_conclusion = str(grading_result.get("overall_conclusion", "")).strip()
+
+                feedback = overall_conclusion or "Grading completed with rubric-level feedback."
+                strengths = []
+                improvement_areas = []
+                recommendations = []
                 confidence = grading_result.get("confidence", 80)
                 insufficient_submission_evidence = bool(grading_result.get("insufficient_submission_evidence", False))
 
-                detailed_feedback_parts = [feedback.strip()]
-                if isinstance(strengths, list) and strengths:
-                    detailed_feedback_parts.append(
-                        "\nStrengths:\n" + "\n".join([f"- {item}" for item in strengths if str(item).strip()])
-                    )
-                if isinstance(improvement_areas, list) and improvement_areas:
-                    detailed_feedback_parts.append(
-                        "\nAreas for improvement:\n" + "\n".join([f"- {item}" for item in improvement_areas if str(item).strip()])
-                    )
-                if isinstance(recommendations, list) and recommendations:
-                    detailed_feedback_parts.append(
-                        "\nActionable recommendations:\n" + "\n".join([f"- {item}" for item in recommendations if str(item).strip()])
-                    )
+                normalized_grading_criteria = []
+                detailed_feedback_parts = []
+                for item in criterion_feedback:
+                    if not isinstance(item, dict):
+                        continue
+                    category = str(item.get("criterion", "")).strip()
+                    paragraph = str(item.get("paragraph", "")).strip()
+                    evidence_snippet = str(item.get("evidence_snippet", "")).strip()
+                    try:
+                        item_score = int(float(item.get("points_awarded", 0)))
+                    except Exception:
+                        item_score = 0
+                    try:
+                        item_max = int(float(item.get("max_points", 0)))
+                    except Exception:
+                        item_max = 0
+
+                    if category:
+                        normalized_grading_criteria.append({
+                            "category": category,
+                            "score": item_score,
+                            "maxScore": item_max,
+                            "feedback": paragraph,
+                            "evidence_snippet": evidence_snippet,
+                            "score_display": item.get("score_display") or (f"{item_score}/{item_max}" if item_max > 0 else str(item_score)),
+                        })
+
+                        score_display = item.get("score_display") or (f"{item_score}/{item_max}" if item_max > 0 else str(item_score))
+                        paragraph_line = f"{category} ({score_display}): {paragraph}".strip()
+                        if evidence_snippet:
+                            paragraph_line += f" Evidence: \"{evidence_snippet}\""
+                        detailed_feedback_parts.append(paragraph_line)
+
+                        if item_max > 0 and item_score < item_max:
+                            improvement_areas.append(f"{category}: strengthen evidence and accuracy for this criterion")
+                        if item_max > 0 and item_score >= item_max:
+                            strengths.append(f"{category}: full points achieved")
+
+                if overall_conclusion:
+                    detailed_feedback_parts.append(f"Overall conclusion: {overall_conclusion}")
+
+                recommendations = [
+                    "Review low-scoring rubric criteria and correct calculation/logic gaps.",
+                    "Show each step clearly to improve rubric evidence and confidence.",
+                ]
                 detailed_feedback = "\n".join([part for part in detailed_feedback_parts if part]).strip()
 
                 existing_grade = db.query(Grade).filter(
@@ -1480,10 +1513,14 @@ async def grade_class_assignments(
                     "percentage": percentage,
                     "feedback": feedback,
                     "detailed_feedback": detailed_feedback,
+                    "overall_conclusion": overall_conclusion,
+                    "criterion_feedback": criterion_feedback,
+                    "grading_criteria": normalized_grading_criteria,
                     "strengths": strengths,
                     "improvement_areas": improvement_areas,
                     "recommendations": recommendations,
                     "extracted_text": extracted_text,
+                    "submission_text": grading_result.get("submission_text", extracted_text),
                     "confidence": confidence,
                     "insufficient_submission_evidence": insufficient_submission_evidence,
                     "success": True,
@@ -1637,6 +1674,77 @@ async def test_gemma_vision_extract(
             "image_count": extraction_result.get("image_count", 0),
             "total_images_available": extraction_result.get("total_images_available", 0),
             "ai_model_used": extraction_result.get("ai_model_used"),
+        }
+    finally:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            try:
+                os.unlink(temp_pdf_path)
+            except Exception:
+                pass
+
+
+@router.post("/grades/gemma-rubric-feedback-test")
+async def test_gemma_rubric_feedback(
+    pdf: UploadFile = File(..., description="Student PDF submission"),
+    rubric: str = Form(..., description="Rubric text with criteria and points"),
+    assignment_title: str = Form("Assignment", description="Optional assignment title"),
+    max_points: int = Form(100, description="Total assignment points"),
+    max_images: int = Form(8, description="Maximum PDF images to send to Gemma"),
+):
+    """
+    Public testing endpoint: return rubric-point paragraph feedback and conclusion using Gemma.
+
+    This endpoint intentionally does not require authentication for fast backend testing.
+    """
+    if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    if not rubric or not rubric.strip():
+        raise HTTPException(status_code=400, detail="Rubric is required")
+
+    max_points = max(1, min(1000, int(max_points)))
+    max_images = max(1, min(20, int(max_images)))
+
+    temp_pdf_path = None
+    try:
+        pdf_bytes = await pdf.read()
+        if not pdf_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf.write(pdf_bytes)
+            temp_pdf.flush()
+            temp_pdf_path = temp_pdf.name
+
+        feedback_result = await gemma_grading_service.grade_pdf_with_rubric_paragraphs(
+            pdf_path=temp_pdf_path,
+            rubric=rubric,
+            assignment_title=assignment_title,
+            max_points=max_points,
+            max_images=max_images,
+        )
+
+        if not feedback_result.get("success"):
+            return {
+                "success": False,
+                "filename": pdf.filename,
+                "error": feedback_result.get("error", "Gemma rubric feedback generation failed"),
+                "ai_model_used": feedback_result.get("ai_model_used"),
+            }
+
+        return {
+            "success": True,
+            "filename": pdf.filename,
+            "assignment_title": assignment_title,
+            "criterion_feedback": feedback_result.get("criterion_feedback", []),
+            "total_points": feedback_result.get("total_points", 0),
+            "max_points": feedback_result.get("max_points", max_points),
+            "percentage": feedback_result.get("percentage", 0),
+            "overall_conclusion": feedback_result.get("overall_conclusion", ""),
+            "confidence": feedback_result.get("confidence", 0),
+            "image_count": feedback_result.get("image_count", 0),
+            "total_images_available": feedback_result.get("total_images_available", 0),
+            "ai_model_used": feedback_result.get("ai_model_used"),
         }
     finally:
         if temp_pdf_path and os.path.exists(temp_pdf_path):

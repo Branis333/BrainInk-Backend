@@ -823,15 +823,13 @@ async def auto_grade_assignment(
             else:
                 raise Exception("No PDF binary data or file path available for grading")
             
-            # Call Gemma grading service
-            grading_result = await gemma_grading_service.grade_assignment_pdf(
+            # Call Gemma rubric paragraph grading service
+            grading_result = await gemma_grading_service.grade_pdf_with_rubric_paragraphs(
                 pdf_path=pdf_path_for_grading,
-                assignment_title=session.assignment.title,
-                assignment_description=session.assignment.description,
                 rubric=session.assignment.rubric,
                 max_points=session.assignment.max_points,
-                feedback_type=grade_request.feedback_type,
-                student_name=f"{student.user.fname} {student.user.lname}"
+                assignment_title=session.assignment.title,
+                max_images=8,
             )
 
             if temp_pdf_path:
@@ -846,8 +844,8 @@ async def auto_grade_assignment(
                     assignment_id=session.assignment_id,
                     student_id=pdf.student_id,
                     teacher_id=teacher.id,
-                    points_earned=grading_result.get("points_earned", 0),
-                    feedback=grading_result.get("feedback", ""),
+                    points_earned=grading_result.get("total_points", grading_result.get("points_earned", 0)),
+                    feedback=grading_result.get("overall_conclusion", grading_result.get("feedback", "")),
                     ai_generated=True,
                     ai_confidence=grading_result.get("confidence", 80)
                 )
@@ -874,6 +872,8 @@ async def auto_grade_assignment(
                     "max_points": session.assignment.max_points,
                     "percentage": round((grade.points_earned / session.assignment.max_points) * 100, 2),
                     "feedback": grade.feedback,
+                    "overall_conclusion": grading_result.get("overall_conclusion", ""),
+                    "criterion_feedback": grading_result.get("criterion_feedback", []),
                     "confidence": grade.ai_confidence,
                     "pdf_filename": pdf.pdf_filename
                 })
