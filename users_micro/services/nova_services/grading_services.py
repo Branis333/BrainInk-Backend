@@ -1,21 +1,86 @@
 from pathlib import Path
-from typing import Any, Dict, Optional
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Tuple
 
+from PIL import Image
 from pypdf import PdfReader
 
 from services.nova_services.nova_services import nova_service
 
 
 class NovaGradingService:
-	"""Minimal grading workflow using Bedrock Nova."""
+	"""Vision-first grading workflow using Bedrock Nova."""
+
+	MAX_IMAGES_PER_SUBMISSION = 12
+	MAX_IMAGE_DIMENSION = 1800
+	JPEG_QUALITY = 85
 
 	@staticmethod
-	def _extract_pdf_text(pdf_path: str) -> str:
+	def _normalize_image_bytes(raw_bytes: bytes, source_ext: str) -> Optional[Tuple[bytes, str]]:
+		if not raw_bytes:
+			return None
+
+		ext = (source_ext or "").lower().strip().lstrip(".")
+		if ext == "jpg":
+			ext = "jpeg"
+
+		# Keep PNG/JPEG as-is when reasonably sized.
+		if ext in {"jpeg", "png"} and len(raw_bytes) <= 4 * 1024 * 1024:
+			return raw_bytes, ext
+
+		try:
+			with Image.open(BytesIO(raw_bytes)) as img:
+				img = img.convert("RGB")
+				img.thumbnail((
+					NovaGradingService.MAX_IMAGE_DIMENSION,
+					NovaGradingService.MAX_IMAGE_DIMENSION,
+				))
+
+				out = BytesIO()
+				img.save(out, format="JPEG", quality=NovaGradingService.JPEG_QUALITY, optimize=True)
+				return out.getvalue(), "jpeg"
+		except Exception:
+			return None
+
+	@staticmethod
+	def _extract_pdf_images(pdf_path: str) -> List[Dict[str, Any]]:
 		reader = PdfReader(pdf_path)
-		pages = []
-		for page in reader.pages:
-			pages.append(page.extract_text() or "")
-		return "\n\n".join(pages).strip()
+		images: List[Dict[str, Any]] = []
+
+		for page_number, page in enumerate(reader.pages, start=1):
+			if len(images) >= NovaGradingService.MAX_IMAGES_PER_SUBMISSION:
+				break
+
+			page_images = list(page.images or [])
+			if not page_images:
+				continue
+
+			# Prefer larger embedded images first per page.
+			page_images.sort(key=lambda img: len(getattr(img, "data", b"")), reverse=True)
+
+			for image_index, image_file in enumerate(page_images, start=1):
+				if len(images) >= NovaGradingService.MAX_IMAGES_PER_SUBMISSION:
+					break
+
+				raw_bytes = getattr(image_file, "data", b"")
+				name = str(getattr(image_file, "name", ""))
+				ext = Path(name).suffix.lower().lstrip(".") if name else ""
+
+				normalized = NovaGradingService._normalize_image_bytes(raw_bytes, ext)
+				if not normalized:
+					continue
+
+				image_bytes, image_format = normalized
+				images.append(
+					{
+						"bytes": image_bytes,
+						"format": image_format,
+						"page_number": page_number,
+						"image_index": image_index,
+					}
+				)
+
+		return images
 
 	@staticmethod
 	def _build_prompts(
@@ -26,11 +91,11 @@ class NovaGradingService:
 		max_points: int,
 		feedback_type: str,
 		student_name: str,
-		submission_text: str,
+		submission_image_count: int,
 	) -> Dict[str, str]:
 		system_prompt = (
-			"You are a strict, fair, and evidence-based academic grading assistant. "
-			"Grade only from the provided assignment, rubric, and submission text. "
+			"You are a strict, fair, and evidence-based academic grading assistant with vision capability. "
+			"Grade only from the provided assignment, rubric, and submission images. "
 			"Return only valid JSON without markdown, comments, or extra keys."
 		)
 		user_prompt = f"""
@@ -48,12 +113,14 @@ GRADING CONTEXT:
 - Requested feedback type: {feedback_type}
 - Student name: {student_name}
 
-SUBMISSION:
-{submission_text}
+SUBMISSION VISUAL INPUT:
+- {submission_image_count} page image(s) are attached in this request.
+- Read and interpret handwritten/printed content directly from the images.
+- Extract relevant evidence from diagrams, equations, and written responses.
 
 GRADING METHOD (must follow):
 1) Identify the expected outcomes from the assignment + rubric.
-2) Evaluate what the submission explicitly demonstrates.
+2) Evaluate what the submission images explicitly demonstrate.
 3) Match demonstrated evidence to rubric criteria.
 4) Deduct points for inaccuracies, omissions, weak reasoning, or rubric misses.
 5) Keep scoring proportional to quality and completeness.
@@ -114,12 +181,10 @@ REQUIRED JSON SCHEMA:
 			if not Path(pdf_path).exists():
 				return {"success": False, "error": "PDF file not found"}
 
-			submission_text = NovaGradingService._extract_pdf_text(pdf_path)
-			if not submission_text:
-				return {"success": False, "error": "Could not extract readable text from PDF"}
+			submission_images = NovaGradingService._extract_pdf_images(pdf_path)
+			if not submission_images:
+				return {"success": False, "error": "Could not extract readable page images from PDF"}
 
-			# Keep prompt bounded for predictable latency/cost.
-			submission_text = submission_text[:12000]
 			prompts = NovaGradingService._build_prompts(
 				assignment_title=assignment_title,
 				assignment_description=assignment_description,
@@ -127,12 +192,14 @@ REQUIRED JSON SCHEMA:
 				max_points=max_points,
 				feedback_type=feedback_type,
 				student_name=student_name or "Anonymous",
-				submission_text=submission_text,
+				submission_image_count=len(submission_images),
 			)
 
-			payload = await nova_service.generate_json(
+			payload = await nova_service.generate_json_with_images(
 				system_prompt=prompts["system"],
 				user_prompt=prompts["user"],
+				images=submission_images,
+				max_tokens=2200,
 			)
 
 			points_earned = int(float(payload.get("points_earned", 0)))
@@ -157,6 +224,94 @@ REQUIRED JSON SCHEMA:
 			}
 		except Exception as e:
 			return {"success": False, "error": f"Nova grading error: {str(e)}"}
+
+	@staticmethod
+	async def extract_text_from_pdf_with_vision(
+		pdf_path: str,
+		max_images: int = 8,
+	) -> Dict[str, Any]:
+		"""Extract text from image-based PDF pages using Nova vision input."""
+		all_images: List[Dict[str, Any]] = []
+		selected_images: List[Dict[str, Any]] = []
+		try:
+			if not Path(pdf_path).exists():
+				return {"success": False, "error": "PDF file not found"}
+
+			all_images = NovaGradingService._extract_pdf_images(pdf_path)
+			if not all_images:
+				return {"success": False, "error": "Could not extract readable page images from PDF"}
+
+			max_images = max(1, min(20, int(max_images)))
+			selected_images = all_images[:max_images]
+
+			system_prompt = (
+				"You are a high-accuracy OCR and document understanding assistant. "
+				"Read all attached page images and extract visible text faithfully. "
+				"Return only valid JSON."
+			)
+			user_prompt = """
+Extract text from the attached document page images.
+
+Instructions:
+1) Read handwritten and printed content from all attached images.
+2) Preserve natural reading order as best as possible.
+3) Keep line breaks between major sections where possible.
+4) Do not invent missing text.
+5) If a region is unreadable, skip it instead of guessing.
+
+Return ONLY this JSON schema:
+{
+  "extracted_text": "string",
+  "confidence": 0
+}
+""".strip()
+
+			payload = await nova_service.generate_json_with_images(
+				system_prompt=system_prompt,
+				user_prompt=user_prompt,
+				images=selected_images,
+				max_tokens=2600,
+				temperature=0.0,
+			)
+
+			extracted_text = str(payload.get("extracted_text", "")).strip()
+			confidence = int(float(payload.get("confidence", 70)))
+			confidence = max(0, min(100, confidence))
+
+			if not extracted_text:
+				return {
+					"success": False,
+					"error": "Vision extraction returned empty text",
+					"image_count": len(selected_images),
+					"total_images_available": len(all_images),
+				}
+
+			return {
+				"success": True,
+				"extracted_text": extracted_text,
+				"text_length": len(extracted_text),
+				"confidence": confidence,
+				"image_count": len(selected_images),
+				"total_images_available": len(all_images),
+				"ai_model_used": nova_service.model_id,
+			}
+		except Exception as e:
+			error_text = str(e)
+			if "Unable to locate credentials" in error_text:
+				error_text = (
+					"Nova vision extraction error: Unable to locate AWS credentials. "
+					"Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and AWS_REGION "
+					"(and AWS_SESSION_TOKEN if using temporary credentials)."
+				)
+			else:
+				error_text = f"Nova vision extraction error: {error_text}"
+
+			return {
+				"success": False,
+				"error": error_text,
+				"image_count": len(selected_images),
+				"total_images_available": len(all_images),
+			}
 
 
 nova_grading_service = NovaGradingService()
