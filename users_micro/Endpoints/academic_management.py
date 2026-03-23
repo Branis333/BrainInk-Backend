@@ -1384,6 +1384,17 @@ async def grade_class_assignments(
                     })
                     continue
 
+                extracted_text = ""
+                try:
+                    extraction_result = await nova_grading_service.extract_text_from_pdf_with_vision(
+                        pdf_path=pdf_path_for_grading,
+                        max_images=8,
+                    )
+                    if extraction_result.get("success"):
+                        extracted_text = str(extraction_result.get("extracted_text", "")).strip()
+                except Exception as extraction_error:
+                    print(f"OCR extraction warning for student {student_id}: {str(extraction_error)}")
+
                 grading_result = await nova_grading_service.grade_assignment_pdf(
                     pdf_path=pdf_path_for_grading,
                     assignment_title=assignment.title or "Assignment",
@@ -1391,7 +1402,8 @@ async def grade_class_assignments(
                     rubric=assignment.rubric or "Standard academic grading criteria",
                     max_points=assignment.max_points,
                     feedback_type="both",
-                    student_name=student_name
+                    student_name=student_name,
+                    submission_text=extracted_text,
                 )
 
                 if not grading_result.get("success", False):
@@ -1414,19 +1426,25 @@ async def grade_class_assignments(
                 points_earned = grading_result.get("points_earned", 0)
                 percentage = grading_result.get("percentage", 0)
                 feedback = grading_result.get("feedback") or "Nova grading completed without additional narrative feedback."
+                strengths = grading_result.get("strengths", [])
+                improvement_areas = grading_result.get("areas_for_improvement", [])
+                recommendations = grading_result.get("suggestions", [])
                 confidence = grading_result.get("confidence", 80)
 
-                # Extract OCR text for modal display so frontend can show real submission content.
-                extracted_text = ""
-                try:
-                    extraction_result = await nova_grading_service.extract_text_from_pdf_with_vision(
-                        pdf_path=pdf_path_for_grading,
-                        max_images=8,
+                detailed_feedback_parts = [feedback.strip()]
+                if isinstance(strengths, list) and strengths:
+                    detailed_feedback_parts.append(
+                        "\nStrengths:\n" + "\n".join([f"- {item}" for item in strengths if str(item).strip()])
                     )
-                    if extraction_result.get("success"):
-                        extracted_text = str(extraction_result.get("extracted_text", "")).strip()
-                except Exception as extraction_error:
-                    print(f"OCR extraction warning for student {student_id}: {str(extraction_error)}")
+                if isinstance(improvement_areas, list) and improvement_areas:
+                    detailed_feedback_parts.append(
+                        "\nAreas for improvement:\n" + "\n".join([f"- {item}" for item in improvement_areas if str(item).strip()])
+                    )
+                if isinstance(recommendations, list) and recommendations:
+                    detailed_feedback_parts.append(
+                        "\nActionable recommendations:\n" + "\n".join([f"- {item}" for item in recommendations if str(item).strip()])
+                    )
+                detailed_feedback = "\n".join([part for part in detailed_feedback_parts if part]).strip()
 
                 existing_grade = db.query(Grade).filter(
                     Grade.assignment_id == assignment.id,
@@ -1460,10 +1478,10 @@ async def grade_class_assignments(
                     "max_points": assignment.max_points,
                     "percentage": percentage,
                     "feedback": feedback,
-                    "detailed_feedback": feedback,
-                    "strengths": grading_result.get("strengths", []),
-                    "improvement_areas": grading_result.get("areas_for_improvement", []),
-                    "recommendations": grading_result.get("suggestions", []),
+                    "detailed_feedback": detailed_feedback,
+                    "strengths": strengths,
+                    "improvement_areas": improvement_areas,
+                    "recommendations": recommendations,
                     "extracted_text": extracted_text,
                     "confidence": confidence,
                     "success": True,
