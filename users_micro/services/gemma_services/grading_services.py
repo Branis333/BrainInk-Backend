@@ -19,6 +19,77 @@ class GemmaGradingService:
 	MIN_MEANINGFUL_WORDS = 6
 
 	@staticmethod
+	def _parse_rubric_criteria_with_points(rubric: str) -> List[Dict[str, Any]]:
+		"""Best-effort parser for rubric rows so we can return deterministic criterion scores when evidence is insufficient."""
+		rows: List[Dict[str, Any]] = []
+		if not rubric or not rubric.strip():
+			return rows
+
+		for raw_line in rubric.splitlines():
+			line = raw_line.strip()
+			if not line:
+				continue
+			lower_line = line.lower()
+			if lower_line.startswith("category") or lower_line.startswith("criterion"):
+				continue
+
+			category = ""
+			max_points = 0
+
+			# Format: Criterion|5|description
+			if "|" in line:
+				parts = [p.strip() for p in line.split("|") if p.strip()]
+				if len(parts) >= 2:
+					category = parts[0]
+					try:
+						max_points = int(float(parts[1]))
+					except Exception:
+						max_points = 0
+
+			# Format: Criterion\t5\tDescription
+			if not category and "\t" in line:
+				parts = [p.strip() for p in line.split("\t") if p.strip()]
+				if len(parts) >= 2:
+					category = parts[0]
+					try:
+						max_points = int(float(parts[1]))
+					except Exception:
+						max_points = 0
+
+			# Format: Criterion ... Max: 7
+			if not category:
+				max_match = re.search(r"max\s*[:=]\s*(\d+(?:\.\d+)?)", line, flags=re.IGNORECASE)
+				if max_match:
+					try:
+						max_points = int(float(max_match.group(1)))
+					except Exception:
+						max_points = 0
+					category = re.sub(r"max\s*[:=]\s*\d+(?:\.\d+)?", "", line, flags=re.IGNORECASE).strip(" -:\t")
+
+			# Fallback: take first token group as category and look for first number as points.
+			if not category:
+				num_match = re.search(r"(\d+(?:\.\d+)?)", line)
+				if num_match:
+					try:
+						max_points = int(float(num_match.group(1)))
+					except Exception:
+						max_points = 0
+					category = line[:num_match.start()].strip(" -:\t") or line
+				else:
+					category = line
+
+			if category:
+				rows.append({
+					"criterion": category,
+					"max_points": max(0, max_points),
+				})
+
+		if not rows:
+			rows.append({"criterion": "Overall rubric", "max_points": 0})
+
+		return rows
+
+	@staticmethod
 	def _build_rubric_paragraph_prompts(
 		*,
 		assignment_title: str,
@@ -468,6 +539,39 @@ Return ONLY this JSON schema:
 				max_images=max_images,
 			)
 			submission_text = extraction_result.get("extracted_text", "") if extraction_result.get("success") else ""
+
+			# Deterministic guard for blank/garbage submissions to prevent inflated grades.
+			if not GemmaGradingService._is_meaningful_submission_text(submission_text):
+				rubric_rows = GemmaGradingService._parse_rubric_criteria_with_points(rubric)
+				criterion_feedback = []
+				for row in rubric_rows:
+					criterion = row.get("criterion", "Criterion")
+					row_max = int(row.get("max_points", 0) or 0)
+					criterion_feedback.append(
+						{
+							"criterion": criterion,
+							"points_awarded": 0,
+							"max_points": row_max,
+							"paragraph": "No meaningful evidence was detected in the submission for this rubric criterion. The uploaded work appears blank, unreadable, or unrelated to the task.",
+							"evidence_snippet": "No readable student evidence detected",
+							"score_display": f"0/{row_max}" if row_max > 0 else "0",
+						}
+					)
+
+				return {
+					"success": True,
+					"criterion_feedback": criterion_feedback,
+					"total_points": 0,
+					"max_points": max_points,
+					"percentage": 0,
+					"overall_conclusion": "The submission does not contain enough readable work to grade reliably. The student should re-upload a clear and complete submission.",
+					"confidence": 99,
+					"submission_text": submission_text,
+					"image_count": len(submission_images),
+					"total_images_available": len(all_images),
+					"ai_model_used": gemma_service.model_id,
+					"insufficient_submission_evidence": True,
+				}
 
 			prompts = GemmaGradingService._build_rubric_paragraph_prompts(
 				assignment_title=assignment_title,
