@@ -1479,6 +1479,9 @@ async def grade_class_assignments(
                     "Show each step clearly to improve rubric evidence and confidence.",
                 ]
                 detailed_feedback = "\n".join([part for part in detailed_feedback_parts if part]).strip()
+                persisted_feedback = detailed_feedback
+                if persisted_feedback:
+                    persisted_feedback = "[RUBRIC_FEEDBACK_V2]\n" + persisted_feedback
 
                 existing_grade = db.query(Grade).filter(
                     Grade.assignment_id == assignment.id,
@@ -1487,7 +1490,7 @@ async def grade_class_assignments(
 
                 if existing_grade:
                     existing_grade.points_earned = points_earned
-                    existing_grade.feedback = feedback
+                    existing_grade.feedback = persisted_feedback or feedback
                     existing_grade.teacher_id = teacher.id
                     existing_grade.graded_date = datetime.utcnow()
                     existing_grade.ai_generated = True
@@ -1498,7 +1501,7 @@ async def grade_class_assignments(
                         student_id=student_id,
                         teacher_id=teacher.id,
                         points_earned=points_earned,
-                        feedback=feedback,
+                        feedback=persisted_feedback or feedback,
                         ai_generated=True,
                         ai_confidence=confidence,
                     )

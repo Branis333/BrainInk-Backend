@@ -839,13 +839,39 @@ async def auto_grade_assignment(
                     pass
             
             if grading_result.get("success", False):
+                criterion_feedback = grading_result.get("criterion_feedback", []) if isinstance(grading_result.get("criterion_feedback"), list) else []
+                detailed_lines = []
+                for item in criterion_feedback:
+                    if not isinstance(item, dict):
+                        continue
+                    criterion = str(item.get("criterion", "")).strip()
+                    paragraph = str(item.get("paragraph", "")).strip()
+                    evidence = str(item.get("evidence_snippet", "")).strip()
+                    score_display = str(item.get("score_display", "")).strip()
+                    if criterion:
+                        line = f"{criterion}"
+                        if score_display:
+                            line += f" ({score_display})"
+                        if paragraph:
+                            line += f": {paragraph}"
+                        if evidence and evidence != "N/A":
+                            line += f" Evidence: \"{evidence}\""
+                        detailed_lines.append(line)
+                overall_conclusion = str(grading_result.get("overall_conclusion", "")).strip()
+                if overall_conclusion:
+                    detailed_lines.append(f"Overall conclusion: {overall_conclusion}")
+
+                persisted_feedback = "\n".join(detailed_lines).strip() or overall_conclusion or grading_result.get("feedback", "")
+                if persisted_feedback:
+                    persisted_feedback = "[RUBRIC_FEEDBACK_V2]\n" + persisted_feedback
+
                 # Create grade record
                 grade = Grade(
                     assignment_id=session.assignment_id,
                     student_id=pdf.student_id,
                     teacher_id=teacher.id,
                     points_earned=grading_result.get("total_points", grading_result.get("points_earned", 0)),
-                    feedback=grading_result.get("overall_conclusion", grading_result.get("feedback", "")),
+                    feedback=persisted_feedback,
                     ai_generated=True,
                     ai_confidence=grading_result.get("confidence", 80)
                 )
