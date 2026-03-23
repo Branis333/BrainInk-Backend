@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from fastapi import APIRouter, HTTPException, Depends, status, Query
+from fastapi import APIRouter, HTTPException, Depends, status, Query, UploadFile, File
 from typing import Annotated, List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
@@ -1551,6 +1551,63 @@ async def get_grade_class_target(
             "AWS_DEFAULT_REGION": (os.getenv("AWS_DEFAULT_REGION") or "").strip().strip('"').strip("'"),
         }
     }
+
+
+@router.post("/grades/nova-vision-extract-test")
+async def test_nova_vision_extract(
+    pdf: UploadFile = File(..., description="PDF to test vision-based text extraction"),
+    max_images: int = Query(8, ge=1, le=20, description="Maximum embedded PDF images to send to Nova"),
+):
+    """
+    Public testing endpoint: extract text from image-based PDFs using Nova vision.
+
+    This endpoint intentionally does not require authentication so frontend teams can
+    validate OCR/vision extraction before running full grading flows.
+    """
+    if not pdf.filename or not pdf.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+    temp_pdf_path = None
+    try:
+        pdf_bytes = await pdf.read()
+        if not pdf_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded PDF is empty")
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+            temp_pdf.write(pdf_bytes)
+            temp_pdf.flush()
+            temp_pdf_path = temp_pdf.name
+
+        extraction_result = await nova_grading_service.extract_text_from_pdf_with_vision(
+            pdf_path=temp_pdf_path,
+            max_images=max_images,
+        )
+
+        if not extraction_result.get("success"):
+            return {
+                "success": False,
+                "filename": pdf.filename,
+                "error": extraction_result.get("error", "Vision extraction failed"),
+                "image_count": extraction_result.get("image_count", 0),
+                "total_images_available": extraction_result.get("total_images_available", 0),
+            }
+
+        return {
+            "success": True,
+            "filename": pdf.filename,
+            "extracted_text": extraction_result.get("extracted_text", ""),
+            "text_length": extraction_result.get("text_length", 0),
+            "confidence": extraction_result.get("confidence", 0),
+            "image_count": extraction_result.get("image_count", 0),
+            "total_images_available": extraction_result.get("total_images_available", 0),
+            "ai_model_used": extraction_result.get("ai_model_used"),
+        }
+    finally:
+        if temp_pdf_path and os.path.exists(temp_pdf_path):
+            try:
+                os.unlink(temp_pdf_path)
+            except Exception:
+                pass
 
 # === ACADEMIC STATUS ENDPOINTS ===
 

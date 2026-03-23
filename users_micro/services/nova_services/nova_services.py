@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import boto3
 
@@ -11,7 +11,12 @@ class NovaService:
 	"""Minimal Bedrock Nova client focused on JSON responses."""
 
 	def __init__(self) -> None:
-		self.model_id = os.getenv("NOVA_MODEL_ID", "amazon.nova-lite-v1:0")
+		# Prefer inference profile for Nova because some accounts/regions do not support on-demand model IDs.
+		self.model_id = (
+			os.getenv("NOVA_INFERENCE_PROFILE_ID")
+			or os.getenv("NOVA_MODEL_ID")
+			or "eu.amazon.nova-lite-v1:0"
+		)
 		self.region = os.getenv("AWS_REGION", "eu-west-1")
 		self._client = None
 
@@ -34,6 +39,29 @@ class NovaService:
 			user_prompt,
 			max_tokens,
 			temperature,
+			None,
+		)
+		parsed = self._extract_json(text)
+		if not isinstance(parsed, dict):
+			raise ValueError("Nova response did not contain a valid JSON object")
+		return parsed
+
+	async def generate_json_with_images(
+		self,
+		*,
+		system_prompt: str,
+		user_prompt: str,
+		images: List[Dict[str, Any]],
+		max_tokens: int = 1800,
+		temperature: float = 0.2,
+	) -> Dict[str, Any]:
+		text = await asyncio.to_thread(
+			self._converse_text,
+			system_prompt,
+			user_prompt,
+			max_tokens,
+			temperature,
+			images,
 		)
 		parsed = self._extract_json(text)
 		if not isinstance(parsed, dict):
@@ -46,14 +74,37 @@ class NovaService:
 		user_prompt: str,
 		max_tokens: int,
 		temperature: float,
+		images: Optional[List[Dict[str, Any]]] = None,
 	) -> str:
+		content_blocks: List[Dict[str, Any]] = [{"text": user_prompt}]
+
+		if images:
+			for image in images:
+				image_bytes = image.get("bytes")
+				image_format = str(image.get("format", "jpeg")).lower().strip()
+				if image_format == "jpg":
+					image_format = "jpeg"
+				if image_format not in {"jpeg", "png", "gif", "webp"}:
+					continue
+				if not isinstance(image_bytes, (bytes, bytearray)):
+					continue
+
+				content_blocks.append(
+					{
+						"image": {
+							"format": image_format,
+							"source": {"bytes": bytes(image_bytes)},
+						}
+					}
+				)
+
 		resp = self._client_runtime().converse(
 			modelId=self.model_id,
 			system=[{"text": system_prompt}],
 			messages=[
 				{
 					"role": "user",
-					"content": [{"text": user_prompt}],
+					"content": content_blocks,
 				}
 			],
 			inferenceConfig={
