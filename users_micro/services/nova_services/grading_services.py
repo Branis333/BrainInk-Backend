@@ -92,12 +92,20 @@ class NovaGradingService:
 		feedback_type: str,
 		student_name: str,
 		submission_image_count: int,
+		submission_text: str = "",
 	) -> Dict[str, str]:
 		system_prompt = (
 			"You are a strict, fair, and evidence-based academic grading assistant with vision capability. "
 			"Grade only from the provided assignment, rubric, and submission images. "
 			"Return only valid JSON without markdown, comments, or extra keys."
 		)
+		transcript_block = ""
+		if submission_text and submission_text.strip():
+			transcript_block = f"""
+SUBMISSION OCR TRANSCRIPT (from the same PDF images):
+{submission_text[:6000]}
+"""
+
 		user_prompt = f"""
 You are grading one student submission.
 
@@ -118,13 +126,17 @@ SUBMISSION VISUAL INPUT:
 - Read and interpret handwritten/printed content directly from the images.
 - Extract relevant evidence from diagrams, equations, and written responses.
 
+{transcript_block}
+
 GRADING METHOD (must follow):
 1) Identify the expected outcomes from the assignment + rubric.
 2) Evaluate what the submission images explicitly demonstrate.
-3) Match demonstrated evidence to rubric criteria.
-4) Deduct points for inaccuracies, omissions, weak reasoning, or rubric misses.
-5) Keep scoring proportional to quality and completeness.
-6) If rubric details are vague, infer reasonable academic criteria from assignment description.
+3) Use the OCR transcript to cross-check details and improve consistency.
+4) If image and transcript disagree, prefer what is most visually supported by the images.
+5) Match demonstrated evidence to rubric criteria.
+6) Deduct points for inaccuracies, omissions, weak reasoning, or rubric misses.
+7) Keep scoring proportional to quality and completeness.
+8) If rubric details are vague, infer reasonable academic criteria from assignment description.
 
 SCORING CALIBRATION:
 - 90-100%: Excellent mastery, complete and accurate, strong reasoning.
@@ -176,6 +188,7 @@ REQUIRED JSON SCHEMA:
 		max_points: int,
 		feedback_type: str = "detailed",
 		student_name: Optional[str] = None,
+		submission_text: Optional[str] = None,
 	) -> Dict[str, Any]:
 		try:
 			if not Path(pdf_path).exists():
@@ -193,6 +206,7 @@ REQUIRED JSON SCHEMA:
 				feedback_type=feedback_type,
 				student_name=student_name or "Anonymous",
 				submission_image_count=len(submission_images),
+				submission_text=(submission_text or ""),
 			)
 
 			payload = await nova_service.generate_json_with_images(
