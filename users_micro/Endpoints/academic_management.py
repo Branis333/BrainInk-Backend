@@ -1430,6 +1430,7 @@ async def grade_class_assignments(
                 improvement_areas = grading_result.get("areas_for_improvement", [])
                 recommendations = grading_result.get("suggestions", [])
                 confidence = grading_result.get("confidence", 80)
+                insufficient_submission_evidence = bool(grading_result.get("insufficient_submission_evidence", False))
 
                 detailed_feedback_parts = [feedback.strip()]
                 if isinstance(strengths, list) and strengths:
@@ -1484,6 +1485,7 @@ async def grade_class_assignments(
                     "recommendations": recommendations,
                     "extracted_text": extracted_text,
                     "confidence": confidence,
+                    "insufficient_submission_evidence": insufficient_submission_evidence,
                     "success": True,
                 })
             except Exception as grade_error:
