@@ -1416,6 +1416,18 @@ async def grade_class_assignments(
                 feedback = grading_result.get("feedback") or "Nova grading completed without additional narrative feedback."
                 confidence = grading_result.get("confidence", 80)
 
+                # Extract OCR text for modal display so frontend can show real submission content.
+                extracted_text = ""
+                try:
+                    extraction_result = await nova_grading_service.extract_text_from_pdf_with_vision(
+                        pdf_path=pdf_path_for_grading,
+                        max_images=8,
+                    )
+                    if extraction_result.get("success"):
+                        extracted_text = str(extraction_result.get("extracted_text", "")).strip()
+                except Exception as extraction_error:
+                    print(f"OCR extraction warning for student {student_id}: {str(extraction_error)}")
+
                 existing_grade = db.query(Grade).filter(
                     Grade.assignment_id == assignment.id,
                     Grade.student_id == student_id
@@ -1452,6 +1464,7 @@ async def grade_class_assignments(
                     "strengths": grading_result.get("strengths", []),
                     "improvement_areas": grading_result.get("areas_for_improvement", []),
                     "recommendations": grading_result.get("suggestions", []),
+                    "extracted_text": extracted_text,
                     "confidence": confidence,
                     "success": True,
                 })
