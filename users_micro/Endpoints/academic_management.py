@@ -1342,6 +1342,13 @@ async def grade_class_assignments(
                 grading_results.append({
                     "student_id": student_id,
                     "student_name": student_name,
+                    "score": None,
+                    "points_earned": None,
+                    "max_points": assignment.max_points,
+                    "percentage": None,
+                    "feedback": "No PDF data found for student",
+                    "detailed_feedback": "No PDF data found for student",
+                    "confidence": 0,
                     "success": False,
                     "error": "No PDF data found for student"
                 })
@@ -1365,6 +1372,13 @@ async def grade_class_assignments(
                     grading_results.append({
                         "student_id": student_id,
                         "student_name": student_name,
+                        "score": None,
+                        "points_earned": None,
+                        "max_points": assignment.max_points,
+                        "percentage": None,
+                        "feedback": "No PDF binary data or file path available",
+                        "detailed_feedback": "No PDF binary data or file path available",
+                        "confidence": 0,
                         "success": False,
                         "error": "No PDF binary data or file path available"
                     })
@@ -1381,17 +1395,25 @@ async def grade_class_assignments(
                 )
 
                 if not grading_result.get("success", False):
+                    failure_reason = grading_result.get("error", "Nova grading failed")
                     grading_results.append({
                         "student_id": student_id,
                         "student_name": student_name,
+                        "score": None,
+                        "points_earned": None,
+                        "max_points": assignment.max_points,
+                        "percentage": None,
+                        "feedback": failure_reason,
+                        "detailed_feedback": failure_reason,
+                        "confidence": 0,
                         "success": False,
-                        "error": grading_result.get("error", "Nova grading failed")
+                        "error": failure_reason
                     })
                     continue
 
                 points_earned = grading_result.get("points_earned", 0)
                 percentage = grading_result.get("percentage", 0)
-                feedback = grading_result.get("feedback", "")
+                feedback = grading_result.get("feedback") or "Nova grading completed without additional narrative feedback."
                 confidence = grading_result.get("confidence", 80)
 
                 existing_grade = db.query(Grade).filter(
@@ -1437,6 +1459,13 @@ async def grade_class_assignments(
                 grading_results.append({
                     "student_id": student_id,
                     "student_name": student_name,
+                    "score": None,
+                    "points_earned": None,
+                    "max_points": assignment.max_points,
+                    "percentage": None,
+                    "feedback": str(grade_error),
+                    "detailed_feedback": str(grade_error),
+                    "confidence": 0,
                     "success": False,
                     "error": str(grade_error),
                 })
