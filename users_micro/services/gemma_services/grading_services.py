@@ -518,6 +518,8 @@ Return ONLY this JSON schema:
 		assignment_title: str = "Assignment",
 		max_points: int = 100,
 		max_images: int = 8,
+		submission_text: Optional[str] = None,
+		run_ocr_precheck: bool = True,
 	) -> Dict[str, Any]:
 		"""Return per-rubric scored paragraph feedback and overall conclusion for a PDF submission."""
 		try:
@@ -533,15 +535,17 @@ Return ONLY this JSON schema:
 				return {"success": False, "error": "Could not extract readable page images from PDF"}
 
 			submission_images = all_images[:max_images]
+			resolved_submission_text = str(submission_text or "").strip() if submission_text is not None else ""
 
-			extraction_result = await GemmaGradingService.extract_text_from_pdf_with_vision(
-				pdf_path=pdf_path,
-				max_images=max_images,
-			)
-			submission_text = extraction_result.get("extracted_text", "") if extraction_result.get("success") else ""
+			if run_ocr_precheck and not resolved_submission_text:
+				extraction_result = await GemmaGradingService.extract_text_from_pdf_with_vision(
+					pdf_path=pdf_path,
+					max_images=max_images,
+				)
+				resolved_submission_text = str(extraction_result.get("extracted_text", "")).strip() if extraction_result.get("success") else ""
 
 			# Deterministic guard for blank/garbage submissions to prevent inflated grades.
-			if not GemmaGradingService._is_meaningful_submission_text(submission_text):
+			if run_ocr_precheck and not GemmaGradingService._is_meaningful_submission_text(resolved_submission_text):
 				rubric_rows = GemmaGradingService._parse_rubric_criteria_with_points(rubric)
 				criterion_feedback = []
 				for row in rubric_rows:
@@ -566,7 +570,7 @@ Return ONLY this JSON schema:
 					"percentage": 0,
 					"overall_conclusion": "The submission does not contain enough readable work to grade reliably. The student should re-upload a clear and complete submission.",
 					"confidence": 99,
-					"submission_text": submission_text,
+					"submission_text": resolved_submission_text,
 					"image_count": len(submission_images),
 					"total_images_available": len(all_images),
 					"ai_model_used": gemma_service.model_id,
@@ -578,7 +582,7 @@ Return ONLY this JSON schema:
 				rubric=rubric,
 				max_points=max_points,
 				submission_image_count=len(submission_images),
-				submission_text=submission_text,
+				submission_text=resolved_submission_text,
 			)
 
 			payload = await gemma_service.generate_json_with_images(
@@ -661,7 +665,7 @@ Return ONLY this JSON schema:
 				"percentage": percentage,
 				"overall_conclusion": overall_conclusion,
 				"confidence": confidence,
-				"submission_text": submission_text,
+				"submission_text": resolved_submission_text,
 				"image_count": len(submission_images),
 				"total_images_available": len(all_images),
 				"ai_model_used": gemma_service.model_id,
