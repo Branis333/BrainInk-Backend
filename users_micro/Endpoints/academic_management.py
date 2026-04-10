@@ -4,9 +4,9 @@ from typing import Annotated, List
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 import traceback
-import traceback
 import os
 import tempfile
+import time
 
 from db.connection import db_dependency
 from models.study_area_models import (
@@ -1164,6 +1164,8 @@ async def grade_class_assignments(
 ):
     """
     Grade assignments for multiple students in a class using Gemma AI.
+    Supports chunked execution so callers can continue grading across multiple
+    requests without hitting Lambda timeout limits.
     """
     try:
         ensure_user_role(db, current_user["user_id"], UserRole.teacher)
@@ -1171,10 +1173,35 @@ async def grade_class_assignments(
         # Extract data from request
         subject_id = request.get("subject_id")
         assignment_id = request.get("assignment_id")
-        student_ids = request.get("student_ids", [])
+        raw_student_ids = request.get("student_ids", [])
         grade_all_students = request.get("grade_all_students", False)
+
+        student_ids = []
+        if isinstance(raw_student_ids, list):
+            for sid in raw_student_ids:
+                try:
+                    student_ids.append(int(sid))
+                except Exception:
+                    continue
+
+        try:
+            start_index = int(request.get("start_index", 0))
+        except Exception:
+            start_index = 0
+        start_index = max(0, start_index)
+
+        try:
+            max_students_per_request = int(request.get("max_students_per_request", 0))
+        except Exception:
+            max_students_per_request = 0
+        # Clamp batch size for predictable latency. 0 means process all remaining.
+        max_students_per_request = max(0, min(max_students_per_request, 10))
         
-        print(f"Grade class request: subject_id={subject_id}, assignment_id={assignment_id}, grade_all={grade_all_students}")
+        print(
+            "Grade class request: "
+            f"subject_id={subject_id}, assignment_id={assignment_id}, grade_all={grade_all_students}, "
+            f"start_index={start_index}, max_students_per_request={max_students_per_request or 'all'}"
+        )
         
         if not subject_id or not assignment_id:
             raise HTTPException(status_code=400, detail="Subject ID and Assignment ID are required")
@@ -1190,11 +1217,19 @@ async def grade_class_assignments(
         
         if not subject or not assignment:
             raise HTTPException(status_code=404, detail="Subject or assignment not found")
+
+        if assignment.subject_id != subject.id:
+            raise HTTPException(status_code=400, detail="Assignment does not belong to the selected subject")
+
+        if subject not in teacher.subjects:
+            raise HTTPException(status_code=403, detail="You are not assigned to this subject")
         
         print(f"Found subject: {subject.name}, assignment: {assignment.title}")
     
     except Exception as e:
         print(f"Error in grade_class_assignments: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise e
         if "OperationalError" in str(type(e)) or "server closed the connection" in str(e):
             # Database connection error - try to rollback and reconnect
             try:
@@ -1223,24 +1258,73 @@ async def grade_class_assignments(
     if grade_all_students:
         # Get all students in the subject with user data eagerly loaded
         students = db.query(Student).options(joinedload(Student.user)).filter(
-            Student.school_id == subject.school_id,
+            Student.subjects.any(Subject.id == subject_id),
             Student.is_active == True
         ).all()
+        students = sorted(students, key=lambda student: student.id)
     else:
         # Get specific students with user data eagerly loaded
         if not student_ids:
             raise HTTPException(status_code=400, detail="No students selected for grading")
         students = db.query(Student).options(joinedload(Student.user)).filter(
             Student.id.in_(student_ids),
+            Student.subjects.any(Subject.id == subject_id),
             Student.is_active == True
         ).all()
+
+        requested_order = {student_id: index for index, student_id in enumerate(student_ids)}
+        students = sorted(
+            students,
+            key=lambda student: requested_order.get(student.id, len(requested_order) + student.id),
+        )
     
     if not students:
         raise HTTPException(status_code=404, detail="No students found for grading")
+
+    total_students_requested = len(students)
+
+    if max_students_per_request > 0:
+        end_index = min(total_students_requested, start_index + max_students_per_request)
+    else:
+        end_index = total_students_requested
+
+    students_to_process = students[start_index:end_index]
+
+    if not students_to_process:
+        return {
+            "status": "success",
+            "message": "No students left to process for this grading request.",
+            "assignment": {
+                "id": assignment.id,
+                "title": assignment.title,
+                "description": assignment.description,
+                "rubric": assignment.rubric,
+                "max_points": assignment.max_points
+            },
+            "subject": {
+                "id": subject.id,
+                "name": subject.name
+            },
+            "grading_results": [],
+            "batch_summary": {
+                "successfully_graded": 0,
+                "failed_grading": 0,
+                "model": gemma_service.model_id,
+            },
+            "total_students": total_students_requested,
+            "students_graded": 0,
+            "students_failed": 0,
+            "start_index": start_index,
+            "end_index": start_index,
+            "next_index": start_index,
+            "has_more": False,
+            "processed_student_ids": [],
+            "remaining_student_ids": []
+        }
     
     # Collect student work data for Gemma processing.
     grading_data = []
-    for student in students:
+    for student in students_to_process:
         try:
             # Safely get student name
             student_name = f"{student.user.fname or ''} {student.user.lname or ''}".strip()
@@ -1249,35 +1333,36 @@ async def grade_class_assignments(
             
             # Get student's uploaded PDFs for this assignment (using the proper relationship)
             try:
-                student_pdfs = db.query(StudentPDF).filter(
+                latest_pdf = db.query(StudentPDF).filter(
                     StudentPDF.student_id == student.id,
                     StudentPDF.assignment_id == assignment_id
-                ).all()
+                ).order_by(StudentPDF.generated_date.desc()).first()
                 
-                print(f"Found {len(student_pdfs)} PDFs for student {student.id} (assignment {assignment_id})")
+                print(
+                    f"Found {'1 (latest)' if latest_pdf else '0'} PDF for student {student.id} (assignment {assignment_id})"
+                )
                 
             except Exception as pdf_error:
                 print(f"Error querying StudentPDF: {pdf_error}")
-                student_pdfs = []
+                latest_pdf = None
             
             # Create student work data - focus on PDFs since they have proper assignment relationships
-            if student_pdfs:
+            if latest_pdf:
                 student_work = {
                     "student_id": student.id,
                     "student_name": student_name,
                     "pdfs": [
                         {
-                            "id": pdf.id,
-                            "path": getattr(pdf, 'pdf_path', ''),
-                            "filename": getattr(pdf, 'pdf_filename', ''),
-                            "data": getattr(pdf, 'pdf_data', None)
+                            "id": latest_pdf.id,
+                            "path": getattr(latest_pdf, 'pdf_path', ''),
+                            "filename": getattr(latest_pdf, 'pdf_filename', ''),
+                            "data": getattr(latest_pdf, 'pdf_data', None)
                         }
-                        for pdf in student_pdfs
                     ],
                     "has_work": True
                 }
                 grading_data.append(student_work)
-                print(f"Added student {student_name} with {len(student_pdfs)} PDFs to grading data")
+                print(f"Added student {student_name} with latest PDF to grading data")
             else:
                 # Add student even without uploaded work so the response can explain what happened.
                 student_work = {
@@ -1302,7 +1387,7 @@ async def grade_class_assignments(
             # Reset database transaction state in case of previous errors
             db.rollback()
             
-            for student in students:
+            for student in students_to_process:
                 try:
                     student_name = f"{student.user.fname or ''} {student.user.lname or ''}".strip()
                     if not student_name:
@@ -1326,14 +1411,32 @@ async def grade_class_assignments(
         raise HTTPException(status_code=404, detail="No students found for grading")
     
     print(f"Total grading data entries: {len(grading_data)}")
+
+    grading_results = []
+    students_without_pdfs = [student_data for student_data in grading_data if not student_data.get("has_work", False)]
+    for student_data in students_without_pdfs:
+        note = student_data.get("note") or "No PDF work found - manual grading may be required"
+        grading_results.append({
+            "student_id": student_data.get("student_id"),
+            "student_name": student_data.get("student_name", "Unknown Student"),
+            "score": None,
+            "points_earned": None,
+            "max_points": assignment.max_points,
+            "percentage": None,
+            "feedback": note,
+            "detailed_feedback": note,
+            "confidence": 0,
+            "success": False,
+            "error": note
+        })
     
     # Process grading with Gemma for students that have PDFs.
     students_with_pdfs = [student for student in grading_data if student.get("has_work", False)]
     if students_with_pdfs:
         print(f"Processing {len(students_with_pdfs)} students with PDFs through Gemma")
-        grading_results = []
 
         for student_data in students_with_pdfs:
+            student_started_at = time.perf_counter()
             student_id = student_data.get("student_id")
             student_name = student_data.get("student_name", f"Student {student_id}")
             pdfs = student_data.get("pdfs", [])
@@ -1384,23 +1487,13 @@ async def grade_class_assignments(
                     })
                     continue
 
-                extracted_text = ""
-                try:
-                    extraction_result = await gemma_grading_service.extract_text_from_pdf_with_vision(
-                        pdf_path=pdf_path_for_grading,
-                        max_images=8,
-                    )
-                    if extraction_result.get("success"):
-                        extracted_text = str(extraction_result.get("extracted_text", "")).strip()
-                except Exception as extraction_error:
-                    print(f"OCR extraction warning for student {student_id}: {str(extraction_error)}")
-
                 grading_result = await gemma_grading_service.grade_pdf_with_rubric_paragraphs(
                     pdf_path=pdf_path_for_grading,
                     rubric=assignment.rubric or "Standard academic grading criteria",
                     assignment_title=assignment.title or "Assignment",
                     max_points=assignment.max_points,
-                    max_images=8,
+                    max_images=6,
+                    run_ocr_precheck=False,
                 )
 
                 if not grading_result.get("success", False):
@@ -1522,8 +1615,8 @@ async def grade_class_assignments(
                     "strengths": strengths,
                     "improvement_areas": improvement_areas,
                     "recommendations": recommendations,
-                    "extracted_text": extracted_text,
-                    "submission_text": grading_result.get("submission_text", extracted_text),
+                    "extracted_text": grading_result.get("submission_text", ""),
+                    "submission_text": grading_result.get("submission_text", ""),
                     "confidence": confidence,
                     "insufficient_submission_evidence": insufficient_submission_evidence,
                     "success": True,
@@ -1548,6 +1641,8 @@ async def grade_class_assignments(
                         os.unlink(temp_pdf_path)
                     except Exception:
                         pass
+                elapsed = time.perf_counter() - student_started_at
+                print(f"Processed grading attempt for student {student_id} in {elapsed:.2f}s")
 
         try:
             db.commit()
@@ -1555,35 +1650,30 @@ async def grade_class_assignments(
             db.rollback()
             raise HTTPException(status_code=500, detail=f"Failed to save grades: {str(commit_error)}")
 
-        return {
-            "status": "success",
-            "message": f"Successfully graded {len([r for r in grading_results if r.get('success')])} students with Gemma.",
-            "assignment": {
-                "id": assignment.id,
-                "title": assignment.title,
-                "description": assignment.description,
-                "rubric": assignment.rubric,
-                "max_points": assignment.max_points
-            },
-            "subject": {
-                "id": subject.id,
-                "name": subject.name
-            },
-            "grading_results": grading_results,
-            "batch_summary": {
-                "successfully_graded": len([r for r in grading_results if r.get("success")]),
-                "failed_grading": len([r for r in grading_results if not r.get("success")]),
-                "model": gemma_service.model_id,
-            },
-            "total_students": len(grading_data),
-            "students_graded": len([r for r in grading_results if r.get("success")]),
-            "students_failed": len([r for r in grading_results if not r.get("success")])
-        }
+    successful_count = len([result for result in grading_results if result.get("success")])
+    failed_count = len([result for result in grading_results if not result.get("success")])
+    processed_student_ids = [
+        student_data.get("student_id")
+        for student_data in grading_data
+        if student_data.get("student_id") is not None
+    ]
+    next_index = end_index
+    has_more = next_index < total_students_requested
+    remaining_student_ids = [student.id for student in students[next_index:]]
 
-    # Fallback response when no PDF submissions exist.
+    message = (
+        f"Processed batch students {start_index + 1}-{next_index} of {total_students_requested}. "
+        f"Success: {successful_count}, Failed: {failed_count}."
+    )
+    if not students_with_pdfs:
+        message = (
+            f"Processed batch students {start_index + 1}-{next_index} of {total_students_requested}. "
+            "No PDF submissions were available for this batch."
+        )
+
     return {
         "status": "success",
-        "message": f"Found {len(grading_data)} students, but no PDF submissions were available for Gemma grading",
+        "message": message,
         "assignment": {
             "id": assignment.id,
             "title": assignment.title,
@@ -1595,8 +1685,22 @@ async def grade_class_assignments(
             "id": subject.id,
             "name": subject.name
         },
+        "grading_results": grading_results,
         "students_data": grading_data,
-        "total_students": len(grading_data)
+        "batch_summary": {
+            "successfully_graded": successful_count,
+            "failed_grading": failed_count,
+            "model": gemma_service.model_id,
+        },
+        "total_students": total_students_requested,
+        "students_graded": successful_count,
+        "students_failed": failed_count,
+        "start_index": start_index,
+        "end_index": end_index,
+        "next_index": next_index,
+        "has_more": has_more,
+        "processed_student_ids": processed_student_ids,
+        "remaining_student_ids": remaining_student_ids
     }
 
 
