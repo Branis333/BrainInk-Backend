@@ -1576,6 +1576,14 @@ async def grade_class_assignments(
                 if persisted_feedback:
                     persisted_feedback = "[RUBRIC_FEEDBACK_V2]\n" + persisted_feedback
 
+                submission_text = grading_result.get("submission_text", "")
+                if isinstance(submission_text, bytes):
+                    submission_text = submission_text.decode("utf-8", errors="replace")
+                elif submission_text is None:
+                    submission_text = ""
+                else:
+                    submission_text = str(submission_text)
+
                 existing_grade = db.query(Grade).filter(
                     Grade.assignment_id == assignment.id,
                     Grade.student_id == student_id
@@ -1615,8 +1623,8 @@ async def grade_class_assignments(
                     "strengths": strengths,
                     "improvement_areas": improvement_areas,
                     "recommendations": recommendations,
-                    "extracted_text": grading_result.get("submission_text", ""),
-                    "submission_text": grading_result.get("submission_text", ""),
+                    "extracted_text": submission_text,
+                    "submission_text": submission_text,
                     "confidence": confidence,
                     "insufficient_submission_evidence": insufficient_submission_evidence,
                     "success": True,
@@ -1671,6 +1679,27 @@ async def grade_class_assignments(
             "No PDF submissions were available for this batch."
         )
 
+    # Never return raw PDF bytes in API responses.
+    # FastAPI will try to UTF-8 decode `bytes` during JSON encoding and can fail.
+    response_students_data = []
+    for student_data in grading_data:
+        safe_pdfs = []
+        for pdf in student_data.get("pdfs", []):
+            safe_pdfs.append({
+                "id": pdf.get("id"),
+                "path": pdf.get("path"),
+                "filename": pdf.get("filename"),
+                "has_data": bool(pdf.get("data")),
+            })
+
+        response_students_data.append({
+            "student_id": student_data.get("student_id"),
+            "student_name": student_data.get("student_name"),
+            "has_work": bool(student_data.get("has_work", False)),
+            "note": student_data.get("note"),
+            "pdfs": safe_pdfs,
+        })
+
     return {
         "status": "success",
         "message": message,
@@ -1686,7 +1715,7 @@ async def grade_class_assignments(
             "name": subject.name
         },
         "grading_results": grading_results,
-        "students_data": grading_data,
+        "students_data": response_students_data,
         "batch_summary": {
             "successfully_graded": successful_count,
             "failed_grading": failed_count,
