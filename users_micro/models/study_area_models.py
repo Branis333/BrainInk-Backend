@@ -238,6 +238,10 @@ class Grade(Base):
     graded_date = Column(DateTime, default=datetime.utcnow)
     is_active = Column(Boolean, default=True)
     
+    # Grade posting/review fields
+    is_posted = Column(Boolean, default=False)  # Whether grade has been shared with student
+    posted_date = Column(DateTime, nullable=True)  # When grade was posted to student
+    
     # AI Grading fields
     ai_generated = Column(Boolean, default=False)
     ai_confidence = Column(Integer, nullable=True)  # 1-100 confidence score

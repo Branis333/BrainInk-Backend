@@ -21,7 +21,8 @@ from schemas.subjects_schemas import (
 from schemas.assignments_schemas import (
     AssignmentCreate, AssignmentUpdate, AssignmentResponse, AssignmentWithGrades,
     GradeCreate, GradeUpdate, GradeResponse, StudentGradeReport, SubjectGradesSummary,
-    BulkGradeCreate, BulkGradeResponse, GradeCheckResponse, GradeDetailResponse
+    BulkGradeCreate, BulkGradeResponse, GradeCheckResponse, GradeDetailResponse,
+    PostGradesRequest, PostGradesResponse
 )
 from Endpoints.auth import get_current_user
 from schemas.direct_join_schemas import SchoolSelectionResponse
@@ -1731,6 +1732,89 @@ async def grade_class_assignments(
         "processed_student_ids": processed_student_ids,
         "remaining_student_ids": remaining_student_ids
     }
+
+
+@router.post("/grades/post", response_model=PostGradesResponse)
+async def post_grades(
+    request: PostGradesRequest,
+    db: db_dependency,
+    current_user: user_dependency
+):
+    """
+    Post/publish grades to students (mark grades as visible to students).
+    Teacher can post specific grades or all unposted grades for an assignment.
+    Once posted, students can view their grades in their dashboard.
+    """
+    try:
+        ensure_user_role(db, current_user["user_id"], UserRole.teacher)
+        
+        # Get assignment
+        assignment = db.query(Assignment).filter(Assignment.id == request.assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        # Verify teacher teaches this subject
+        teacher = db.query(Teacher).filter(Teacher.user_id == current_user["user_id"]).first()
+        if not teacher:
+            raise HTTPException(status_code=404, detail="Teacher profile not found")
+        
+        if assignment.subject not in teacher.subjects:
+            raise HTTPException(status_code=403, detail="You are not authorized to post grades for this assignment")
+        
+        # Get grades to post
+        if request.grade_ids:
+            # Post specific grades
+            grades_to_post = db.query(Grade).filter(
+                Grade.id.in_(request.grade_ids),
+                Grade.assignment_id == request.assignment_id,
+                Grade.is_posted == False  # Only post unposted grades
+            ).all()
+        else:
+            # Post all unposted grades for this assignment
+            grades_to_post = db.query(Grade).filter(
+                Grade.assignment_id == request.assignment_id,
+                Grade.is_posted == False
+            ).all()
+        
+        if not grades_to_post:
+            return PostGradesResponse(
+                success=True,
+                message="No unposted grades found for this assignment",
+                total_posted=0,
+                grades_posted=[],
+                assignment_id=request.assignment_id
+            )
+        
+        # Mark all selected grades as posted
+        posted_grade_ids = []
+        try:
+            for grade in grades_to_post:
+                grade.is_posted = True
+                grade.posted_date = datetime.utcnow()
+                posted_grade_ids.append(grade.id)
+            
+            db.commit()
+            
+            print(f"✅ Successfully posted {len(posted_grade_ids)} grades for assignment {request.assignment_id}")
+            
+            return PostGradesResponse(
+                success=True,
+                message=f"Successfully posted {len(posted_grade_ids)} grade(s) to students",
+                total_posted=len(posted_grade_ids),
+                grades_posted=posted_grade_ids,
+                assignment_id=request.assignment_id
+            )
+            
+        except Exception as commit_error:
+            db.rollback()
+            print(f"❌ Error posting grades: {str(commit_error)}")
+            raise HTTPException(status_code=500, detail=f"Failed to post grades: {str(commit_error)}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Unexpected error in post_grades: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @router.get("/grades/grade-class/target")

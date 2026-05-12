@@ -67,6 +67,8 @@ class GradeResponse(GradeBase):
     teacher_id: int
     graded_date: datetime
     is_active: bool
+    is_posted: bool = False  # Whether grade has been shared with student
+    posted_date: Optional[datetime] = None  # When grade was posted
     
     # Include related info
     assignment_title: Optional[str] = None
@@ -107,6 +109,8 @@ class GradeDetailResponse(BaseModel):
     percentage: float
     feedback: Optional[str] = None
     graded_date: Optional[str] = None
+    is_posted: bool = False  # Whether grade has been shared with student
+    posted_date: Optional[datetime] = None  # When grade was posted
     teacher_id: int
     ai_generated: Optional[bool] = False
     ai_confidence: Optional[int] = None
@@ -147,6 +151,23 @@ class BulkGradeResponse(BaseModel):
     total_processed: int = 0
     total_successful: int = 0
     total_failed: int = 0
+
+# --- Post Grades Schemas ---
+
+class PostGradesRequest(BaseModel):
+    """Schema for posting/publishing grades to students"""
+    assignment_id: int
+    grade_ids: Optional[List[int]] = None  # Specific grade IDs to post, if None post all unposted for assignment
+    subject_id: Optional[int] = None  # For audit/context
+
+class PostGradesResponse(BaseModel):
+    """Response from posting grades"""
+    success: bool
+    message: str
+    total_posted: int = 0
+    grades_posted: List[int] = []  # IDs of grades that were posted
+    assignment_id: int
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 # Update forward references
 AssignmentWithGrades.model_rebuild()
